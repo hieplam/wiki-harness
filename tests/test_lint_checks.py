@@ -5,6 +5,7 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -166,18 +167,63 @@ class CardCitations(unittest.TestCase):
         self.assertEqual(findings, [])
         self.assertEqual(check_card_citations(good_files(), schema), [])
 
-    def test_syntactically_invalid_id_pattern_does_not_crash_the_scan(self):
-        """load_schema() only validates rule *names*, never that a
-        'pattern' rule's string value is valid regex. A non-empty string
-        that is not valid regex (e.g. an unclosed character class) must not
-        reach re.compile() here unguarded -- that would crash the whole
-        lint run with an unhandled re.error. It falls back to
-        DEFAULT_CARD_ID_PATTERN, which matches this fixture's real card ids
-        fine."""
+    def test_syntactically_invalid_id_pattern_is_rejected_by_load_schema(self):
+        """load_schema() now validates that a 'pattern' rule's string value
+        is syntactically valid regex, so this schema fails closed there --
+        schema is None, and this check falls back to DEFAULT_CARD_ID_PATTERN
+        exactly like the schema=None case, never reaching an unguarded
+        re.compile() with the bad pattern."""
         schema, findings = load_schema(
             json.dumps({"keys": {"id": {"pattern": "^src-["}}}))
-        self.assertEqual(findings, [])
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
         self.assertEqual(check_card_citations(good_files(), schema), [])
+
+    def test_id_pattern_with_capturing_groups_extracts_whole_match(self):
+        """A schema id.pattern may declare ordinary regex capturing groups
+        (e.g. (\\d{4}) instead of the non-capturing (?:\\d{4})) -- an
+        entirely common way to author a pattern. re.findall() would return
+        tuples of the captured subgroups instead of the whole match,
+        silently misreporting every citation as unknown/unfiled. The scan
+        must extract the whole match regardless of how many groups the
+        pattern has."""
+        schema, findings = load_schema(json.dumps(
+            {"keys": {"id": {"pattern": r"^ai-(\d{4})-(\d{2})-(\d{2})-(\d{3})$"}}}))
+        self.assertEqual(findings, [])
+        files = {
+            "wiki/notes.md": "---\ntitle: Notes\ntopics: [x]\n---\n"
+                             "As discussed in ai-2024-01-15-001, the model shipped.\n",
+            "sources/cards/ai-2024-01-15-001.md": "---\nid: ai-2024-01-15-001\n---\n",
+        }
+        self.assertEqual(check_card_citations(files, schema), [])
+
+    def test_escaped_dollar_in_id_pattern_scans_without_crashing(self):
+        """A schema id.pattern ending in an escaped literal '\\$' (an odd
+        number of immediately preceding backslashes, not the regex
+        end-anchor) is a syntactically valid, non-degenerate pattern.
+        card_id_scan_pattern() must recognize the escape and leave it
+        untouched instead of blindly stripping the raw trailing '$'
+        character and dangling an unescaped backslash, which would crash
+        re.compile() here."""
+        schema, findings = load_schema(json.dumps(
+            {"keys": {"id": {"pattern": r"^src-\d{4}-\d{2}-\d{2}-\d{3}\$"}}}))
+        self.assertEqual(findings, [])
+        result = check_card_citations(good_files(), schema)
+        # The literal '$' in the pattern matches nothing in ordinary wiki
+        # prose, so the one real card is reported UNFILED -- proof the
+        # escape was preserved (not silently dropped) and nothing crashed.
+        self.assertEqual([f.code for f in result], ["UNFILED"])
+        self.assertEqual(result[0].path, "sources/cards/src-2024-01-15-001.md")
+
+    def test_uncompilable_derived_scan_pattern_fails_closed_not_crashes(self):
+        """check_card_citations() must not let re.compile() raise uncaught
+        for whatever the derived scan pattern turns out to be -- it fails
+        closed with a single CARD_SCHEMA finding and skips the scan,
+        rather than crashing the whole lint CLI with a traceback."""
+        with patch("lint.card_id_scan_pattern", return_value="[unclosed"):
+            findings = check_card_citations(good_files(), SCHEMA)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].code, "CARD_SCHEMA")
 
     def test_anchor_only_id_pattern_does_not_flag_every_page_and_card(self):
         """An id.pattern of '^$' is syntactically valid regex -- it is not

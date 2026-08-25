@@ -77,13 +77,29 @@ def check_card_citations(files, schema):
     DEFAULT_CARD_ID_PATTERN (card_id_pattern_from_schema) rather than
     reporting it a second time. The scan itself stays unanchored
     (card_id_scan_pattern) so a citation is found anywhere in wiki prose,
-    not just standing alone."""
-    card_id_re = re.compile(card_id_scan_pattern(card_id_pattern_from_schema(schema)))
+    not just standing alone.
+
+    The derived scan pattern is compiled inside a try/except: even a
+    schema id.pattern that itself compiles fine can, in principle, derive a
+    scan pattern that does not. Rather than crash the whole lint run, that
+    fails closed with a single CARD_SCHEMA finding and skips the scan."""
+    scan_pattern = card_id_scan_pattern(card_id_pattern_from_schema(schema))
+    try:
+        card_id_re = re.compile(scan_pattern)
+    except re.error as exc:
+        return [Finding("ERROR", "CARD_SCHEMA", SCHEMA_PATH,
+                        f"key 'id': rule 'pattern' cannot be used to scan "
+                        f"citations: {exc}")]
     findings = []
     card_ids = {PurePosixPath(p).stem for p in _cards(files)}
     cited = set()
     for path in sorted(_wiki_pages(files)):
-        for cid in sorted(set(card_id_re.findall(files[path]))):
+        # group(0) is the whole match regardless of how many capturing
+        # groups the schema's id.pattern declares -- findall() would return
+        # tuples of the captured subgroups instead whenever the pattern has
+        # any, silently misreporting every citation as unknown/unfiled.
+        found = {m.group(0) for m in card_id_re.finditer(files[path])}
+        for cid in sorted(found):
             cited.add(cid)
             if cid not in card_ids:
                 findings.append(Finding("ERROR", "CITE", path,

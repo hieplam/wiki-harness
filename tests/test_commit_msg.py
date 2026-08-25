@@ -90,6 +90,19 @@ class CustomCardIdPattern(unittest.TestCase):
             validate("ingest(src-2026-08-06-001): summary",
                      card_id_pattern=self.CUSTOM_PATTERN))
 
+    def test_ref_with_trailing_garbage_is_rejected_even_when_pattern_omits_dollar(self):
+        """A schema id.pattern may legally omit a trailing '$' (a valid,
+        non-degenerate pattern shape) -- validate() must still reject a ref
+        with trailing garbage after an otherwise-valid id: whole-value
+        matching must not depend on the schema pattern itself being
+        end-anchored."""
+        pattern = r"^ai-\d{4}-\d{2}-\d{2}-\d{3}"
+        self.assertEqual(
+            validate("ingest(ai-2024-01-15-001-EXTRA): summary", card_id_pattern=pattern),
+            InvalidSubjects.INGEST_REF_ERROR)
+        self.assertEqual(
+            validate("ingest(ai-2024-01-15-001): summary", card_id_pattern=pattern), [])
+
 
 class RootFlagSchemaDriven(unittest.TestCase):
     """main()'s new --root edge reads <root>/sources/cards/card-schema.json

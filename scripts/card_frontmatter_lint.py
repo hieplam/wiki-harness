@@ -82,7 +82,10 @@ def load_schema(text):
     against a schema we cannot trust. If a missing file meant "no rules",
     deleting it would be the cheapest way past a failing lint; if an unknown
     rule name were ignored, writing 'regex' instead of 'pattern' would retire a
-    check while the file still looked like it enforced one.
+    check while the file still looked like it enforced one; and a 'pattern'
+    rule whose non-empty string value is not syntactically valid regex would
+    otherwise raise, uncaught, inside _check_value()'s re.match() the moment a
+    card is checked against it.
     """
     if text is None:
         return None, [Finding("ERROR", "CARD_SCHEMA", SCHEMA_PATH,
@@ -107,6 +110,14 @@ def load_schema(text):
             findings.append(Finding("ERROR", "CARD_SCHEMA", SCHEMA_PATH,
                                     f"key '{key}': unknown rule '{unknown}' "
                                     f"- known rules: {known}"))
+        pattern = rules.get("pattern")
+        if isinstance(pattern, str) and pattern:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                findings.append(Finding("ERROR", "CARD_SCHEMA", SCHEMA_PATH,
+                                        f"key '{key}': rule 'pattern' is not "
+                                        f"a valid regex: {exc}"))
     if findings:
         return None, findings
     return keys, []
@@ -118,12 +129,21 @@ def card_id_scan_pattern(schema_id_pattern):
     trailing '$' if present. A pure string transform, not a second
     declaration of card-id shape -- lint.py uses this to find card ids
     embedded anywhere in wiki prose, while check_commit_msg.py's validate()
-    matches the anchored id.pattern itself, whole-value, unchanged."""
+    matches the anchored id.pattern itself, whole-value, unchanged.
+
+    The trailing '$' is stripped only when it is the regex end-anchor, not
+    when it is an escaped literal '\\$' -- an odd number of immediately
+    preceding backslashes means it is escaped, so it is left untouched
+    (stripping it would dangle an unescaped backslash and crash
+    re.compile() at the call site)."""
     pattern = schema_id_pattern
     if pattern.startswith("^"):
         pattern = pattern[1:]
     if pattern.endswith("$"):
-        pattern = pattern[:-1]
+        body = pattern[:-1]
+        trailing_backslashes = len(body) - len(body.rstrip("\\"))
+        if trailing_backslashes % 2 == 0:
+            pattern = pattern[:-1]
     return pattern
 
 

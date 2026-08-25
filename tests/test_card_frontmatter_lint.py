@@ -32,6 +32,22 @@ class CardIdScanPattern(unittest.TestCase):
         self.assertEqual(card_id_scan_pattern(r"src-\d{4}-\d{2}-\d{2}-\d{3}"),
                          r"src-\d{4}-\d{2}-\d{2}-\d{3}")
 
+    def test_escaped_trailing_dollar_is_not_stripped(self):
+        """An escaped literal '\\$' at the end of the pattern (an odd
+        number of immediately preceding backslashes) is not the regex
+        end-anchor and must be left untouched, not stripped as if it were
+        the anchor '$' -- stripping it would dangle an unescaped backslash
+        and crash re.compile() downstream."""
+        self.assertEqual(
+            card_id_scan_pattern(r"^src-\d{4}-\d{2}-\d{2}-\d{3}\$"),
+            r"src-\d{4}-\d{2}-\d{2}-\d{3}\$")
+
+    def test_even_backslashes_before_dollar_is_still_a_genuine_anchor(self):
+        """An even number of trailing backslashes means the last one is
+        itself an escaped literal backslash, so the following '$' is the
+        genuine end-anchor and must still be stripped."""
+        self.assertEqual(card_id_scan_pattern(r"^abc\\$"), r"abc\\")
+
 
 class CardIdPatternFromSchema(unittest.TestCase):
     """card_id_pattern_from_schema() must fall back to
@@ -66,17 +82,19 @@ class CardIdPatternFromSchema(unittest.TestCase):
         self.assertEqual(findings, [])
         self.assertEqual(card_id_pattern_from_schema(schema), DEFAULT_CARD_ID_PATTERN)
 
-    def test_syntactically_invalid_regex_pattern_falls_back_to_default(self):
-        """load_schema() validates rule *names*, never that a 'pattern'
-        rule's string *value* is a syntactically valid regex. A non-empty
+    def test_syntactically_invalid_regex_pattern_is_rejected_by_load_schema(self):
+        """load_schema() itself now validates that every 'pattern' rule
+        value is a syntactically valid regex (see LoadSchema.
+        test_invalid_regex_pattern_value_is_an_error below), so a non-empty
         string that is not valid regex (e.g. an unclosed character class)
-        must not be handed straight to re.match/re.compile at either call
-        site -- that would crash the process with an unhandled re.error
-        instead of producing a clean lint/commit-msg finding. It falls back
-        to DEFAULT_CARD_ID_PATTERN exactly like the other unusable shapes."""
+        never reaches card_id_pattern_from_schema() as part of a
+        'successfully loaded' schema -- it fails closed at load_schema()
+        itself, and card_id_pattern_from_schema() falls back to
+        DEFAULT_CARD_ID_PATTERN exactly like the schema=None case."""
         schema, findings = load_schema(
             json.dumps({"keys": {"id": {"pattern": "^src-["}}}))
-        self.assertEqual(findings, [])
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
         self.assertEqual(card_id_pattern_from_schema(schema), DEFAULT_CARD_ID_PATTERN)
 
     def test_anchor_only_pattern_falls_back_to_default(self):
@@ -130,6 +148,19 @@ class LoadSchema(unittest.TestCase):
         self.assertIsNone(schema)
         self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
         self.assertIn("regex", findings[0].message)
+
+    def test_invalid_regex_pattern_value_is_an_error(self):
+        """A 'pattern' rule whose string value is not syntactically valid
+        regex (e.g. an unclosed character class) must not be handed
+        straight to re.match/re.compile downstream -- _check_value()'s
+        per-card pattern check would otherwise crash with an unhandled
+        re.error. load_schema() fails closed exactly like an unknown rule
+        name: it never trusts a schema it cannot validate."""
+        schema, findings = load_schema(
+            json.dumps({"keys": {"id": {"pattern": "[unclosed"}}}))
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+        self.assertIn("pattern", findings[0].message)
 
 
 from card_frontmatter_lint import check_card

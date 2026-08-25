@@ -38,7 +38,7 @@ def validate(message: str, card_id_pattern: str = DEFAULT_CARD_ID_PATTERN) -> li
             f"got: '{subject}'"
         ]
     op, ref = m.group(1), m.group(3)
-    if op == "ingest" and (not ref or not re.match(card_id_pattern, ref)):
+    if op == "ingest" and (not ref or not re.fullmatch(card_id_pattern, ref)):
         return ["ingest commits require ref = card id, e.g. "
                 "'ingest(src-2026-08-06-001): summary'"]
     return []
