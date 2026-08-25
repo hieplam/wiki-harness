@@ -1,0 +1,8 @@
+fact: c3-303
+claim: "seeded-starters is implemented at the 5 SEEDED-class sources under templates/"
+code:
+  - templates/recipes.md
+  - templates/card-schema.default.json
+  - templates/VISION.skeleton.md
+  - templates/index.md.header.tmpl
+  - templates/gitignore.snippet

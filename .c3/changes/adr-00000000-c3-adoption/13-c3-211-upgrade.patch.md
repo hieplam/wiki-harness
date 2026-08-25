@@ -1,0 +1,58 @@
+---
+target: c3-211
+scope: whole
+type: component
+parent: c3-2
+category: feature
+title: upgrade
+---
+
+## Goal
+
+Bring an existing wiki instance forward to a newer (or, with `--allow-downgrade`, older) harness
+release in place, refusing before any write on drift or a dirty tree, and promoting atomically so
+a crash mid-run never corrupts the wiki owner's already-committed content.
+
+## Parent Fit
+
+| Field | Value |
+|---|---|
+| Container | c3-2 (lifecycle) |
+| Category | Feature — the business flow that reconciles the manifest (`c3-201`) against a fetched target version's templates (`c3-3`) and re-lints with `c3-1` before promoting |
+| Depends on | `c3-201` (manifest, steps 1/3/9/12: drift check, `--adopt-drift`, var read-back, rewrite); `c3-301`/`c3-302`/`c3-303` (templates container, step 9 re-render/re-copy into the scratch dir); `c3-1` (scripts, step 10 self-check by running `lint.py` against the scratch copy) |
+| Depended on by | Nothing inside `c3-2` |
+
+## Purpose
+
+Own `upgrade.py`'s standalone `--check` mode plus its 13 ordered `--apply`/dry-run steps
+(plan-v3 §3.2): clean-tree precondition, refuse-before-write drift check (including missing-path
+drift), downgrade guard, `--adopt-drift` handling, idempotency fast path, the dry-run/mutating
+split, fetch, MAJOR-removal guard, scratch-copy, re-render, scratch-lint self-check, atomic
+promote (`try`/`except` → `git checkout -- .` on any exception, no marker file, no `--resume`),
+manifest rewrite, and optional `--commit` with its own automatic rollback on a rejected commit.
+Non-goal: this component never repairs drift itself — every drift path either aborts (default) or
+is explicitly, permanently forked via `--adopt-drift`; there is no silent "just overwrite it"
+path.
+
+## Governance
+
+| Reference | Type | Governs | Precedence | Notes |
+|---|---|---|---|---|
+| rule-pure-core-impure-edge | rule | The drift/downgrade/idempotency/MAJOR-removal decisions are pure comparisons over manifest + fetched-version data; every fetch, scratch-copy, subprocess lint run, and the `try`/`except` promote itself are named edges | Hard | Same split `c3-201`/`c3-210` follow for their own pure/impure boundary |
+| rule-stdlib-only-py39 | rule | `upgrade.py` imports only the standard library, opens with `from __future__ import annotations` | Hard | Same floor every module in `scripts`/`lifecycle` targets |
+| ref-ownership-classes | ref | Step 9 only overwrites `managed`/`template`-role paths; `seeded`/`instance`/`instance-fork` paths are never touched, exactly per that ref's class rules | Hard | This component is the one place the ref's no-silent-overwrite guarantee is actually enforced at runtime |
+
+## Contract
+
+| Surface | Direction | Contract | Boundary | Evidence |
+|---|---|---|---|---|
+| `python3 wiki-harness/upgrade.py [<target-dir>] [--to vX.Y.Z] [--apply] [--adopt-drift <path> ...] [--allow-downgrade] [--commit] [--check]` | IN/OUT | Refuses before any write on a dirty tree, on unresolved drift, or on a downgrade without `--allow-downgrade`; without `--apply`, computes and reports but writes nothing | CLI process boundary | plan-v3.md §3.2 |
+| Atomic promote (step 11) | OUT | On any caught exception during promote, runs `git checkout -- .` and exits 1 with the exact quoted rollback message; on an uncatchable kill, leaves only an uncommitted dirty tree that the *next* invocation's clean-tree precondition catches — no marker file, no `--resume` flag, anywhere | Impure edge — subprocess `git checkout`, wrapped in `try`/`except` | plan-v3.md §3.2 step 11 |
+| Scratch-lint self-check (step 10) | OUT | Before any real-target write, `lint.py --root <scratch>` must exit 0 against the scratch copy; non-zero aborts with findings printed and the real target untouched | Impure edge — subprocess invocation of `c3-1`'s `lint.py` | plan-v3.md §3.2 step 10 |
+
+## Derived Materials
+
+| Material | Must derive from | Allowed variance | Evidence |
+|---|---|---|---|
+| `wiki-harness/upgrade.py` | This component's own `Contract` surfaces — plan-v3.md §3.2's ordered steps and exact quoted messages (clean-tree, drift, downgrade, promote-rollback), verbatim | None on message text; step ordering fixed | plan-v3.md §7 Phase 3 (T16-T24) |
+| `tests/test_upgrade.py` | This component's `Contract`'s post-condition surfaces, including the fatal-flaw-resolution test and the simplified try/except-rollback, downgrade-guard, and missing-file tests | Test framing may vary; asserted post-conditions may not | plan-v3.md §3.2 (Post-conditions) |

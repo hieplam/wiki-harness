@@ -1,0 +1,9 @@
+fact: rule-pure-core-impure-edge
+claim: "the pure/impure split this rule requires is followed across every scripts/ and lifecycle module"
+code:
+  - scripts/lint.py
+  - scripts/card_frontmatter_lint.py
+  - scripts/check_commit_msg.py
+  - manifest.py
+  - init.py
+  - upgrade.py

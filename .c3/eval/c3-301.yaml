@@ -1,0 +1,5 @@
+fact: c3-301
+claim: "template-vars is implemented at the 2 TEMPLATE-class sources under templates/"
+code:
+  - templates/AGENTS.root.md.tmpl
+  - templates/README.md.tmpl

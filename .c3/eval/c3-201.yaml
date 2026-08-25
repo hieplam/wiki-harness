@@ -1,0 +1,4 @@
+fact: c3-201
+claim: "manifest is implemented at manifest.py (compute_manifest/diff_manifest pure, plus a thin I/O edge)"
+code:
+  - manifest.py

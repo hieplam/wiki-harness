@@ -1,0 +1,4 @@
+fact: c3-103
+claim: "commit-msg-lint is implemented at scripts/check_commit_msg.py"
+code:
+  - scripts/check_commit_msg.py
