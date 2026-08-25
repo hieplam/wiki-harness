@@ -238,6 +238,37 @@ class RootFlagSchemaDriven(unittest.TestCase):
             result = self.run_cli(root, "ingest(src-2026-08-06-001): sample summary")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_unreadable_schema_falls_back_instead_of_crashing(self):
+        """A schema file that raises an OSError subclass other than
+        UnicodeDecodeError while being read (e.g. PermissionError) must not
+        crash the commit-msg hook with an unhandled traceback -- that would
+        block EVERY commit, including chore/lint/schema ones that cite no
+        card id at all. It falls back to DEFAULT_CARD_ID_PATTERN exactly
+        like every other schema-read problem this edge already swallows,
+        and 'ingest' refs are still validated against that default."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sources" / "cards").mkdir(parents=True)
+            schema_file = root / "sources" / "cards" / "card-schema.json"
+            schema_file.write_text(json.dumps({"keys": {}}), encoding="utf-8")
+            schema_file.chmod(0o000)
+            try:
+                chore_result = self.run_cli(root, "chore: routine housekeeping")
+                ingest_result = self.run_cli(
+                    root, "ingest(src-2026-08-06-001): sample summary")
+                bad_ingest_result = self.run_cli(
+                    root, "ingest(not-a-card-id): sample summary")
+            finally:
+                schema_file.chmod(0o644)
+            self.assertEqual(
+                chore_result.returncode, 0, chore_result.stdout + chore_result.stderr)
+            self.assertNotIn("Traceback", chore_result.stderr)
+            self.assertEqual(
+                ingest_result.returncode, 0, ingest_result.stdout + ingest_result.stderr)
+            self.assertNotIn("Traceback", ingest_result.stderr)
+            self.assertEqual(bad_ingest_result.returncode, 1)
+            self.assertNotIn("Traceback", bad_ingest_result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

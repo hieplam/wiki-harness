@@ -57,14 +57,17 @@ def main(argv: list[str]) -> int:
     schema_file = root / SCHEMA_PATH
     try:
         text = schema_file.read_text(encoding="utf-8-sig") if schema_file.is_file() else None
-    except UnicodeDecodeError:
-        # Treated exactly like a missing schema file: load_schema(None)
-        # reports it unreadable and card_id_pattern_from_schema() falls
-        # back to DEFAULT_CARD_ID_PATTERN, same as every other schema
-        # problem this edge already swallows rather than letting an
-        # unhandled exception reach every commit, not only 'ingest' ones.
-        text = None
-    schema, _ = load_schema(text)
+        schema, _ = load_schema(text)
+    except (OSError, ValueError):
+        # Any problem reading or parsing the schema file -- OSError covers
+        # PermissionError / IsADirectoryError / FileNotFoundError, ValueError
+        # covers UnicodeDecodeError / json.JSONDecodeError -- is treated
+        # exactly like a missing schema file: card_id_pattern_from_schema(None)
+        # falls back to DEFAULT_CARD_ID_PATTERN. This must never raise past
+        # the hook and block every commit, not only 'ingest' ones; lint.py's
+        # pre-commit run is where a broken schema is reported (CARD_SCHEMA),
+        # this hook only needs a usable id-ref matcher.
+        schema = None
     card_id_pattern = card_id_pattern_from_schema(schema)
     with open(msg_file, encoding="utf-8") as f:
         errors = validate(f.read(), card_id_pattern=card_id_pattern)
