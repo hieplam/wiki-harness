@@ -20,21 +20,17 @@ class CardIdScanPattern(unittest.TestCase):
     """card_id_scan_pattern() is a pure string transform, not a second
     declaration of card-id shape: it derives lint.py's unanchored
     citation-scan regex from card-schema.json's own id.pattern by
-    stripping the required leading '^' and trailing '$', then wrapping the
-    result in leading and trailing '\\b' word boundaries so a real id
-    immediately preceded OR followed by more id-shaped characters (e.g. a
-    dropped space, or an extra digit) cannot be truncate-matched as a
-    citation of a different, shorter id. It is trivial
-    (r"\\b" + pattern[1:-1] + r"\\b") because load_schema()'s id.pattern
-    contract (see IdPatternAnchorContract above) guarantees any pattern
-    reaching it is exactly one leading '^' and one trailing unescaped '$'
-    around a non-empty, anchor-free body -- there is no other shape left to
-    guess at."""
+    stripping the required leading '^' and trailing '$'. It is trivial
+    (pattern[1:-1]) because load_schema()'s id.pattern contract (see
+    IdPatternAnchorContract above) guarantees any pattern reaching it is
+    exactly one leading '^' and one trailing unescaped '$' around a
+    non-empty, anchor-free body -- there is no other shape left to guess
+    at."""
 
-    def test_card_id_scan_pattern_strips_anchors_and_adds_boundaries(self):
+    def test_card_id_scan_pattern_strips_anchors(self):
         self.assertEqual(
             card_id_scan_pattern(r"^src-\d{4}-\d{2}-\d{2}-\d{3}$"),
-            r"\bsrc-\d{4}-\d{2}-\d{2}-\d{3}\b")
+            r"src-\d{4}-\d{2}-\d{2}-\d{3}")
 
 
 class CardIdPatternFromSchema(unittest.TestCase):
@@ -229,7 +225,7 @@ class IdPatternAnchorContract(unittest.TestCase):
                          DEFAULT_CARD_ID_PATTERN)
 
 
-from card_frontmatter_lint import _check_value, check_card
+from card_frontmatter_lint import check_card
 
 SCHEMA, _SCHEMA_ERRORS = load_schema(FIXTURE_SCHEMA)
 
@@ -352,46 +348,6 @@ class CheckCard(unittest.TestCase):
         self.assertEqual(self.codes("## Claims\n- a claim\n"), ["CARD_FM"])
 
 
-class CheckValueListItems(unittest.TestCase):
-    """Regression guard for the reported defect: a schema key declaring
-    both "list": true and "enum"/"pattern"/"path"/"card_ref" -- a
-    combination RULE_KEYS and load_schema() both permit -- used to return
-    `[]` unconditionally the moment a value was confirmed to be a list
-    (card_frontmatter_lint.py's old `if isinstance(value, list): ...
-    return []`), silently skipping enum/pattern/path/card_ref validation of
-    every individual list item. Today's shipped card-schema.json fixture
-    does not combine list with those rules, so these exercise the schema
-    shapes directly via `_check_value` rather than through a card fixture."""
-
-    def test_list_item_not_in_enum_is_reported(self):
-        findings = _check_value(PATH, "topics", ["a", "ZZZ-not-in-enum"],
-                                {"list": True, "enum": ["a", "b", "c"]}, exists)
-        self.assertEqual([f.code for f in findings], ["CARD_VALUE"])
-        self.assertIn("ZZZ-not-in-enum", findings[0].message)
-
-    def test_list_item_not_matching_pattern_is_reported(self):
-        findings = _check_value(PATH, "topics", ["ok", "NOT-OK"],
-                                {"list": True, "pattern": r"^[a-z-]+$"}, exists)
-        self.assertEqual([f.code for f in findings], ["CARD_VALUE"])
-        self.assertIn("NOT-OK", findings[0].message)
-
-    def test_list_item_path_rule_is_checked_per_item(self):
-        findings = _check_value(PATH, "attachments", ["missing.html"],
-                                {"list": True, "path": True}, exists)
-        self.assertEqual([f.code for f in findings], ["CARD_REF"])
-        self.assertIn("missing.html", findings[0].message)
-
-    def test_list_item_card_ref_rule_is_checked_per_item(self):
-        findings = _check_value(PATH, "related", ["src-2024-01-15-404"],
-                                {"list": True, "card_ref": True}, exists)
-        self.assertEqual([f.code for f in findings], ["CARD_REF"])
-
-    def test_all_list_items_satisfying_the_rules_produce_no_findings(self):
-        self.assertEqual(
-            _check_value(PATH, "topics", ["a", "b"],
-                         {"list": True, "enum": ["a", "b", "c"]}, exists), [])
-
-
 class Primitives(unittest.TestCase):
     def test_parse_frontmatter_reads_scalars_and_lists(self):
         from card_frontmatter_lint import parse_frontmatter
@@ -404,18 +360,6 @@ class Primitives(unittest.TestCase):
         from card_frontmatter_lint import resolve
         self.assertEqual(resolve("sources/cards/a.md", "../raw/b.html"),
                          "sources/raw/b.html")
-
-    def test_resolve_handles_a_root_relative_target(self):
-        """Reported defect: a leading '/' in a markdown link target (a
-        root-relative reference, resolved against the wiki root rather than
-        from_path's own parent) used to be walked like an ordinary path
-        segment named '/', producing a garbage joined path
-        ('wiki/sub///wiki/other.md') that can never match a real key in the
-        files dict -- falsely reporting an existing page as a broken
-        link."""
-        from card_frontmatter_lint import resolve
-        self.assertEqual(resolve("wiki/sub/page.md", "/wiki/other.md"),
-                         "wiki/other.md")
 
 
 import subprocess

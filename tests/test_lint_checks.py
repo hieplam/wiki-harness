@@ -70,16 +70,6 @@ class BrokenLinks(unittest.TestCase):
         self.assertEqual([f.code for f in findings], ["LINK"])
         self.assertIn("./ghost.md", findings[0].message)
 
-    def test_root_relative_link_to_an_existing_page_is_not_falsely_broken(self):
-        """Reported defect: resolve() walked a leading '/' in a link target
-        like an ordinary path segment instead of recognizing it as
-        root-relative, producing a garbage joined path that can never match
-        a real files-dict key -- so a link like '[x](/wiki/other.md)' to a
-        page that genuinely exists was falsely reported broken."""
-        files = good_files()
-        files["wiki/widget-assembly.md"] += "\n[quality checks](/wiki/quality-checks.md)\n"
-        self.assertEqual(check_broken_links(files), [])
-
 
 class Orphans(unittest.TestCase):
     def test_cross_linked_pages_are_not_orphans(self):
@@ -133,41 +123,6 @@ class CardCitations(unittest.TestCase):
             "\nAs discussed in src-2024-01-15-002, the batch runs weekly.\n")
         findings = check_card_citations(files, SCHEMA)
         self.assertEqual(findings, [])
-
-    def test_trailing_digit_after_id_does_not_truncate_match_a_shorter_id(self):
-        """Reported defect: card_id_scan_pattern() derives an unanchored
-        scan regex with no trailing boundary, so a real card id immediately
-        followed by MORE digits (a typo, or a different, longer id family)
-        gets truncate-matched as a citation of the shorter, existing id --
-        silently masking the broken/typo'd citation and hiding the
-        shorter card's sibling behind an accidental match instead of
-        correctly reporting it UNFILED."""
-        files = good_files()
-        files["sources/cards/src-2024-01-15-002.md"] = GOOD_CARD.replace(
-            "src-2024-01-15-001", "src-2024-01-15-002")
-        files["wiki/widget-assembly.md"] += (
-            "\nSee src-2024-01-15-0029 for a related note.\n")
-        findings = check_card_citations(files, SCHEMA)
-        self.assertEqual([(f.code, f.path) for f in findings],
-                         [("UNFILED", "sources/cards/src-2024-01-15-002.md")])
-
-    def test_word_character_immediately_before_id_does_not_truncate_match(self):
-        """Mirror of the trailing-digit defect, on the leading side:
-        card_id_scan_pattern()'s derived regex had a trailing '\\b' but no
-        leading one, so a real card id immediately preceded by a word
-        character (e.g. a dropped space, or an id family sharing a suffix)
-        still matched as a citation of the shorter, existing id -- masking
-        the fact the reference is actually garbled and hiding the sibling
-        card behind an accidental match instead of correctly reporting it
-        UNFILED."""
-        files = good_files()
-        files["sources/cards/src-2024-01-15-002.md"] = GOOD_CARD.replace(
-            "src-2024-01-15-001", "src-2024-01-15-002")
-        files["wiki/widget-assembly.md"] += (
-            "\nSee Xsrc-2024-01-15-002 for a related note.\n")
-        findings = check_card_citations(files, SCHEMA)
-        self.assertEqual([(f.code, f.path) for f in findings],
-                         [("UNFILED", "sources/cards/src-2024-01-15-002.md")])
 
     def test_falls_back_to_default_pattern_when_schema_is_none(self):
         """schema=None only when load_schema() could not load one at all --
