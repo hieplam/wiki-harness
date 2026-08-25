@@ -20,19 +20,21 @@ class CardIdScanPattern(unittest.TestCase):
     """card_id_scan_pattern() is a pure string transform, not a second
     declaration of card-id shape: it derives lint.py's unanchored
     citation-scan regex from card-schema.json's own id.pattern by
-    stripping the required leading '^' and trailing '$', then appending a
-    trailing '\\b' word boundary so a real id immediately followed by more
-    id-shaped characters (e.g. an extra digit) cannot truncate-match as a
-    citation of the shorter id. It is trivial (pattern[1:-1] + r"\\b")
-    because load_schema()'s id.pattern contract (see IdPatternAnchorContract
-    above) guarantees any pattern reaching it is exactly one leading '^' and
-    one trailing unescaped '$' around a non-empty, anchor-free body -- there
-    is no other shape left to guess at."""
+    stripping the required leading '^' and trailing '$', then wrapping the
+    result in leading and trailing '\\b' word boundaries so a real id
+    immediately preceded OR followed by more id-shaped characters (e.g. a
+    dropped space, or an extra digit) cannot be truncate-matched as a
+    citation of a different, shorter id. It is trivial
+    (r"\\b" + pattern[1:-1] + r"\\b") because load_schema()'s id.pattern
+    contract (see IdPatternAnchorContract above) guarantees any pattern
+    reaching it is exactly one leading '^' and one trailing unescaped '$'
+    around a non-empty, anchor-free body -- there is no other shape left to
+    guess at."""
 
-    def test_card_id_scan_pattern_strips_anchors_and_adds_trailing_boundary(self):
+    def test_card_id_scan_pattern_strips_anchors_and_adds_boundaries(self):
         self.assertEqual(
             card_id_scan_pattern(r"^src-\d{4}-\d{2}-\d{2}-\d{3}$"),
-            r"src-\d{4}-\d{2}-\d{2}-\d{3}\b")
+            r"\bsrc-\d{4}-\d{2}-\d{2}-\d{3}\b")
 
 
 class CardIdPatternFromSchema(unittest.TestCase):
@@ -402,6 +404,18 @@ class Primitives(unittest.TestCase):
         from card_frontmatter_lint import resolve
         self.assertEqual(resolve("sources/cards/a.md", "../raw/b.html"),
                          "sources/raw/b.html")
+
+    def test_resolve_handles_a_root_relative_target(self):
+        """Reported defect: a leading '/' in a markdown link target (a
+        root-relative reference, resolved against the wiki root rather than
+        from_path's own parent) used to be walked like an ordinary path
+        segment named '/', producing a garbage joined path
+        ('wiki/sub///wiki/other.md') that can never match a real key in the
+        files dict -- falsely reporting an existing page as a broken
+        link."""
+        from card_frontmatter_lint import resolve
+        self.assertEqual(resolve("wiki/sub/page.md", "/wiki/other.md"),
+                         "wiki/other.md")
 
 
 import subprocess

@@ -64,8 +64,16 @@ def parse_frontmatter(text):
 
 
 def resolve(from_path, target):
-    parts = list(PurePosixPath(from_path).parent.parts)
-    for part in PurePosixPath(target).parts:
+    target_path = PurePosixPath(target)
+    # A root-relative target (leading '/') resolves against the wiki root,
+    # not from_path's own parent -- start with an empty path instead of
+    # walking up from from_path, and skip the root marker itself ('/' is one
+    # of PurePosixPath's own .parts entries for an absolute path) so it is
+    # never appended as a literal path segment.
+    parts = [] if target_path.is_absolute() else list(PurePosixPath(from_path).parent.parts)
+    for part in target_path.parts:
+        if part == "/":
+            continue
         if part == "..":
             if not parts:
                 return f"<out-of-root>/{target}"
@@ -193,29 +201,32 @@ def _violates_id_pattern_contract(pattern):
 
 def card_id_scan_pattern(schema_id_pattern):
     """Derive an unanchored substring-search pattern from the schema's
-    id.pattern: strip the required leading '^' and trailing '$', then
-    append a trailing '\\b' word boundary. Trivial and provably correct --
-    not a guess -- because load_schema()'s id.pattern contract (see its
-    docstring) guarantees any pattern this function is ever handed by its
-    real callers is exactly one leading '^' and one trailing unescaped '$'
-    around a non-empty, anchor-free body. A pure string transform, not a
-    second declaration of card-id shape -- lint.py uses this to find card
-    ids embedded anywhere in wiki prose, while check_commit_msg.py's
-    validate() matches the anchored id.pattern itself, whole-value,
-    unchanged.
+    id.pattern: strip the required leading '^' and trailing '$', then wrap
+    the result in leading and trailing '\\b' word boundaries. Trivial and
+    provably correct -- not a guess -- because load_schema()'s id.pattern
+    contract (see its docstring) guarantees any pattern this function is
+    ever handed by its real callers is exactly one leading '^' and one
+    trailing unescaped '$' around a non-empty, anchor-free body. A pure
+    string transform, not a second declaration of card-id shape -- lint.py
+    uses this to find card ids embedded anywhere in wiki prose, while
+    check_commit_msg.py's validate() matches the anchored id.pattern
+    itself, whole-value, unchanged.
 
-    The trailing '\\b' guards against truncate-matching: without it, a real
-    card id immediately followed by more id-shaped characters (e.g. an
-    extra digit from a typo, or a longer, unrelated id family sharing the
-    same prefix) would silently match as a citation of the shorter,
-    existing id -- masking the broken/typo'd citation and hiding the
-    shorter id's own card behind an accidental match instead of correctly
-    reporting it unfiled. Every schema this function's real callers ever
-    hand it ends its body in a '\\d' (a word character), so '\\b' there
-    requires the next character, if any, to be a non-word character --
+    The boundaries guard against truncate-matching on EITHER side: without
+    the trailing one, a real card id immediately followed by more
+    id-shaped characters (e.g. an extra digit from a typo, or a longer,
+    unrelated id family sharing the same prefix) would silently match as a
+    citation of the shorter, existing id; without the leading one, a real
+    card id immediately PRECEDED by a word character (e.g. a dropped space,
+    or an id family sharing a suffix) would do the same on the other side --
+    both mask a broken/garbled citation and hide the shorter id's own card
+    behind an accidental match instead of correctly reporting it unfiled.
+    Every schema this function's real callers ever hand it starts and ends
+    its body on a word character (letters/digits), so '\\b' on either side
+    requires the adjacent character, if any, to be a non-word character --
     exactly the boundary an id's own shape implies, with no separate guess
     about digits vs. letters needed."""
-    return schema_id_pattern[1:-1] + r"\b"
+    return r"\b" + schema_id_pattern[1:-1] + r"\b"
 
 
 def card_id_pattern_from_schema(schema):
