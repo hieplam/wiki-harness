@@ -7,7 +7,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 
 - [x] P0.1 — Bootstrap the wiki-harness repo skeleton
 - [x] P0.2 — Run C3 onboarding on wiki-harness
-- [ ] P0.3 — Add the library's own test runner wrapper
+- [x] P0.3 — Add the library's own test runner wrapper
 
 ## P1 — Extract code (library-only, verbatim port + minimal tested fixes)
 
