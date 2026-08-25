@@ -1,0 +1,4 @@
+fact: c3-401
+claim: "fixture is implemented at tests/fixtures/sample-wiki/"
+code:
+  - tests/fixtures/sample-wiki/**

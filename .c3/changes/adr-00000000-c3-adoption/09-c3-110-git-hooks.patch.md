@@ -1,0 +1,50 @@
+---
+target: c3-110
+scope: whole
+type: component
+parent: c3-1
+category: feature
+title: git-hooks
+---
+
+## Goal
+
+Wire `c3-101`'s wiki-wide lint and `c3-103`'s commit-message check into every commit a wiki
+instance's contributors make, so a lint or format violation is caught before the commit lands.
+
+## Parent Fit
+
+| Field | Value |
+|---|---|
+| Container | c3-1 (scripts) |
+| Category | Feature — this component is the business flow that assembles the two Foundation checks (`c3-101`, `c3-103`) into "does this commit pass" |
+| Depends on | `c3-101` (lint-core, `pre-commit` execs `python3 scripts/lint.py`); `c3-103` (commit-msg-lint, `commit-msg` execs `python3 scripts/check_commit_msg.py "$1"`) |
+| Depended on by | Nothing inside `c3-1`; `c3-2`'s `init`/`upgrade` (`c3-210`/`c3-211`) stamp these two files verbatim into every wiki instance and set `core.hooksPath = .githooks` |
+
+## Purpose
+
+Own `githooks/pre-commit` and `githooks/commit-msg`: two POSIX-shell one-liners, each an `exec`
+into the corresponding Python script with the git-provided argument (`commit-msg` receives the
+message file path as `$1`). Non-goal: this component contains zero validation logic itself — a
+finding, an exit code, and a message are entirely `c3-101`'s and `c3-103`'s output; these hooks
+only ever wire and exit-propagate.
+
+## Governance
+
+| Reference | Type | Governs | Precedence | Notes |
+|---|---|---|---|---|
+| ref-verbatim-port | ref | Both hook scripts are forked byte-identical from ogp-wiki HEAD `f8b43fb`, zero deltas | Hard | This component's `Contract` surfaces are the exact behaviour the ref requires stay byte-identical |
+| rule-pure-core-impure-edge | rule | N.A - shell wrapper, no pure/impure split; the two scripts it execs already carry the split | N.A - not Python | Governance is recorded for completeness; the rule's actual enforcement point is `c3-101`/`c3-103` |
+
+## Contract
+
+| Surface | Direction | Contract | Boundary | Evidence |
+|---|---|---|---|---|
+| `.githooks/pre-commit` | IN/OUT | `exec python3 "$(git rev-parse --show-toplevel)/scripts/lint.py"`; the hook's own exit code is exactly `lint.py`'s | Shell process boundary — git invokes this on every commit attempt | `/Users/hip/repo/ogp-wiki/.githooks/pre-commit` |
+| `.githooks/commit-msg` | IN/OUT | `exec python3 "$(git rev-parse --show-toplevel)/scripts/check_commit_msg.py" "$1"`; the hook's own exit code is exactly `check_commit_msg.py`'s | Shell process boundary — git invokes this on every commit attempt, passing the message-file path as `$1` | `/Users/hip/repo/ogp-wiki/.githooks/commit-msg` |
+
+## Derived Materials
+
+| Material | Must derive from | Allowed variance | Evidence |
+|---|---|---|---|
+| `wiki-harness/githooks/pre-commit`, `wiki-harness/githooks/commit-msg` | `/Users/hip/repo/ogp-wiki/.githooks/pre-commit`, `/Users/hip/repo/ogp-wiki/.githooks/commit-msg` at HEAD `f8b43fb`, byte-for-byte, per this component's own Contract surfaces | None — zero sanctioned deltas for this component | plan-v3.md §7 Phase 1 (T01) |

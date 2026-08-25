@@ -1,0 +1,4 @@
+fact: c3-210
+claim: "init is implemented at init.py's 16 ordered steps (plan-v3.md §3.1)"
+code:
+  - init.py

@@ -1,0 +1,4 @@
+fact: c3-102
+claim: "card-lint is implemented at scripts/card_frontmatter_lint.py"
+code:
+  - scripts/card_frontmatter_lint.py

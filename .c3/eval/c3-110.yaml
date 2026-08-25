@@ -1,0 +1,5 @@
+fact: c3-110
+claim: "git-hooks is implemented at githooks/pre-commit and githooks/commit-msg, byte-identical to ogp-wiki's .githooks/*"
+code:
+  - githooks/pre-commit
+  - githooks/commit-msg
