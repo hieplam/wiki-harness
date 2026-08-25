@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import sys
 import unittest
@@ -8,7 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from card_frontmatter_lint import SCHEMA_PATH, load_schema
 
 ROOT = Path(__file__).resolve().parent.parent
-REAL_SCHEMA = (ROOT / SCHEMA_PATH).read_text(encoding="utf-8")
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample-wiki"
+FIXTURE_SCHEMA = (FIXTURE / SCHEMA_PATH).read_text(encoding="utf-8")
 
 
 class LoadSchema(unittest.TestCase):
@@ -16,7 +19,7 @@ class LoadSchema(unittest.TestCase):
     trusted must block every card rather than wave them through."""
 
     def test_real_schema_loads(self):
-        schema, findings = load_schema(REAL_SCHEMA)
+        schema, findings = load_schema(FIXTURE_SCHEMA)
         self.assertEqual(findings, [])
         self.assertTrue(schema["id"]["required"])
         self.assertIn("session", schema["origin"]["enum"])
@@ -46,24 +49,24 @@ class LoadSchema(unittest.TestCase):
 
 from card_frontmatter_lint import check_card
 
-SCHEMA, _SCHEMA_ERRORS = load_schema(REAL_SCHEMA)
+SCHEMA, _SCHEMA_ERRORS = load_schema(FIXTURE_SCHEMA)
 
-PATH = "sources/cards/src-2026-08-06-001.md"
+PATH = "sources/cards/src-2024-01-15-001.md"
 CARD = """---
-id: src-2026-08-06-001
-date: 2026-08-06
+id: src-2024-01-15-001
+date: 2024-01-15
 origin: session
 trust: stated
-topics: [pay-run]
+topics: [widget-assembly]
 ---
 ## Claims
 - a claim
 """
 
 TREE = {
-    "sources/cards/src-2026-08-06-001.md",
-    "sources/cards/src-2026-08-06-002.md",
-    "sources/raw/src-2026-08-06-001-artifact.html",
+    "sources/cards/src-2024-01-15-001.md",
+    "sources/cards/src-2024-01-15-002.md",
+    "sources/raw/src-2024-01-15-001-artifact.html",
 }
 
 
@@ -113,7 +116,7 @@ class CheckCard(unittest.TestCase):
         self.assertIn("trust", findings[0].message)
 
     def test_empty_topics_list_counts_as_missing(self):
-        self.assertEqual(self.codes(card(replace=("topics: [pay-run]", "topics: []"))),
+        self.assertEqual(self.codes(card(replace=("topics: [widget-assembly]", "topics: []"))),
                          ["CARD_KEY"])
 
     def test_bad_origin_enum(self):
@@ -123,23 +126,23 @@ class CheckCard(unittest.TestCase):
         self.assertIn("confluence", findings[0].message)  # lists the legal values
 
     def test_bad_date_pattern(self):
-        self.assertEqual(self.codes(card(replace=("date: 2026-08-06", "date: 06/08/2026"))),
+        self.assertEqual(self.codes(card(replace=("date: 2024-01-15", "date: 15/01/2024"))),
                          ["CARD_VALUE"])
 
     def test_scalar_where_a_list_is_required(self):
-        self.assertEqual(self.codes(card(replace=("topics: [pay-run]", "topics: pay-run"))),
+        self.assertEqual(self.codes(card(replace=("topics: [widget-assembly]", "topics: widget-assembly"))),
                          ["CARD_VALUE"])
 
     def test_id_must_match_the_filename(self):
-        """src-2026-08-06-999 satisfies the pattern, so only the filename rule
+        """src-2024-01-15-999 satisfies the pattern, so only the filename rule
         can catch it - which is the point of having both rules."""
-        findings = check_card(PATH, card(replace=("id: src-2026-08-06-001",
-                                                  "id: src-2026-08-06-999")),
+        findings = check_card(PATH, card(replace=("id: src-2024-01-15-001",
+                                                  "id: src-2024-01-15-999")),
                               SCHEMA, exists)
         self.assertEqual([f.code for f in findings], ["CARD_REF"])
 
     def test_id_that_is_not_a_card_id_at_all(self):
-        self.assertEqual(self.codes(card(replace=("id: src-2026-08-06-001", "id: banana")),
+        self.assertEqual(self.codes(card(replace=("id: src-2024-01-15-001", "id: banana")),
                                     path="sources/cards/banana.md"),
                          ["CARD_VALUE"])
 
@@ -148,19 +151,19 @@ class CheckCard(unittest.TestCase):
 
     def test_raw_pointer_that_exists_is_clean(self):
         self.assertEqual(
-            self.codes(card(add="raw: ../raw/src-2026-08-06-001-artifact.html\n")), [])
+            self.codes(card(add="raw: ../raw/src-2024-01-15-001-artifact.html\n")), [])
 
     def test_parent_must_point_at_a_real_card(self):
-        self.assertEqual(self.codes(card(add="parent: src-2026-08-06-404\n")), ["CARD_REF"])
+        self.assertEqual(self.codes(card(add="parent: src-2024-01-15-404\n")), ["CARD_REF"])
 
     def test_parent_that_exists_is_clean(self):
-        self.assertEqual(self.codes(card(add="parent: src-2026-08-06-002\n")), [])
+        self.assertEqual(self.codes(card(add="parent: src-2024-01-15-002\n")), [])
 
     def test_provenance_keys_are_accepted(self):
         self.assertEqual(self.codes(card(add="source_id: 4960321655\n"
                                              "source_url: https://example.com/x\n"
                                              "source_version: 16\n"
-                                             "source_space: OGP\n"
+                                             "source_space: ENG\n"
                                              "source_parent_id: 4952719362\n")), [])
 
     def test_missing_frontmatter(self):
@@ -172,8 +175,8 @@ class Primitives(unittest.TestCase):
         from card_frontmatter_lint import parse_frontmatter
         meta, errors = parse_frontmatter(CARD)
         self.assertEqual(errors, [])
-        self.assertEqual(meta["id"], "src-2026-08-06-001")
-        self.assertEqual(meta["topics"], ["pay-run"])
+        self.assertEqual(meta["id"], "src-2024-01-15-001")
+        self.assertEqual(meta["topics"], ["widget-assembly"])
 
     def test_resolve_walks_up(self):
         from card_frontmatter_lint import resolve
@@ -193,14 +196,15 @@ class Cli(unittest.TestCase):
             [sys.executable, str(ROOT / "scripts" / "card_frontmatter_lint.py"), *args],
             capture_output=True, text=True)
 
-    def test_real_repo_cards_are_clean(self):
-        """Pins the zero-migration claim: every card in the repo already obeys
-        the schema, so closing the key set breaks nothing."""
-        result = self.run_cli()
+    def test_fixture_cards_are_clean(self):
+        """Pins the zero-migration claim: every card in the fixture wiki already
+        obeys the schema, so closing the key set breaks nothing."""
+        result = self.run_cli("--root", str(FIXTURE))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_named_card_is_clean(self):
-        result = self.run_cli(str(ROOT / "sources" / "cards" / "src-2026-08-06-001.md"))
+        result = self.run_cli("--root", str(FIXTURE),
+                              str(FIXTURE / "sources" / "cards" / "src-2024-01-15-001.md"))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_bad_card_exits_1_and_names_the_key(self):
@@ -208,8 +212,8 @@ class Cli(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "sources" / "cards").mkdir(parents=True)
-            (root / SCHEMA_PATH).write_text(REAL_SCHEMA, encoding="utf-8")
-            card_path = root / "sources" / "cards" / "src-2026-08-06-001.md"
+            (root / SCHEMA_PATH).write_text(FIXTURE_SCHEMA, encoding="utf-8")
+            card_path = root / "sources" / "cards" / "src-2024-01-15-001.md"
             card_path.write_text(CARD.replace("---\n## Claims",
                                               "source_author: Michael\n---\n## Claims"),
                                  encoding="utf-8")
@@ -223,7 +227,7 @@ class Cli(unittest.TestCase):
         standing in."""
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "card_frontmatter_lint.py"),
-             "sources/cards/src-2026-08-06-001.md"],
+             "--root", str(FIXTURE), "sources/cards/src-2024-01-15-001.md"],
             capture_output=True, text=True, cwd=str(ROOT / "scripts"))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

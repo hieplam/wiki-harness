@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mechanical lint for the OGP wiki (spec §7.1).
+"""Mechanical lint for the wiki (spec §7.1).
 
 Pure core: parse/extract/resolve helpers and check_* functions (data in →
 Findings out). Impure edges: scan()/git_changes()/main() at the bottom.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Card frontmatter lint for the OGP wiki.
+"""Card frontmatter lint for the wiki.
 
 Owns the whole answer to "is this card valid?" - the frontmatter parser, the
 schema loader and the per-card checks - so one module and one rule set judge a
