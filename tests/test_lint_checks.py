@@ -311,6 +311,58 @@ class NestedAgentsFiles(unittest.TestCase):
         self.assertTrue(any(f.path == "wiki/AGENTS.md" for f in findings))
 
 
+class RulesFilesGeneralization(unittest.TestCase):
+    """RULES_FILES generalizes lint.py's single-hardcoded-filename
+    "this is rules, not content" exclusion (previously != "AGENTS.md" only)
+    into a small named set, {"AGENTS.md", "recipes.md", "CLAUDE.md"}, so
+    the upcoming sources/cards/recipes.md split (T10) and the tracked
+    CLAUDE.md files (A7) are never wrongly checked as cards/wiki pages."""
+
+    RECIPES_PROSE = (
+        "# Recipe: how to file a card\n\n"
+        "This file holds prose instructions for authoring cards, not a "
+        "card itself. It has no frontmatter block at all, and if it were "
+        "ever routed into check_card() it would also declare a key, "
+        "'source_author', that no card-schema.json in this suite's "
+        "fixtures ever declares.\n"
+    )
+
+    CLAUDE_MD_CONTENT = "@AGENTS.md\n"
+
+    def test_recipes_md_produces_zero_card_findings(self):
+        files = good_files()
+        files["sources/cards/recipes.md"] = self.RECIPES_PROSE
+        findings = check_cards(files)
+        self.assertEqual([f for f in findings if f.path == "sources/cards/recipes.md"], [])
+        self.assertEqual([f.code for f in findings
+                          if f.code in ("CARD_FM", "CARD_KEY", "CARD_VALUE", "CARD_REF")
+                          and f.path == "sources/cards/recipes.md"], [])
+
+    def test_recipes_md_link_from_cards_agents_resolves(self):
+        files = good_files()
+        files["sources/cards/recipes.md"] = self.RECIPES_PROSE
+        files["sources/cards/AGENTS.md"] = (
+            "# Rules\nSee [recipes](./recipes.md) for card-writing guidance.\n")
+        findings = check_broken_links(files)
+        self.assertEqual([f for f in findings if f.code == "LINK"], [])
+
+    def test_recipes_md_absent_produces_no_error(self):
+        files = good_files()
+        self.assertNotIn("sources/cards/recipes.md", files)
+        findings = run(files, [])
+        self.assertEqual(findings, [])
+
+    def test_claude_md_paths_produce_zero_wiki_page_and_card_findings(self):
+        files = good_files()
+        files["wiki/CLAUDE.md"] = self.CLAUDE_MD_CONTENT
+        files["sources/cards/CLAUDE.md"] = self.CLAUDE_MD_CONTENT
+        findings = run(files, [])
+        offending = [f for f in findings
+                     if f.path in ("wiki/CLAUDE.md", "sources/cards/CLAUDE.md")
+                     and f.code in ("FM", "INDEX", "ORPHAN", "CARD_FM")]
+        self.assertEqual(offending, [])
+
+
 class TestCardKeyDoc(unittest.TestCase):
     """templates/sources.cards.AGENTS.md's CARD_KEY worked example must byte-match
     the real runtime message check_card() produces for the same fixture input -

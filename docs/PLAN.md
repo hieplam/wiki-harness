@@ -18,7 +18,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 - [x] T05 — git_changes()/HOOKS-positive-path E2E tests in the library suite
 - [x] T06 — Golden ERROR-before-WARN sort-order test
 - [x] T07 — Close CARD_VALUE/ENCODING/fixup-squash coverage gaps
-- [ ] T08 — RULES_FILES generalization in lint.py (A1 blocker fix)
+- [x] T08 — RULES_FILES generalization in lint.py (A1 blocker fix)
 
 ## P2 — Templates / init
 
