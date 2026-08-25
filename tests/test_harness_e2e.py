@@ -7,11 +7,13 @@ never touch wiki-harness's own .git.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -51,8 +53,16 @@ def _write_tree(root, files):
 
 
 def _git(root, *args):
+    # Isolate every git invocation from the host's global/system config
+    # (e.g. a commit.gpgsign=true policy with no usable signing key/agent,
+    # which would otherwise make `git commit` below fail or hang on a
+    # machine or CI runner that enforces it). Only this repo's own local
+    # config -- set via the `git config` calls in each test -- applies.
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
     return subprocess.run(["git", "-C", str(root), *args],
-                           capture_output=True, text=True, check=True)
+                           capture_output=True, text=True, check=True, env=env)
 
 
 class GitChangesRawEndToEnd(unittest.TestCase):
@@ -103,6 +113,41 @@ class HooksFindingPositivePath(unittest.TestCase):
             _git(root, "config", "core.hooksPath", ".githooks")
 
             self.assertEqual(hooks_finding(root), [])
+
+
+class GitCommitHostConfigIsolation(unittest.TestCase):
+    """_git() is the only place in the suite that runs `git commit` as a
+    subprocess. Without an explicit env= override it inherits the host's
+    GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM, so a host or CI runner enforcing
+    commit.gpgsign=true (with no usable signing key/agent) makes the commit
+    below fail with CalledProcessError -- or hang on a real signing prompt
+    -- even though git_changes()/hooks_finding() are completely correct.
+    This proves _git()'s own git invocations are immune to that: a hostile
+    global gitconfig injected via the environment must not stop the
+    commit from succeeding."""
+
+    def test_git_commit_survives_hostile_global_gitconfig(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hostile_global = Path(tmp) / "hostile-gitconfig"
+            hostile_global.write_text(
+                "[commit]\n\tgpgsign = true\n"
+                "[gpg]\n\tprogram = /nonexistent/gpg-that-does-not-exist\n",
+                encoding="utf-8",
+            )
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / "f.txt").write_text("hello", encoding="utf-8")
+
+            with mock.patch.dict(os.environ,
+                                  {"GIT_CONFIG_GLOBAL": str(hostile_global)}):
+                _git(repo, "init", "-q")
+                _git(repo, "config", "user.email", "test@example.com")
+                _git(repo, "config", "user.name", "Test")
+                _git(repo, "add", "-A")
+                # Must not raise CalledProcessError: the hostile
+                # commit.gpgsign=true/missing-gpg config injected above
+                # must never reach this commit.
+                _git(repo, "commit", "-q", "-m", "initial")
 
 
 if __name__ == "__main__":
