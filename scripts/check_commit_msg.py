@@ -55,7 +55,15 @@ def main(argv: list[str]) -> int:
         del args[i:i + 2]
     msg_file = args[0]
     schema_file = root / SCHEMA_PATH
-    text = schema_file.read_text(encoding="utf-8-sig") if schema_file.is_file() else None
+    try:
+        text = schema_file.read_text(encoding="utf-8-sig") if schema_file.is_file() else None
+    except UnicodeDecodeError:
+        # Treated exactly like a missing schema file: load_schema(None)
+        # reports it unreadable and card_id_pattern_from_schema() falls
+        # back to DEFAULT_CARD_ID_PATTERN, same as every other schema
+        # problem this edge already swallows rather than letting an
+        # unhandled exception reach every commit, not only 'ingest' ones.
+        text = None
     schema, _ = load_schema(text)
     card_id_pattern = card_id_pattern_from_schema(schema)
     with open(msg_file, encoding="utf-8") as f:

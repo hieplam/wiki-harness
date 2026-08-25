@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from card_frontmatter_lint import SCHEMA_PATH, check_card, load_schema
 from lint import (check_broken_links, check_card_citations, check_cards,
-                  check_frontmatter, check_index_sync, check_orphans)
+                  check_frontmatter, check_index_sync, check_orphans, run)
 
 TEMPLATE_ROOT = Path(__file__).resolve().parent.parent / "templates"
 
@@ -145,26 +145,26 @@ class CardCitations(unittest.TestCase):
             self.assertEqual(check_card_citations(good_files(), schema), [])
 
     def test_falls_back_to_default_pattern_when_schema_id_pattern_is_not_a_string(self):
-        """load_schema() only validates rule *names* -- it never checks that
-        a rule's *value* is the right type. A schema it reports zero
-        findings for can still declare id.pattern as null, a number, or a
-        list. Each such shape must not crash this check with an
-        AttributeError from card_id_scan_pattern(); it falls back to
-        DEFAULT_CARD_ID_PATTERN exactly like the schema=None case."""
+        """load_schema() now rejects a non-string id.pattern value at the
+        root for every key (see LoadSchema tests in
+        test_card_frontmatter_lint.py), so this exercises
+        check_card_citations()'s own defensive fallback directly, against a
+        schema dict shaped this way by some other route -- the structural
+        guard stays as defense in depth even though the normal
+        load_schema() pipeline can no longer produce it."""
         for bad_pattern in (None, 42, ["a", "b"]):
-            schema_text = json.dumps({"keys": {"id": {"pattern": bad_pattern}}})
-            schema, findings = load_schema(schema_text)
-            self.assertEqual(findings, [])
-            self.assertEqual(check_card_citations(good_files(), schema), [])
+            with self.subTest(pattern=bad_pattern):
+                schema = {"id": {"pattern": bad_pattern}}
+                self.assertEqual(check_card_citations(good_files(), schema), [])
 
     def test_falls_back_to_default_pattern_when_schema_id_pattern_is_empty_string(self):
-        """An empty-string id.pattern is also accepted by load_schema() with
-        zero findings, but as a regex it matches every position in every
-        string, producing a degenerate, meaningless CITE/UNFILED finding
-        instead of scanning for real card ids. It must fall back to
-        DEFAULT_CARD_ID_PATTERN instead of being used verbatim."""
-        schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": ""}}}))
-        self.assertEqual(findings, [])
+        """An empty-string id.pattern is rejected by load_schema() too, but
+        as a regex it matches every position in every string, producing a
+        degenerate, meaningless CITE/UNFILED finding instead of scanning
+        for real card ids if it ever reached this check unguarded. This
+        exercises check_card_citations()'s own defensive fallback
+        directly."""
+        schema = {"id": {"pattern": ""}}
         self.assertEqual(check_card_citations(good_files(), schema), [])
 
     def test_syntactically_invalid_id_pattern_is_rejected_by_load_schema(self):
@@ -263,6 +263,19 @@ class Frontmatter(unittest.TestCase):
         del files[SCHEMA_PATH]
         findings = check_cards(files)
         self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+
+    def test_non_string_pattern_on_any_key_fails_closed_run_never_crashes(self):
+        """End-to-end proof that load_schema() closes the crash class at
+        the root for every key, not only 'id': a schema whose 'date' rule
+        declares a non-string 'pattern' value previously loaded with zero
+        findings, then crashed run()'s own check_cards()/check_card() with
+        an unhandled TypeError the moment a real card with a 'date' field
+        was checked. Now the whole orchestrator fails closed with a
+        CARD_SCHEMA finding instead."""
+        files = good_files()
+        files[SCHEMA_PATH] = json.dumps({"keys": {"date": {"pattern": None}}})
+        findings = run(files, [])
+        self.assertIn("CARD_SCHEMA", [f.code for f in findings])
 
 
 class NestedAgentsFiles(unittest.TestCase):

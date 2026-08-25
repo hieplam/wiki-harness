@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import shutil
 import subprocess
@@ -206,6 +208,20 @@ class RootFlagSchemaDriven(unittest.TestCase):
                 json.dumps({"keys": {"id": {"pattern": "^src-["}}}), encoding="utf-8")
             result = self.run_cli(root, "ingest(src-2026-08-06-001): sample summary")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_schema_file_with_invalid_utf8_falls_back_to_default_pattern(self):
+        """A schema file that fails to decode as UTF-8 must not crash the
+        commit-msg hook with an unhandled UnicodeDecodeError propagating
+        out of main() as a raw Python traceback -- it falls back to
+        DEFAULT_CARD_ID_PATTERN exactly like a missing schema file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sources" / "cards").mkdir(parents=True)
+            (root / "sources" / "cards" / "card-schema.json").write_bytes(
+                b"\xff\xfe\x00bad bytes not valid utf8 \x80\x81")
+            result = self.run_cli(root, "ingest(src-2026-08-06-001): sample summary")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
 
     def test_schema_id_pattern_anchor_only_falls_back_instead_of_matching_nothing(self):
         """An id.pattern of '^$' is syntactically valid regex -- not None,

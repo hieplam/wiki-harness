@@ -83,9 +83,9 @@ def load_schema(text):
     deleting it would be the cheapest way past a failing lint; if an unknown
     rule name were ignored, writing 'regex' instead of 'pattern' would retire a
     check while the file still looked like it enforced one; and a 'pattern'
-    rule whose non-empty string value is not syntactically valid regex would
-    otherwise raise, uncaught, inside _check_value()'s re.match() the moment a
-    card is checked against it.
+    rule whose value is not a non-empty string that re.compile()s -- for ANY
+    key, not only 'id' -- would otherwise raise, uncaught, inside
+    _check_value()'s re.match() the moment a card is checked against it.
     """
     if text is None:
         return None, [Finding("ERROR", "CARD_SCHEMA", SCHEMA_PATH,
@@ -110,14 +110,20 @@ def load_schema(text):
             findings.append(Finding("ERROR", "CARD_SCHEMA", SCHEMA_PATH,
                                     f"key '{key}': unknown rule '{unknown}' "
                                     f"- known rules: {known}"))
-        pattern = rules.get("pattern")
-        if isinstance(pattern, str) and pattern:
-            try:
-                re.compile(pattern)
-            except re.error as exc:
+        if "pattern" in rules:
+            pattern = rules["pattern"]
+            if not isinstance(pattern, str) or not pattern:
                 findings.append(Finding("ERROR", "CARD_SCHEMA", SCHEMA_PATH,
                                         f"key '{key}': rule 'pattern' is not "
-                                        f"a valid regex: {exc}"))
+                                        f"a valid regex: value must be a "
+                                        f"non-empty string"))
+            else:
+                try:
+                    re.compile(pattern)
+                except re.error as exc:
+                    findings.append(Finding("ERROR", "CARD_SCHEMA", SCHEMA_PATH,
+                                            f"key '{key}': rule 'pattern' is not "
+                                            f"a valid regex: {exc}"))
     if findings:
         return None, findings
     return keys, []
@@ -257,8 +263,15 @@ def main(argv):
     text = schema_file.read_text(encoding="utf-8-sig") if schema_file.is_file() else None
     schema, findings = load_schema(text)
     if schema is not None:
+        # Every card file, not only ones named 'src-*.md': the schema's
+        # id.pattern is the single, sole declaration of card-id shape, and
+        # discovery must not stay pinned to the library's former default
+        # id prefix once a wiki customizes it away -- mirrors lint.py's own
+        # location-based _cards() definition (sources/cards/*.md, minus
+        # AGENTS.md, which holds rules, not card content).
         targets = [Path(a) for a in args] or \
-            sorted((root / "sources" / "cards").glob("src-*.md"))
+            sorted(p for p in (root / "sources" / "cards").glob("*.md")
+                   if p.name != "AGENTS.md")
         for target in targets:
             if not target.is_absolute() and not target.is_file() and (root / target).is_file():
                 target = root / target

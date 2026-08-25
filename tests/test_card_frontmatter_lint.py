@@ -59,28 +59,32 @@ class CardIdPatternFromSchema(unittest.TestCase):
     null, a number, a list, or the empty string."""
 
     def test_null_pattern_falls_back_to_default(self):
-        schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": None}}}))
-        self.assertEqual(findings, [])
-        self.assertEqual(card_id_pattern_from_schema(schema), DEFAULT_CARD_ID_PATTERN)
+        """load_schema() now rejects a null id.pattern at the root (see
+        LoadSchema.test_null_pattern_value_is_an_error_for_any_key below),
+        so this exercises card_id_pattern_from_schema()'s own defensive
+        fallback directly, against a schema dict shaped this way by some
+        other route -- the structural guard stays as defense in depth even
+        though the normal load_schema() pipeline can no longer produce it."""
+        self.assertEqual(card_id_pattern_from_schema({"id": {"pattern": None}}),
+                         DEFAULT_CARD_ID_PATTERN)
 
     def test_number_pattern_falls_back_to_default(self):
-        schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": 42}}}))
-        self.assertEqual(findings, [])
-        self.assertEqual(card_id_pattern_from_schema(schema), DEFAULT_CARD_ID_PATTERN)
+        self.assertEqual(card_id_pattern_from_schema({"id": {"pattern": 42}}),
+                         DEFAULT_CARD_ID_PATTERN)
 
     def test_list_pattern_falls_back_to_default(self):
-        schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": ["a", "b"]}}}))
-        self.assertEqual(findings, [])
-        self.assertEqual(card_id_pattern_from_schema(schema), DEFAULT_CARD_ID_PATTERN)
+        self.assertEqual(card_id_pattern_from_schema({"id": {"pattern": ["a", "b"]}}),
+                         DEFAULT_CARD_ID_PATTERN)
 
     def test_empty_string_pattern_falls_back_to_default(self):
-        """An empty string is also accepted by load_schema() with zero
-        findings, but as a regex it matches every position in every string --
+        """An empty string is rejected by load_schema() too (see
+        LoadSchema.test_empty_string_pattern_value_is_an_error below); this
+        exercises card_id_pattern_from_schema()'s own defensive fallback
+        directly. As a regex it matches every position in every string --
         left unguarded it would silently defeat both call sites' validation
         rather than reject or scan for anything real."""
-        schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": ""}}}))
-        self.assertEqual(findings, [])
-        self.assertEqual(card_id_pattern_from_schema(schema), DEFAULT_CARD_ID_PATTERN)
+        self.assertEqual(card_id_pattern_from_schema({"id": {"pattern": ""}}),
+                         DEFAULT_CARD_ID_PATTERN)
 
     def test_syntactically_invalid_regex_pattern_is_rejected_by_load_schema(self):
         """load_schema() itself now validates that every 'pattern' rule
@@ -161,6 +165,45 @@ class LoadSchema(unittest.TestCase):
         self.assertIsNone(schema)
         self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
         self.assertIn("pattern", findings[0].message)
+
+    def test_non_string_pattern_value_is_an_error_for_any_key_not_just_id(self):
+        """load_schema() validates rule *names* everywhere already, but a
+        'pattern' rule whose value is not a string at all (None, a number,
+        a list, a bool) previously slipped through with zero findings for
+        EVERY key, not only 'id' -- _check_value()'s generic per-card
+        check (re.match(rules['pattern'], value)) would then raise an
+        unhandled TypeError the moment any real card was checked against
+        it. This must fail closed at load_schema() itself, exactly like an
+        unknown rule name, regardless of which key declares the bad
+        pattern."""
+        for key, bad_pattern in (("date", None), ("id", 42),
+                                 ("origin", ["a", "b"]), ("trust", True)):
+            with self.subTest(key=key, pattern=bad_pattern):
+                schema, findings = load_schema(
+                    json.dumps({"keys": {key: {"pattern": bad_pattern}}}))
+                self.assertIsNone(schema)
+                self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+                self.assertIn("pattern", findings[0].message)
+
+    def test_empty_string_pattern_value_is_an_error(self):
+        """An empty string is syntactically valid regex (re.compile('')
+        does not raise) but matches every position in every string --
+        previously accepted with zero findings, silently defeating
+        whatever check declared it."""
+        schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": ""}}}))
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+        self.assertIn("pattern", findings[0].message)
+
+    def test_non_string_pattern_crash_is_closed_before_check_card_ever_runs(self):
+        """The end-to-end proof: before this fix, a card checked against a
+        schema with a non-string 'pattern' value crashed with an unhandled
+        TypeError inside _check_value()'s re.match(). Now load_schema()
+        itself fails closed, so check_card() is never even reached with
+        such a schema."""
+        schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": None}}}))
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
 
 
 from card_frontmatter_lint import check_card
@@ -355,6 +398,28 @@ class Cli(unittest.TestCase):
             result = self.run_cli("--root", str(root))
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertIn("CARD_SCHEMA", result.stdout)
+
+    def test_default_discovery_finds_cards_whose_id_does_not_start_with_src(self):
+        """The CLI's default-discovery mode (no explicit file args) must
+        find every card under sources/cards/, not only files matching the
+        library's former 'src-*.md' naming convention -- once a wiki
+        customizes card-schema.json's id.pattern away from that prefix, a
+        real, invalid card sitting right there must still be caught, not
+        silently skipped and reported clean."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sources" / "cards").mkdir(parents=True)
+            schema = {"keys": {
+                "id": {"pattern": r"^ai-\d{4}-\d{2}-\d{2}-\d{3}$", "required": True},
+                "title": {"required": True},
+            }}
+            (root / SCHEMA_PATH).write_text(json.dumps(schema), encoding="utf-8")
+            (root / "sources" / "cards" / "ai-2024-01-15-001.md").write_text(
+                "---\nid: ai-2024-01-15-001\n---\n", encoding="utf-8")
+            result = self.run_cli("--root", str(root))
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("missing required field 'title'", result.stdout)
 
 
 if __name__ == "__main__":
