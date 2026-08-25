@@ -4,7 +4,10 @@ A **card** is the envelope for exactly one source: where it came from, how much 
 and the atomic claims extracted from it. Cards are mutable — claims and topics may improve.
 
 Card id: `src-YYYY-MM-DD-NNN` (NNN = 3-digit sequence within that day, starting 001).
-Filename is `<id>.md`, and `id:` must match the filename — lint checks this.
+Filename is `<id>.md`, and `id:` must match the filename — lint checks this. To customize the id
+shape, edit `id`'s `pattern` rule in [card-schema.json](./card-schema.json): it must be anchored as
+`^...$` with no other anchors or flags before `^` (write flags inside the anchors, e.g.
+`^(?i:src-...)$`).
 
 ## Frontmatter schema
 

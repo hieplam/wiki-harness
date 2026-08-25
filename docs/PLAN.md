@@ -14,7 +14,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 - [x] T01 — Fork scripts/.githooks/tests verbatim from ogp-wiki HEAD f8b43fb
 - [x] T02 — Synthetic-fixture test suite + test_genericity.py
 - [x] T03 — Prose/code fixes 1-4: genericize examples, byte-match CARD_KEY, fix raw: example, remove dangling spec ref
-- [ ] T04 — Schema-driven card-id mechanism (delete hardcoded CARD_ID_RE)
+- [x] T04 — Schema-driven card-id mechanism (delete hardcoded CARD_ID_RE)
 - [ ] T05 — git_changes()/HOOKS-positive-path E2E tests in the library suite
 - [ ] T06 — Golden ERROR-before-WARN sort-order test
 - [ ] T07 — Close CARD_VALUE/ENCODING/fixup-squash coverage gaps

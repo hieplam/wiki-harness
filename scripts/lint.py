@@ -15,9 +15,9 @@ from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from card_frontmatter_lint import (  # noqa: E402  (needs the sys.path line above)
-    SCHEMA_PATH, Finding, check_card, load_schema, parse_frontmatter, resolve)
+    SCHEMA_PATH, Finding, card_id_pattern_from_schema, card_id_scan_pattern,
+    check_card, load_schema, parse_frontmatter, resolve)
 
-CARD_ID_RE = re.compile(r"src-\d{4}-\d{2}-\d{2}-\d{3}")
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 
 
@@ -69,12 +69,37 @@ def check_orphans(files):
             for p in sorted(pages) if p not in inbound]
 
 
-def check_card_citations(files):
+def check_card_citations(files, schema):
+    """`schema` is the loaded card-schema.json keys dict, or None when
+    load_schema() could not load one at all -- check_cards() already reports
+    the CARD_SCHEMA finding for that case. Either that, or a schema that
+    loaded fine but declares no id.pattern rule, quietly falls back to
+    DEFAULT_CARD_ID_PATTERN (card_id_pattern_from_schema) rather than
+    reporting it a second time. The scan itself stays unanchored
+    (card_id_scan_pattern) so a citation is found anywhere in wiki prose,
+    not just standing alone.
+
+    The derived scan pattern is compiled inside a try/except: even a
+    schema id.pattern that itself compiles fine can, in principle, derive a
+    scan pattern that does not. Rather than crash the whole lint run, that
+    fails closed with a single CARD_SCHEMA finding and skips the scan."""
+    scan_pattern = card_id_scan_pattern(card_id_pattern_from_schema(schema))
+    try:
+        card_id_re = re.compile(scan_pattern)
+    except re.error as exc:
+        return [Finding("ERROR", "CARD_SCHEMA", SCHEMA_PATH,
+                        f"key 'id': rule 'pattern' cannot be used to scan "
+                        f"citations: {exc}")]
     findings = []
     card_ids = {PurePosixPath(p).stem for p in _cards(files)}
     cited = set()
     for path in sorted(_wiki_pages(files)):
-        for cid in sorted(set(CARD_ID_RE.findall(files[path]))):
+        # group(0) is the whole match regardless of how many capturing
+        # groups the schema's id.pattern declares -- findall() would return
+        # tuples of the captured subgroups instead whenever the pattern has
+        # any, silently misreporting every citation as unknown/unfiled.
+        found = {m.group(0) for m in card_id_re.finditer(files[path])}
+        for cid in sorted(found):
             cited.add(cid)
             if cid not in card_ids:
                 findings.append(Finding("ERROR", "CITE", path,
@@ -138,9 +163,16 @@ def check_raw_immutability(changes):
 
 
 def run(files, changes):
+    """Loads the schema once here so check_card_citations() can be
+    schema-driven; check_cards() still loads it a second time itself, since
+    it is the one that must independently report a CARD_SCHEMA finding when
+    the schema is missing or malformed."""
+    schema, _ = load_schema(files.get(SCHEMA_PATH))
     findings = []
-    for check in (check_broken_links, check_orphans, check_card_citations,
-                  check_cards, check_frontmatter, check_index_sync):
+    for check in (check_broken_links, check_orphans):
+        findings += check(files)
+    findings += check_card_citations(files, schema)
+    for check in (check_cards, check_frontmatter, check_index_sync):
         findings += check(files)
     findings += check_raw_immutability(changes)
     return findings

@@ -7,11 +7,56 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from card_frontmatter_lint import SCHEMA_PATH, load_schema
+from card_frontmatter_lint import (DEFAULT_CARD_ID_PATTERN, SCHEMA_PATH,
+                                   card_id_pattern_from_schema,
+                                   card_id_scan_pattern, load_schema)
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample-wiki"
 FIXTURE_SCHEMA = (FIXTURE / SCHEMA_PATH).read_text(encoding="utf-8")
+
+
+class CardIdScanPattern(unittest.TestCase):
+    """card_id_scan_pattern() is a pure string transform, not a second
+    declaration of card-id shape: it derives lint.py's unanchored
+    citation-scan regex from card-schema.json's own id.pattern by
+    stripping the required leading '^' and trailing '$'. It is trivial
+    (pattern[1:-1]) because load_schema()'s id.pattern contract (see
+    IdPatternAnchorContract above) guarantees any pattern reaching it is
+    exactly one leading '^' and one trailing unescaped '$' around a
+    non-empty, anchor-free body -- there is no other shape left to guess
+    at."""
+
+    def test_card_id_scan_pattern_strips_anchors(self):
+        self.assertEqual(
+            card_id_scan_pattern(r"^src-\d{4}-\d{2}-\d{2}-\d{3}$"),
+            r"src-\d{4}-\d{2}-\d{2}-\d{3}")
+
+
+class CardIdPatternFromSchema(unittest.TestCase):
+    """card_id_pattern_from_schema() falls back to DEFAULT_CARD_ID_PATTERN
+    only for the shapes a schema load_schema() has already accepted as
+    valid can still present: `schema` is None, or the schema omits 'id',
+    or declares 'id' with no 'pattern' rule under it. Every other shape --
+    non-string, non-compiling, or contract-violating id.pattern -- is now
+    rejected earlier, at load_schema() itself (see IdPatternAnchorContract
+    above and LoadSchema below), so this function no longer needs its own
+    defensive guards against them."""
+
+    def test_syntactically_invalid_regex_pattern_is_rejected_by_load_schema(self):
+        """load_schema() itself now validates that every 'pattern' rule
+        value is a syntactically valid regex (see LoadSchema.
+        test_invalid_regex_pattern_value_is_an_error below), so a non-empty
+        string that is not valid regex (e.g. an unclosed character class)
+        never reaches card_id_pattern_from_schema() as part of a
+        'successfully loaded' schema -- it fails closed at load_schema()
+        itself, and card_id_pattern_from_schema() falls back to
+        DEFAULT_CARD_ID_PATTERN exactly like the schema=None case."""
+        schema, findings = load_schema(
+            json.dumps({"keys": {"id": {"pattern": "^src-["}}}))
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+        self.assertEqual(card_id_pattern_from_schema(schema), DEFAULT_CARD_ID_PATTERN)
 
 
 class LoadSchema(unittest.TestCase):
@@ -45,6 +90,139 @@ class LoadSchema(unittest.TestCase):
         self.assertIsNone(schema)
         self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
         self.assertIn("regex", findings[0].message)
+
+    def test_invalid_regex_pattern_value_is_an_error(self):
+        """A 'pattern' rule whose string value is not syntactically valid
+        regex (e.g. an unclosed character class) must not be handed
+        straight to re.match/re.compile downstream -- _check_value()'s
+        per-card pattern check would otherwise crash with an unhandled
+        re.error. load_schema() fails closed exactly like an unknown rule
+        name: it never trusts a schema it cannot validate."""
+        schema, findings = load_schema(
+            json.dumps({"keys": {"id": {"pattern": "[unclosed"}}}))
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+        self.assertIn("pattern", findings[0].message)
+
+    def test_non_string_pattern_value_is_an_error_for_any_key_not_just_id(self):
+        """load_schema() validates rule *names* everywhere already, but a
+        'pattern' rule whose value is not a string at all (None, a number,
+        a list, a bool) previously slipped through with zero findings for
+        EVERY key, not only 'id' -- _check_value()'s generic per-card
+        check (re.match(rules['pattern'], value)) would then raise an
+        unhandled TypeError the moment any real card was checked against
+        it. This must fail closed at load_schema() itself, exactly like an
+        unknown rule name, regardless of which key declares the bad
+        pattern."""
+        for key, bad_pattern in (("date", None), ("id", 42),
+                                 ("origin", ["a", "b"]), ("trust", True)):
+            with self.subTest(key=key, pattern=bad_pattern):
+                schema, findings = load_schema(
+                    json.dumps({"keys": {key: {"pattern": bad_pattern}}}))
+                self.assertIsNone(schema)
+                self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+                self.assertIn("pattern", findings[0].message)
+
+    def test_empty_string_pattern_value_is_an_error(self):
+        """An empty string is syntactically valid regex (re.compile('')
+        does not raise) but matches every position in every string --
+        previously accepted with zero findings, silently defeating
+        whatever check declared it."""
+        schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": ""}}}))
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+        self.assertIn("pattern", findings[0].message)
+
+    def test_non_string_pattern_crash_is_closed_before_check_card_ever_runs(self):
+        """The end-to-end proof: before this fix, a card checked against a
+        schema with a non-string 'pattern' value crashed with an unhandled
+        TypeError inside _check_value()'s re.match(). Now load_schema()
+        itself fails closed, so check_card() is never even reached with
+        such a schema."""
+        schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": None}}}))
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+
+
+class IdPatternAnchorContract(unittest.TestCase):
+    """card-schema.json's id.pattern is the single, sole declaration of
+    card-id shape, and lint.py's check_card_citations() derives its
+    unanchored citation-scan regex from it by trusting that it is exactly
+    one leading '^' and one trailing unescaped '$' around a non-empty,
+    anchor-free body. Deriving that by guessing at anchor shapes (only
+    recognizing '^' when it is literally the pattern's first character) is
+    an open-ended game -- (?i)^, \\A, \\Z, escaped \\$, ... -- so
+    load_schema() now enforces a narrow, validated contract on 'id's
+    'pattern' rule instead, and fails closed for anything that does not
+    satisfy it."""
+
+    CONTRACT_MESSAGE = (
+        "key 'id': rule 'pattern' must be anchored as ^...$ with no other "
+        "anchors or flags before ^ — write flags inside the anchors, e.g. "
+        "^(?i:src-...)$")
+
+    def test_flags_before_leading_anchor_is_rejected(self):
+        """The reported defect: an id.pattern such as '(?i)^src-...$' places
+        an inline flag group before the pattern's literal '^'. The old
+        card_id_scan_pattern() only stripped a leading '^' when it was
+        literally the pattern's FIRST character, so this pattern's embedded
+        '^' survived into the derived scan pattern -- and, without
+        re.MULTILINE, '^' only matches true position 0 of the searched
+        text, so check_card_citations() could never find a citation
+        anywhere in wiki prose except when it was literally the first
+        characters of the file. load_schema() must reject this pattern
+        outright instead of silently accepting it."""
+        schema, findings = load_schema(json.dumps(
+            {"keys": {"id": {"pattern": r"(?i)^src-\d{4}-\d{2}-\d{2}-\d{3}$"}}}))
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+        self.assertEqual(findings[0].message, self.CONTRACT_MESSAGE)
+
+    def test_escaped_trailing_dollar_is_rejected(self):
+        """An id.pattern ending in an escaped literal '\\$' (an odd number
+        of immediately preceding backslashes, not the regex end-anchor)
+        does not satisfy the contract's requirement of an UNESCAPED
+        trailing '$'."""
+        schema, findings = load_schema(json.dumps(
+            {"keys": {"id": {"pattern": r"^src-\d{4}-\d{2}-\d{2}-\d{3}\$"}}}))
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+        self.assertEqual(findings[0].message, self.CONTRACT_MESSAGE)
+
+    def test_anchor_only_pattern_is_rejected(self):
+        """'^$', '^', and '$' are all syntactically valid regex, but none
+        has a non-empty body between (or including) the required anchors --
+        stripping the anchors would yield an empty (or absent) scan pattern
+        that matches every position in every string. The contract rejects
+        all three at load_schema() itself."""
+        for degenerate in ("^$", "^", "$"):
+            with self.subTest(pattern=degenerate):
+                schema, findings = load_schema(
+                    json.dumps({"keys": {"id": {"pattern": degenerate}}}))
+                self.assertIsNone(schema)
+                self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+                self.assertEqual(findings[0].message, self.CONTRACT_MESSAGE)
+
+    def test_scoped_inline_flag_inside_anchors_is_accepted(self):
+        """The contract's own fix hint -- write flags inside the anchors,
+        e.g. ^(?i:src-...)$ -- must actually be accepted: the flag group is
+        entirely within the required '^...$' body, so it declares no other
+        '^' or '$' and is a legal, non-degenerate pattern."""
+        schema, findings = load_schema(json.dumps(
+            {"keys": {"id": {
+                "pattern": r"^(?i:src-\d{4}-\d{2}-\d{2}-\d{3})$"}}}))
+        self.assertEqual(findings, [])
+        self.assertEqual(schema["id"]["pattern"],
+                         r"^(?i:src-\d{4}-\d{2}-\d{2}-\d{3})$")
+
+    def test_default_shaped_pattern_is_accepted(self):
+        """ogp-wiki's own real id.pattern -- plain '^...$', no groups, no
+        escaped anchors -- must keep loading clean; the contract is a no-op
+        for the shape the library shipped with."""
+        schema, findings = load_schema(FIXTURE_SCHEMA)
+        self.assertEqual(findings, [])
+        self.assertEqual(schema["id"]["pattern"],
+                         DEFAULT_CARD_ID_PATTERN)
 
 
 from card_frontmatter_lint import check_card
@@ -239,6 +417,28 @@ class Cli(unittest.TestCase):
             result = self.run_cli("--root", str(root))
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertIn("CARD_SCHEMA", result.stdout)
+
+    def test_default_discovery_finds_cards_whose_id_does_not_start_with_src(self):
+        """The CLI's default-discovery mode (no explicit file args) must
+        find every card under sources/cards/, not only files matching the
+        library's former 'src-*.md' naming convention -- once a wiki
+        customizes card-schema.json's id.pattern away from that prefix, a
+        real, invalid card sitting right there must still be caught, not
+        silently skipped and reported clean."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sources" / "cards").mkdir(parents=True)
+            schema = {"keys": {
+                "id": {"pattern": r"^ai-\d{4}-\d{2}-\d{2}-\d{3}$", "required": True},
+                "title": {"required": True},
+            }}
+            (root / SCHEMA_PATH).write_text(json.dumps(schema), encoding="utf-8")
+            (root / "sources" / "cards" / "ai-2024-01-15-001.md").write_text(
+                "---\nid: ai-2024-01-15-001\n---\n", encoding="utf-8")
+            result = self.run_cli("--root", str(root))
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("missing required field 'title'", result.stdout)
 
 
 if __name__ == "__main__":
