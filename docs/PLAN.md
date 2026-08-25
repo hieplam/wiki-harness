@@ -16,7 +16,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 - [x] T03 — Prose/code fixes 1-4: genericize examples, byte-match CARD_KEY, fix raw: example, remove dangling spec ref
 - [x] T04 — Schema-driven card-id mechanism (delete hardcoded CARD_ID_RE)
 - [x] T05 — git_changes()/HOOKS-positive-path E2E tests in the library suite
-- [ ] T06 — Golden ERROR-before-WARN sort-order test
+- [x] T06 — Golden ERROR-before-WARN sort-order test
 - [ ] T07 — Close CARD_VALUE/ENCODING/fixup-squash coverage gaps
 - [ ] T08 — RULES_FILES generalization in lint.py (A1 blocker fix)
 
