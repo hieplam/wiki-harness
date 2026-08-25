@@ -121,6 +121,33 @@ class RootFlagSchemaDriven(unittest.TestCase):
             result = self.run_cli(root, "ingest(src-2026-08-06-001): sample summary")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_schema_missing_id_key_falls_back_to_default_pattern(self):
+        """load_schema() never requires an 'id' key -- a schema that is
+        otherwise fully valid but declares no 'id' rules at all must not
+        crash main() with a KeyError; it falls back to
+        DEFAULT_CARD_ID_PATTERN exactly like a missing schema file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sources" / "cards").mkdir(parents=True)
+            (root / "sources" / "cards" / "card-schema.json").write_text(
+                json.dumps({"keys": {"title": {"required": True}}}), encoding="utf-8")
+            result = self.run_cli(root, "ingest(src-2026-08-06-001): sample summary")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_schema_id_without_pattern_falls_back_to_default_pattern(self):
+        """load_schema() never requires a 'pattern' rule under 'id' -- an
+        'id' key with only 'required' declared is a legal, real-world schema
+        shape (other real keys, e.g. origin/trust, ship with no 'pattern' at
+        all). It must not crash main() with a KeyError; it falls back to
+        DEFAULT_CARD_ID_PATTERN."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sources" / "cards").mkdir(parents=True)
+            (root / "sources" / "cards" / "card-schema.json").write_text(
+                json.dumps({"keys": {"id": {"required": True}}}), encoding="utf-8")
+            result = self.run_cli(root, "ingest(src-2026-08-06-001): sample summary")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

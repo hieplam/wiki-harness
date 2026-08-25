@@ -129,6 +129,19 @@ class CardCitations(unittest.TestCase):
         of reporting it a second time."""
         self.assertEqual(check_card_citations(good_files(), None), [])
 
+    def test_falls_back_to_default_pattern_when_schema_has_no_id_pattern(self):
+        """load_schema() only requires a non-empty 'keys' object whose entries
+        use recognized rule names -- it never requires an 'id' key or a
+        'pattern' rule under 'id'. A schema that load_schema() accepts as
+        fully valid but that omits 'id' entirely, or declares 'id' with no
+        'pattern' rule, must not crash this check with a KeyError; it falls
+        back to DEFAULT_CARD_ID_PATTERN exactly like the schema=None case."""
+        for schema_text in ('{"keys": {"title": {"required": true}}}',
+                            '{"keys": {"id": {"required": true}}}'):
+            schema, findings = load_schema(schema_text)
+            self.assertEqual(findings, [])
+            self.assertEqual(check_card_citations(good_files(), schema), [])
+
 
 class Frontmatter(unittest.TestCase):
     """Card frontmatter is checked by tests/test_card_frontmatter_lint.py; what

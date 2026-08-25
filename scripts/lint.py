@@ -15,7 +15,7 @@ from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from card_frontmatter_lint import (  # noqa: E402  (needs the sys.path line above)
-    SCHEMA_PATH, DEFAULT_CARD_ID_PATTERN, Finding, card_id_scan_pattern,
+    SCHEMA_PATH, Finding, card_id_pattern_from_schema, card_id_scan_pattern,
     check_card, load_schema, parse_frontmatter, resolve)
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
@@ -70,14 +70,15 @@ def check_orphans(files):
 
 
 def check_card_citations(files, schema):
-    """`schema` is the loaded card-schema.json keys dict, or None only when
+    """`schema` is the loaded card-schema.json keys dict, or None when
     load_schema() could not load one at all -- check_cards() already reports
-    the CARD_SCHEMA finding for that case, so this check quietly falls back
-    to DEFAULT_CARD_ID_PATTERN rather than reporting it a second time. The
-    scan itself stays unanchored (card_id_scan_pattern) so a citation is
-    found anywhere in wiki prose, not just standing alone."""
-    pattern = schema["id"]["pattern"] if schema is not None else DEFAULT_CARD_ID_PATTERN
-    card_id_re = re.compile(card_id_scan_pattern(pattern))
+    the CARD_SCHEMA finding for that case. Either that, or a schema that
+    loaded fine but declares no id.pattern rule, quietly falls back to
+    DEFAULT_CARD_ID_PATTERN (card_id_pattern_from_schema) rather than
+    reporting it a second time. The scan itself stays unanchored
+    (card_id_scan_pattern) so a citation is found anywhere in wiki prose,
+    not just standing alone."""
+    card_id_re = re.compile(card_id_scan_pattern(card_id_pattern_from_schema(schema)))
     findings = []
     card_ids = {PurePosixPath(p).stem for p in _cards(files)}
     cited = set()

@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from card_frontmatter_lint import (  # noqa: E402  (needs the sys.path line above)
-    DEFAULT_CARD_ID_PATTERN, SCHEMA_PATH, load_schema)
+    DEFAULT_CARD_ID_PATTERN, SCHEMA_PATH, card_id_pattern_from_schema, load_schema)
 
 OPS = ("ingest", "lint", "schema", "chore")
 SUBJECT_RE = re.compile(r"^(ingest|lint|schema|chore)(\(([^)]*)\))?: \S.*$")
@@ -57,7 +57,7 @@ def main(argv: list[str]) -> int:
     schema_file = root / SCHEMA_PATH
     text = schema_file.read_text(encoding="utf-8-sig") if schema_file.is_file() else None
     schema, _ = load_schema(text)
-    card_id_pattern = schema["id"]["pattern"] if schema is not None else DEFAULT_CARD_ID_PATTERN
+    card_id_pattern = card_id_pattern_from_schema(schema)
     with open(msg_file, encoding="utf-8") as f:
         errors = validate(f.read(), card_id_pattern=card_id_pattern)
     for e in errors:

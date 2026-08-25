@@ -28,9 +28,12 @@ SCHEMA_PATH = "sources/cards/card-schema.json"
 RULE_KEYS = {"required", "enum", "pattern", "list", "path", "card_ref",
              "matches_filename", "description"}
 
-# Fallback only -- used solely when the schema is missing or malformed (that
-# case already produces a CARD_SCHEMA finding); never authoritative. The
-# schema's own id.pattern is the single, sole declaration of card-id shape.
+# Fallback only -- used when the schema is missing or malformed (that case
+# already produces a CARD_SCHEMA finding) or when a schema load_schema()
+# accepts as valid simply does not declare an id.pattern rule (load_schema()
+# never requires an 'id' key, or a 'pattern' rule under it); never
+# authoritative when the schema does declare one. The schema's own
+# id.pattern, when present, is the single, sole declaration of card-id shape.
 DEFAULT_CARD_ID_PATTERN = r"^src-\d{4}-\d{2}-\d{2}-\d{3}$"
 
 
@@ -122,6 +125,22 @@ def card_id_scan_pattern(schema_id_pattern):
     if pattern.endswith("$"):
         pattern = pattern[:-1]
     return pattern
+
+
+def card_id_pattern_from_schema(schema):
+    """Derive the card-id pattern from a loaded schema (load_schema()'s
+    return value), falling back to DEFAULT_CARD_ID_PATTERN both when `schema`
+    is None (missing/malformed -- CARD_SCHEMA already reports that case) and
+    when a schema load_schema() accepts as valid simply omits 'id', or
+    declares 'id' with no 'pattern' rule under it -- load_schema() only
+    requires a non-empty 'keys' object using recognized rule names; it never
+    requires an 'id' key or a 'pattern' rule inside it, so this lookup must
+    tolerate both shapes rather than assume 'id.pattern' is always present.
+    The single call site both check_card_citations() and
+    check_commit_msg.py's main() use to derive their matcher."""
+    if schema is None:
+        return DEFAULT_CARD_ID_PATTERN
+    return schema.get("id", {}).get("pattern", DEFAULT_CARD_ID_PATTERN)
 
 
 def check_card(path, text, schema, exists):
