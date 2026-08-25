@@ -12,7 +12,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 ## P1 — Extract code (library-only, verbatim port + minimal tested fixes)
 
 - [x] T01 — Fork scripts/.githooks/tests verbatim from ogp-wiki HEAD f8b43fb
-- [ ] T02 — Synthetic-fixture test suite + test_genericity.py
+- [x] T02 — Synthetic-fixture test suite + test_genericity.py
 - [ ] T03 — Prose/code fixes 1-4: genericize examples, byte-match CARD_KEY, fix raw: example, remove dangling spec ref
 - [ ] T04 — Schema-driven card-id mechanism (delete hardcoded CARD_ID_RE)
 - [ ] T05 — git_changes()/HOOKS-positive-path E2E tests in the library suite

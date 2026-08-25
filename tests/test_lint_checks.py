@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sys
 import unittest
 from pathlib import Path
@@ -8,44 +10,46 @@ from card_frontmatter_lint import SCHEMA_PATH
 from lint import (check_broken_links, check_card_citations, check_cards,
                   check_frontmatter, check_index_sync, check_orphans)
 
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample-wiki"
+FIXTURE_SCHEMA = (FIXTURE / SCHEMA_PATH).read_text(encoding="utf-8")
+
 GOOD_CARD = """---
-id: src-2026-08-06-001
-date: 2026-08-06
+id: src-2024-01-15-001
+date: 2024-01-15
 origin: session
 trust: stated
-topics: [pay-run]
+topics: [widget-assembly]
 ---
 ## Claims
 - a claim
 """
 
 GOOD_PAGE = """---
-title: Pay run
-topics: [pay-run]
+title: Widget assembly
+topics: [widget-assembly]
 ---
-The Friday batch. Details in
-[src-2026-08-06-001](../sources/cards/src-2026-08-06-001.md).
-See also [partner commissions](./partner-commissions.md).
+The weekly batch. Details in
+[src-2024-01-15-001](../sources/cards/src-2024-01-15-001.md).
+See also [quality checks](./quality-checks.md).
 """
 
 GOOD_PAGE_2 = """---
-title: Partner commissions
-topics: [pay-run]
+title: Quality checks
+topics: [widget-assembly]
 ---
-Paid via the [pay run](./pay-run.md), per
-[src-2026-08-06-001](../sources/cards/src-2026-08-06-001.md).
+Run after the [widget assembly](./widget-assembly.md), per
+[src-2024-01-15-001](../sources/cards/src-2024-01-15-001.md).
 """
 
 
 def good_files():
     return {
-        "index.md": "- [Pay run](./wiki/pay-run.md)\n"
-                    "- [Partner commissions](./wiki/partner-commissions.md)\n",
-        "wiki/pay-run.md": GOOD_PAGE,
-        "wiki/partner-commissions.md": GOOD_PAGE_2,
-        "sources/cards/src-2026-08-06-001.md": GOOD_CARD,
-        SCHEMA_PATH: (Path(__file__).resolve().parent.parent
-                      / SCHEMA_PATH).read_text(encoding="utf-8"),
+        "index.md": "- [Widget assembly](./wiki/widget-assembly.md)\n"
+                    "- [Quality checks](./wiki/quality-checks.md)\n",
+        "wiki/widget-assembly.md": GOOD_PAGE,
+        "wiki/quality-checks.md": GOOD_PAGE_2,
+        "sources/cards/src-2024-01-15-001.md": GOOD_CARD,
+        SCHEMA_PATH: FIXTURE_SCHEMA,
     }
 
 
@@ -55,7 +59,7 @@ class BrokenLinks(unittest.TestCase):
 
     def test_broken(self):
         files = good_files()
-        files["wiki/pay-run.md"] += "\n[ghost](./ghost.md)\n"
+        files["wiki/widget-assembly.md"] += "\n[ghost](./ghost.md)\n"
         findings = check_broken_links(files)
         self.assertEqual([f.code for f in findings], ["LINK"])
         self.assertIn("./ghost.md", findings[0].message)
@@ -83,21 +87,21 @@ class CardCitations(unittest.TestCase):
 
     def test_cite_unknown_card(self):
         files = good_files()
-        files["wiki/pay-run.md"] += "\nAlso src-2099-01-01-001 says so.\n"
+        files["wiki/widget-assembly.md"] += "\nAlso src-2099-01-01-001 says so.\n"
         findings = check_card_citations(files)
         self.assertEqual([f.code for f in findings], ["CITE"])
 
     def test_unfiled_card(self):
         files = good_files()
-        files["sources/cards/src-2026-08-06-002.md"] = GOOD_CARD.replace(
-            "src-2026-08-06-001", "src-2026-08-06-002")
+        files["sources/cards/src-2024-01-15-002.md"] = GOOD_CARD.replace(
+            "src-2024-01-15-001", "src-2024-01-15-002")
         findings = check_card_citations(files)
         self.assertEqual([f.code for f in findings], ["UNFILED"])
-        self.assertEqual(findings[0].path, "sources/cards/src-2026-08-06-002.md")
+        self.assertEqual(findings[0].path, "sources/cards/src-2024-01-15-002.md")
 
     def test_link_format_citation_reports_once(self):
         files = good_files()
-        files["wiki/pay-run.md"] += (
+        files["wiki/widget-assembly.md"] += (
             "\n[src-2099-01-01-001](../sources/cards/src-2099-01-01-001.md)\n")
         findings = check_card_citations(files)
         self.assertEqual([f.code for f in findings], ["CITE"])
@@ -112,13 +116,13 @@ class Frontmatter(unittest.TestCase):
 
     def test_wiki_page_missing_title(self):
         files = good_files()
-        files["wiki/pay-run.md"] = GOOD_PAGE.replace("title: Pay run\n", "")
+        files["wiki/widget-assembly.md"] = GOOD_PAGE.replace("title: Widget assembly\n", "")
         findings = check_frontmatter(files)
         self.assertTrue(any("title" in f.message for f in findings))
 
     def test_cards_are_routed_to_the_card_linter(self):
         files = good_files()
-        files["sources/cards/src-2026-08-06-001.md"] = GOOD_CARD.replace(
+        files["sources/cards/src-2024-01-15-001.md"] = GOOD_CARD.replace(
             "---\n## Claims", "source_author: Michael\n---\n## Claims")
         findings = check_cards(files)
         self.assertEqual([f.code for f in findings], ["CARD_KEY"])
@@ -136,7 +140,7 @@ class NestedAgentsFiles(unittest.TestCase):
 
     def files_with_rules(self):
         files = good_files()
-        rules = "# Rules\nSee [pay run](./pay-run.md).\n"   # no frontmatter on purpose
+        rules = "# Rules\nSee [widget assembly](./widget-assembly.md).\n"   # no frontmatter on purpose
         files["wiki/AGENTS.md"] = rules
         files["sources/cards/AGENTS.md"] = "# Rules\nCard format lives here.\n"
         return files
