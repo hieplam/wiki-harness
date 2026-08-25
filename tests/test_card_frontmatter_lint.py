@@ -66,6 +66,38 @@ class CardIdPatternFromSchema(unittest.TestCase):
         self.assertEqual(findings, [])
         self.assertEqual(card_id_pattern_from_schema(schema), DEFAULT_CARD_ID_PATTERN)
 
+    def test_syntactically_invalid_regex_pattern_falls_back_to_default(self):
+        """load_schema() validates rule *names*, never that a 'pattern'
+        rule's string *value* is a syntactically valid regex. A non-empty
+        string that is not valid regex (e.g. an unclosed character class)
+        must not be handed straight to re.match/re.compile at either call
+        site -- that would crash the process with an unhandled re.error
+        instead of producing a clean lint/commit-msg finding. It falls back
+        to DEFAULT_CARD_ID_PATTERN exactly like the other unusable shapes."""
+        schema, findings = load_schema(
+            json.dumps({"keys": {"id": {"pattern": "^src-["}}}))
+        self.assertEqual(findings, [])
+        self.assertEqual(card_id_pattern_from_schema(schema), DEFAULT_CARD_ID_PATTERN)
+
+    def test_anchor_only_pattern_falls_back_to_default(self):
+        """card_id_scan_pattern() strips exactly one leading '^' and
+        trailing '$'. A schema id.pattern of '^$' (or degenerating to only
+        '^' or only '$') is a syntactically valid regex -- it passes every
+        other guard here -- but its derived scan pattern is the empty
+        string, which matches every position in every string. Left
+        unguarded, check_card_citations() would report every wiki page as
+        citing an unknown card and every card as UNFILED: a permanent,
+        unfixable false-positive caused by the pattern derivation itself,
+        not by the wiki content. It must fall back to
+        DEFAULT_CARD_ID_PATTERN instead."""
+        for degenerate in ("^$", "^", "$"):
+            with self.subTest(pattern=degenerate):
+                schema, findings = load_schema(
+                    json.dumps({"keys": {"id": {"pattern": degenerate}}}))
+                self.assertEqual(findings, [])
+                self.assertEqual(card_id_pattern_from_schema(schema),
+                                 DEFAULT_CARD_ID_PATTERN)
+
 
 class LoadSchema(unittest.TestCase):
     """The schema file is the single source of truth, so a schema that cannot be

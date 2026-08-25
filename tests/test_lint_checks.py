@@ -166,6 +166,31 @@ class CardCitations(unittest.TestCase):
         self.assertEqual(findings, [])
         self.assertEqual(check_card_citations(good_files(), schema), [])
 
+    def test_syntactically_invalid_id_pattern_does_not_crash_the_scan(self):
+        """load_schema() only validates rule *names*, never that a
+        'pattern' rule's string value is valid regex. A non-empty string
+        that is not valid regex (e.g. an unclosed character class) must not
+        reach re.compile() here unguarded -- that would crash the whole
+        lint run with an unhandled re.error. It falls back to
+        DEFAULT_CARD_ID_PATTERN, which matches this fixture's real card ids
+        fine."""
+        schema, findings = load_schema(
+            json.dumps({"keys": {"id": {"pattern": "^src-["}}}))
+        self.assertEqual(findings, [])
+        self.assertEqual(check_card_citations(good_files(), schema), [])
+
+    def test_anchor_only_id_pattern_does_not_flag_every_page_and_card(self):
+        """An id.pattern of '^$' is syntactically valid regex -- it is not
+        None, not a non-string, not empty -- but stripping its anchors
+        (card_id_scan_pattern) yields the empty string, which matches every
+        position in every string. Left unguarded that turns every wiki page
+        into a CITE-unknown-card finding and every real card into UNFILED,
+        a permanent false positive caused purely by the pattern derivation.
+        It must fall back to DEFAULT_CARD_ID_PATTERN instead."""
+        schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": "^$"}}}))
+        self.assertEqual(findings, [])
+        self.assertEqual(check_card_citations(good_files(), schema), [])
+
 
 class Frontmatter(unittest.TestCase):
     """Card frontmatter is checked by tests/test_card_frontmatter_lint.py; what

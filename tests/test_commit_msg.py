@@ -178,6 +178,37 @@ class RootFlagSchemaDriven(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn("ingest commits require ref = card id", result.stderr)
 
+    def test_schema_id_pattern_invalid_regex_falls_back_instead_of_crashing(self):
+        """load_schema() only validates rule *names*, never that a
+        'pattern' rule's string value is valid regex. A non-empty string
+        that is not valid regex (e.g. an unclosed character class) must not
+        reach re.match() at the validate() call site unguarded -- that
+        would crash the commit-msg hook with an unhandled re.error and a
+        Python traceback instead of a clean pass/fail verdict. It falls
+        back to DEFAULT_CARD_ID_PATTERN, which accepts this valid src- id."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sources" / "cards").mkdir(parents=True)
+            (root / "sources" / "cards" / "card-schema.json").write_text(
+                json.dumps({"keys": {"id": {"pattern": "^src-["}}}), encoding="utf-8")
+            result = self.run_cli(root, "ingest(src-2026-08-06-001): sample summary")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_schema_id_pattern_anchor_only_falls_back_instead_of_matching_nothing(self):
+        """An id.pattern of '^$' is syntactically valid regex -- not None,
+        not a non-string, not empty -- so it passes every other guard, but
+        re.match('^$', ref) rejects every real card id (only an empty ref
+        would match), permanently failing every ingest commit for reasons
+        the pattern derivation caused, not the commit itself. It must fall
+        back to DEFAULT_CARD_ID_PATTERN, which accepts this valid src- id."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sources" / "cards").mkdir(parents=True)
+            (root / "sources" / "cards" / "card-schema.json").write_text(
+                json.dumps({"keys": {"id": {"pattern": "^$"}}}), encoding="utf-8")
+            result = self.run_cli(root, "ingest(src-2026-08-06-001): sample summary")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

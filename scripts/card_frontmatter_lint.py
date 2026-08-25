@@ -140,12 +140,26 @@ def card_id_pattern_from_schema(schema):
     null, a number, a list, or the empty string. None of those is a usable
     matcher: passing them on would crash re.match/re.compile at the call
     sites, or -- for the empty string -- silently match everything instead
-    of raising. The single call site both check_card_citations() and
+    of raising. Two further shapes look like usable strings but are not: a
+    non-empty string that is not syntactically valid regex (e.g. an
+    unclosed character class) would still crash re.match/re.compile at the
+    call sites, and a non-empty string that IS valid regex but whose
+    card_id_scan_pattern() (anchor-stripped) form degenerates to the empty
+    string -- e.g. '^$', '^', or '$' alone -- would make
+    check_card_citations()'s scan match every position in every string
+    while permanently rejecting every real, non-empty card id everywhere
+    else. The single call site both check_card_citations() and
     check_commit_msg.py's main() use to derive their matcher."""
     if schema is None:
         return DEFAULT_CARD_ID_PATTERN
     pattern = schema.get("id", {}).get("pattern", DEFAULT_CARD_ID_PATTERN)
     if not isinstance(pattern, str) or pattern == "":
+        return DEFAULT_CARD_ID_PATTERN
+    try:
+        re.compile(pattern)
+    except re.error:
+        return DEFAULT_CARD_ID_PATTERN
+    if card_id_scan_pattern(pattern) == "":
         return DEFAULT_CARD_ID_PATTERN
     return pattern
 
