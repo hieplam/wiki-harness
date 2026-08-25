@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from card_frontmatter_lint import SCHEMA_PATH
+from card_frontmatter_lint import SCHEMA_PATH, check_card, load_schema
 from lint import (check_broken_links, check_card_citations, check_cards,
                   check_frontmatter, check_index_sync, check_orphans)
+
+TEMPLATE_ROOT = Path(__file__).resolve().parent.parent / "templates"
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample-wiki"
 FIXTURE_SCHEMA = (FIXTURE / SCHEMA_PATH).read_text(encoding="utf-8")
@@ -157,6 +160,53 @@ class NestedAgentsFiles(unittest.TestCase):
         files["wiki/AGENTS.md"] = "# Rules\nSee [gone](./no-such-page.md).\n"
         findings = check_broken_links(files)
         self.assertTrue(any(f.path == "wiki/AGENTS.md" for f in findings))
+
+
+class TestCardKeyDoc(unittest.TestCase):
+    """templates/sources.cards.AGENTS.md's CARD_KEY worked example must byte-match
+    the real runtime message check_card() produces for the same fixture input -
+    including the "Declared keys: ..." suffix the doc used to omit."""
+
+    TEMPLATE = TEMPLATE_ROOT / "sources.cards.AGENTS.md"
+
+    def _doc_worked_example(self):
+        """Extract (path, message) from the plain-fenced ERROR CARD_KEY block,
+        rejoining its wrapped continuation lines into the single-line form
+        check_card() actually produces."""
+        text = self.TEMPLATE.read_text(encoding="utf-8")
+        blocks = re.findall(r"```\n(.*?ERROR CARD_KEY.*?)```", text, re.DOTALL)
+        self.assertEqual(len(blocks), 1,
+                         "expected exactly one ERROR CARD_KEY worked example block")
+        lines = [ln for ln in blocks[0].splitlines() if ln.strip()]
+        m = re.match(r"^ERROR CARD_KEY (\S+): (.*)$", lines[0])
+        self.assertIsNotNone(
+            m, "worked example's first line must read 'ERROR CARD_KEY <path>: <msg>'")
+        path, first_segment = m.group(1), m.group(2)
+        message = " ".join([first_segment] + [ln.strip() for ln in lines[1:]])
+        return path, message
+
+    def test_card_key_worked_example_matches_runtime_message(self):
+        schema, schema_findings = load_schema(FIXTURE_SCHEMA)
+        self.assertEqual(schema_findings, [])
+        card_text = (
+            "---\n"
+            "id: src-2024-01-15-003\n"
+            "date: 2024-01-15\n"
+            "origin: session\n"
+            "trust: stated\n"
+            "topics: [widget-assembly]\n"
+            "source_author: Michael\n"
+            "---\n"
+            "## Claims\n- a claim\n"
+        )
+        findings = check_card("sources/cards/src-2024-01-15-003.md", card_text,
+                              schema, lambda p: True)
+        card_key = [f for f in findings if f.code == "CARD_KEY"]
+        self.assertEqual(len(card_key), 1, findings)
+
+        doc_path, doc_message = self._doc_worked_example()
+        self.assertEqual(doc_path, card_key[0].path)
+        self.assertEqual(doc_message, card_key[0].message)
 
 
 if __name__ == "__main__":
