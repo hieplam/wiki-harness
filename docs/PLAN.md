@@ -19,6 +19,8 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 - [x] T06 — Golden ERROR-before-WARN sort-order test
 - [x] T07 — Close CARD_VALUE/ENCODING/fixup-squash coverage gaps
 - [x] T08 — RULES_FILES generalization in lint.py (A1 blocker fix)
+- [ ] T08b — RULES_FILES parity in the card-lint CLI discovery (card_frontmatter_lint.py main())
+- [ ] C3-1 — C3 change-unit: amend ref-verbatim-port to name T08b and bound audit-driven fixes
 
 ## P2 — Templates / init
 
