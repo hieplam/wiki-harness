@@ -28,6 +28,11 @@ SCHEMA_PATH = "sources/cards/card-schema.json"
 RULE_KEYS = {"required", "enum", "pattern", "list", "path", "card_ref",
              "matches_filename", "description"}
 
+# Fallback only -- used solely when the schema is missing or malformed (that
+# case already produces a CARD_SCHEMA finding); never authoritative. The
+# schema's own id.pattern is the single, sole declaration of card-id shape.
+DEFAULT_CARD_ID_PATTERN = r"^src-\d{4}-\d{2}-\d{2}-\d{3}$"
+
 
 KV_RE = re.compile(r"^([A-Za-z_][\w-]*):\s*(.*)$")
 
@@ -102,6 +107,21 @@ def load_schema(text):
     if findings:
         return None, findings
     return keys, []
+
+
+def card_id_scan_pattern(schema_id_pattern):
+    """Derive an unanchored substring-search pattern from the schema's
+    anchored, whole-value id.pattern: strip exactly one leading '^' and
+    trailing '$' if present. A pure string transform, not a second
+    declaration of card-id shape -- lint.py uses this to find card ids
+    embedded anywhere in wiki prose, while check_commit_msg.py's validate()
+    matches the anchored id.pattern itself, whole-value, unchanged."""
+    pattern = schema_id_pattern
+    if pattern.startswith("^"):
+        pattern = pattern[1:]
+    if pattern.endswith("$"):
+        pattern = pattern[:-1]
+    return pattern
 
 
 def check_card(path, text, schema, exists):

@@ -15,6 +15,7 @@ TEMPLATE_ROOT = Path(__file__).resolve().parent.parent / "templates"
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample-wiki"
 FIXTURE_SCHEMA = (FIXTURE / SCHEMA_PATH).read_text(encoding="utf-8")
+SCHEMA, _SCHEMA_ERRORS = load_schema(FIXTURE_SCHEMA)
 
 GOOD_CARD = """---
 id: src-2024-01-15-001
@@ -86,19 +87,19 @@ class Orphans(unittest.TestCase):
 
 class CardCitations(unittest.TestCase):
     def test_clean(self):
-        self.assertEqual(check_card_citations(good_files()), [])
+        self.assertEqual(check_card_citations(good_files(), SCHEMA), [])
 
     def test_cite_unknown_card(self):
         files = good_files()
         files["wiki/widget-assembly.md"] += "\nAlso src-2099-01-01-001 says so.\n"
-        findings = check_card_citations(files)
+        findings = check_card_citations(files, SCHEMA)
         self.assertEqual([f.code for f in findings], ["CITE"])
 
     def test_unfiled_card(self):
         files = good_files()
         files["sources/cards/src-2024-01-15-002.md"] = GOOD_CARD.replace(
             "src-2024-01-15-001", "src-2024-01-15-002")
-        findings = check_card_citations(files)
+        findings = check_card_citations(files, SCHEMA)
         self.assertEqual([f.code for f in findings], ["UNFILED"])
         self.assertEqual(findings[0].path, "sources/cards/src-2024-01-15-002.md")
 
@@ -106,8 +107,27 @@ class CardCitations(unittest.TestCase):
         files = good_files()
         files["wiki/widget-assembly.md"] += (
             "\n[src-2099-01-01-001](../sources/cards/src-2099-01-01-001.md)\n")
-        findings = check_card_citations(files)
+        findings = check_card_citations(files, SCHEMA)
         self.assertEqual([f.code for f in findings], ["CITE"])
+
+    def test_mid_sentence_citation_still_found(self):
+        """check_card_citations scans prose with an unanchored pattern (via
+        card_id_scan_pattern), so a card id embedded mid-sentence -- not
+        wrapped in a markdown link -- still counts as a citation."""
+        files = good_files()
+        files["sources/cards/src-2024-01-15-002.md"] = GOOD_CARD.replace(
+            "src-2024-01-15-001", "src-2024-01-15-002")
+        files["wiki/widget-assembly.md"] += (
+            "\nAs discussed in src-2024-01-15-002, the batch runs weekly.\n")
+        findings = check_card_citations(files, SCHEMA)
+        self.assertEqual(findings, [])
+
+    def test_falls_back_to_default_pattern_when_schema_is_none(self):
+        """schema=None only when load_schema() could not load one at all --
+        check_cards() already reports the CARD_SCHEMA finding for that case,
+        so this check quietly falls back to DEFAULT_CARD_ID_PATTERN instead
+        of reporting it a second time."""
+        self.assertEqual(check_card_citations(good_files(), None), [])
 
 
 class Frontmatter(unittest.TestCase):
@@ -152,7 +172,7 @@ class NestedAgentsFiles(unittest.TestCase):
         files = self.files_with_rules()
         self.assertEqual(check_frontmatter(files), [])
         self.assertEqual(check_index_sync(files), [])
-        self.assertEqual(check_card_citations(files), [])
+        self.assertEqual(check_card_citations(files, SCHEMA), [])
         self.assertEqual(check_orphans(files), [])
 
     def test_links_are_still_checked(self):

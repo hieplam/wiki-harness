@@ -7,11 +7,28 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from card_frontmatter_lint import SCHEMA_PATH, load_schema
+from card_frontmatter_lint import SCHEMA_PATH, card_id_scan_pattern, load_schema
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample-wiki"
 FIXTURE_SCHEMA = (FIXTURE / SCHEMA_PATH).read_text(encoding="utf-8")
+
+
+class CardIdScanPattern(unittest.TestCase):
+    """card_id_scan_pattern() is a pure string transform, not a second
+    declaration of card-id shape: it derives lint.py's unanchored
+    citation-scan regex from card-schema.json's own anchored, whole-value
+    id.pattern by stripping exactly one leading '^' and trailing '$'."""
+
+    def test_card_id_scan_pattern_strips_anchors(self):
+        self.assertEqual(
+            card_id_scan_pattern(r"^src-\d{4}-\d{2}-\d{2}-\d{3}$"),
+            r"src-\d{4}-\d{2}-\d{2}-\d{3}")
+
+    def test_no_anchors_present_returns_pattern_unchanged(self):
+        """'if present' -- an already-unanchored pattern passes through as-is."""
+        self.assertEqual(card_id_scan_pattern(r"src-\d{4}-\d{2}-\d{2}-\d{3}"),
+                         r"src-\d{4}-\d{2}-\d{2}-\d{3}")
 
 
 class LoadSchema(unittest.TestCase):

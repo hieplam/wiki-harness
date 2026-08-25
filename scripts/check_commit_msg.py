@@ -3,22 +3,28 @@
 
 Subject format: <op>(<ref>): <summary>
   op  : ingest | lint | schema | chore
-  ref : required for ingest (a card id: src-YYYY-MM-DD-NNN), optional otherwise.
+  ref : required for ingest (a card id matching card-schema.json's id.pattern),
+        optional otherwise.
 Merge/Revert/fixup/squash subjects are exempt.
-Pure core: validate(). Edge: main() reads the message file (git commit-msg hook arg).
+Pure core: validate(). Edge: main() reads the message file (git commit-msg hook arg)
+and the schema's id.pattern (sources/cards/card-schema.json under --root, default cwd).
 """
 from __future__ import annotations
 
 import re
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from card_frontmatter_lint import (  # noqa: E402  (needs the sys.path line above)
+    DEFAULT_CARD_ID_PATTERN, SCHEMA_PATH, load_schema)
 
 OPS = ("ingest", "lint", "schema", "chore")
 SUBJECT_RE = re.compile(r"^(ingest|lint|schema|chore)(\(([^)]*)\))?: \S.*$")
-CARD_ID_RE = re.compile(r"^src-\d{4}-\d{2}-\d{2}-\d{3}$")
 EXEMPT_PREFIXES = ("Merge", "Revert", "fixup!", "squash!")
 
 
-def validate(message: str) -> list[str]:
+def validate(message: str, card_id_pattern: str = DEFAULT_CARD_ID_PATTERN) -> list[str]:
     lines = [l for l in message.splitlines() if not l.startswith("#")]
     subject = lines[0].strip() if lines else ""
     if not subject:
@@ -32,19 +38,32 @@ def validate(message: str) -> list[str]:
             f"got: '{subject}'"
         ]
     op, ref = m.group(1), m.group(3)
-    if op == "ingest" and (not ref or not CARD_ID_RE.match(ref)):
+    if op == "ingest" and (not ref or not re.match(card_id_pattern, ref)):
         return ["ingest commits require ref = card id, e.g. "
                 "'ingest(src-2026-08-06-001): summary'"]
     return []
 
 
-def main(msg_file: str) -> int:
+# ---- impure edge below this line ----
+
+def main(argv: list[str]) -> int:
+    args = list(argv)
+    root = Path.cwd()
+    if "--root" in args:
+        i = args.index("--root")
+        root = Path(args[i + 1])
+        del args[i:i + 2]
+    msg_file = args[0]
+    schema_file = root / SCHEMA_PATH
+    text = schema_file.read_text(encoding="utf-8-sig") if schema_file.is_file() else None
+    schema, _ = load_schema(text)
+    card_id_pattern = schema["id"]["pattern"] if schema is not None else DEFAULT_CARD_ID_PATTERN
     with open(msg_file, encoding="utf-8") as f:
-        errors = validate(f.read())
+        errors = validate(f.read(), card_id_pattern=card_id_pattern)
     for e in errors:
         print(f"commit-msg: {e}", file=sys.stderr)
     return 1 if errors else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1]))
+    sys.exit(main(sys.argv[1:]))
