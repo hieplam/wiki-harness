@@ -1,0 +1,241 @@
+import json
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
+from card_frontmatter_lint import SCHEMA_PATH, load_schema
+
+ROOT = Path(__file__).resolve().parent.parent
+REAL_SCHEMA = (ROOT / SCHEMA_PATH).read_text(encoding="utf-8")
+
+
+class LoadSchema(unittest.TestCase):
+    """The schema file is the single source of truth, so a schema that cannot be
+    trusted must block every card rather than wave them through."""
+
+    def test_real_schema_loads(self):
+        schema, findings = load_schema(REAL_SCHEMA)
+        self.assertEqual(findings, [])
+        self.assertTrue(schema["id"]["required"])
+        self.assertIn("session", schema["origin"]["enum"])
+
+    def test_missing_file_is_an_error(self):
+        schema, findings = load_schema(None)
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+
+    def test_invalid_json_is_an_error(self):
+        schema, findings = load_schema("{not json")
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+
+    def test_empty_keys_is_an_error(self):
+        schema, findings = load_schema('{"keys": {}}')
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+
+    def test_unknown_rule_name_is_an_error(self):
+        """'regex' instead of 'pattern' must not silently retire the date check."""
+        schema, findings = load_schema(json.dumps({"keys": {"date": {"regex": "^x$"}}}))
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+        self.assertIn("regex", findings[0].message)
+
+
+from card_frontmatter_lint import check_card
+
+SCHEMA, _SCHEMA_ERRORS = load_schema(REAL_SCHEMA)
+
+PATH = "sources/cards/src-2026-08-06-001.md"
+CARD = """---
+id: src-2026-08-06-001
+date: 2026-08-06
+origin: session
+trust: stated
+topics: [pay-run]
+---
+## Claims
+- a claim
+"""
+
+TREE = {
+    "sources/cards/src-2026-08-06-001.md",
+    "sources/cards/src-2026-08-06-002.md",
+    "sources/raw/src-2026-08-06-001-artifact.html",
+}
+
+
+def exists(rel):
+    return rel in TREE
+
+
+def card(*, add="", replace=None):
+    text = CARD
+    if replace:
+        text = text.replace(*replace)
+    if add:
+        text = text.replace("---\n## Claims", add + "---\n## Claims")
+    return text
+
+
+class CheckCard(unittest.TestCase):
+    def codes(self, text, path=PATH):
+        return [f.code for f in check_card(path, text, SCHEMA, exists)]
+
+    def test_clean_card(self):
+        self.assertEqual(check_card(PATH, CARD, SCHEMA, exists), [])
+
+    def test_undeclared_key_is_blocked(self):
+        findings = check_card(PATH, card(add="source_author: Michael\n"), SCHEMA, exists)
+        self.assertEqual([f.code for f in findings], ["CARD_KEY"])
+
+    def test_undeclared_key_message_names_the_key_and_the_way_out(self):
+        """The message is the whole fix hint an agent gets, so it must name the
+        offending key, where the rule lives, and both legal exits."""
+        message = check_card(PATH, card(add="source_author: Michael\n"),
+                             SCHEMA, exists)[0].message
+        self.assertIn("source_author", message)
+        self.assertIn(SCHEMA_PATH, message)
+        self.assertIn("schema:", message)
+        self.assertIn("trust", message)  # the declared-key list, so a typo is visible
+
+    def test_typo_of_a_required_key_is_reported_twice(self):
+        """'trsut' is both an undeclared key and a missing required one."""
+        codes = self.codes(card(replace=("trust: stated", "trsut: stated")))
+        self.assertEqual(codes, ["CARD_KEY", "CARD_KEY"])
+
+    def test_missing_required_key(self):
+        findings = check_card(PATH, card(replace=("trust: stated\n", "")),
+                              SCHEMA, exists)
+        self.assertEqual([f.code for f in findings], ["CARD_KEY"])
+        self.assertIn("trust", findings[0].message)
+
+    def test_empty_topics_list_counts_as_missing(self):
+        self.assertEqual(self.codes(card(replace=("topics: [pay-run]", "topics: []"))),
+                         ["CARD_KEY"])
+
+    def test_bad_origin_enum(self):
+        findings = check_card(PATH, card(replace=("origin: session", "origin: email")),
+                              SCHEMA, exists)
+        self.assertEqual([f.code for f in findings], ["CARD_VALUE"])
+        self.assertIn("confluence", findings[0].message)  # lists the legal values
+
+    def test_bad_date_pattern(self):
+        self.assertEqual(self.codes(card(replace=("date: 2026-08-06", "date: 06/08/2026"))),
+                         ["CARD_VALUE"])
+
+    def test_scalar_where_a_list_is_required(self):
+        self.assertEqual(self.codes(card(replace=("topics: [pay-run]", "topics: pay-run"))),
+                         ["CARD_VALUE"])
+
+    def test_id_must_match_the_filename(self):
+        """src-2026-08-06-999 satisfies the pattern, so only the filename rule
+        can catch it - which is the point of having both rules."""
+        findings = check_card(PATH, card(replace=("id: src-2026-08-06-001",
+                                                  "id: src-2026-08-06-999")),
+                              SCHEMA, exists)
+        self.assertEqual([f.code for f in findings], ["CARD_REF"])
+
+    def test_id_that_is_not_a_card_id_at_all(self):
+        self.assertEqual(self.codes(card(replace=("id: src-2026-08-06-001", "id: banana")),
+                                    path="sources/cards/banana.md"),
+                         ["CARD_VALUE"])
+
+    def test_raw_pointer_must_exist(self):
+        self.assertEqual(self.codes(card(add="raw: ../raw/missing.html\n")), ["CARD_REF"])
+
+    def test_raw_pointer_that_exists_is_clean(self):
+        self.assertEqual(
+            self.codes(card(add="raw: ../raw/src-2026-08-06-001-artifact.html\n")), [])
+
+    def test_parent_must_point_at_a_real_card(self):
+        self.assertEqual(self.codes(card(add="parent: src-2026-08-06-404\n")), ["CARD_REF"])
+
+    def test_parent_that_exists_is_clean(self):
+        self.assertEqual(self.codes(card(add="parent: src-2026-08-06-002\n")), [])
+
+    def test_provenance_keys_are_accepted(self):
+        self.assertEqual(self.codes(card(add="source_id: 4960321655\n"
+                                             "source_url: https://example.com/x\n"
+                                             "source_version: 16\n"
+                                             "source_space: OGP\n"
+                                             "source_parent_id: 4952719362\n")), [])
+
+    def test_missing_frontmatter(self):
+        self.assertEqual(self.codes("## Claims\n- a claim\n"), ["CARD_FM"])
+
+
+class Primitives(unittest.TestCase):
+    def test_parse_frontmatter_reads_scalars_and_lists(self):
+        from card_frontmatter_lint import parse_frontmatter
+        meta, errors = parse_frontmatter(CARD)
+        self.assertEqual(errors, [])
+        self.assertEqual(meta["id"], "src-2026-08-06-001")
+        self.assertEqual(meta["topics"], ["pay-run"])
+
+    def test_resolve_walks_up(self):
+        from card_frontmatter_lint import resolve
+        self.assertEqual(resolve("sources/cards/a.md", "../raw/b.html"),
+                         "sources/raw/b.html")
+
+
+import subprocess
+
+
+class Cli(unittest.TestCase):
+    """The CLI is what a git hook or a future write-time hook will call, so its
+    exit code carries the whole verdict."""
+
+    def run_cli(self, *args):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "card_frontmatter_lint.py"), *args],
+            capture_output=True, text=True)
+
+    def test_real_repo_cards_are_clean(self):
+        """Pins the zero-migration claim: every card in the repo already obeys
+        the schema, so closing the key set breaks nothing."""
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_named_card_is_clean(self):
+        result = self.run_cli(str(ROOT / "sources" / "cards" / "src-2026-08-06-001.md"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_bad_card_exits_1_and_names_the_key(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sources" / "cards").mkdir(parents=True)
+            (root / SCHEMA_PATH).write_text(REAL_SCHEMA, encoding="utf-8")
+            card_path = root / "sources" / "cards" / "src-2026-08-06-001.md"
+            card_path.write_text(CARD.replace("---\n## Claims",
+                                              "source_author: Michael\n---\n## Claims"),
+                                 encoding="utf-8")
+            result = self.run_cli("--root", str(root), str(card_path))
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("source_author", result.stdout)
+
+    def test_root_relative_path_resolves_against_root_not_cwd(self):
+        """AGENTS.md documents this exact invocation with a repo-root-relative
+        path; it must not depend on which directory the caller happens to be
+        standing in."""
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "card_frontmatter_lint.py"),
+             "sources/cards/src-2026-08-06-001.md"],
+            capture_output=True, text=True, cwd=str(ROOT / "scripts"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_missing_schema_blocks_everything(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sources" / "cards").mkdir(parents=True)
+            result = self.run_cli("--root", str(root))
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("CARD_SCHEMA", result.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
