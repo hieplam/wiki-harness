@@ -144,29 +144,6 @@ class CardCitations(unittest.TestCase):
             self.assertEqual(findings, [])
             self.assertEqual(check_card_citations(good_files(), schema), [])
 
-    def test_falls_back_to_default_pattern_when_schema_id_pattern_is_not_a_string(self):
-        """load_schema() now rejects a non-string id.pattern value at the
-        root for every key (see LoadSchema tests in
-        test_card_frontmatter_lint.py), so this exercises
-        check_card_citations()'s own defensive fallback directly, against a
-        schema dict shaped this way by some other route -- the structural
-        guard stays as defense in depth even though the normal
-        load_schema() pipeline can no longer produce it."""
-        for bad_pattern in (None, 42, ["a", "b"]):
-            with self.subTest(pattern=bad_pattern):
-                schema = {"id": {"pattern": bad_pattern}}
-                self.assertEqual(check_card_citations(good_files(), schema), [])
-
-    def test_falls_back_to_default_pattern_when_schema_id_pattern_is_empty_string(self):
-        """An empty-string id.pattern is rejected by load_schema() too, but
-        as a regex it matches every position in every string, producing a
-        degenerate, meaningless CITE/UNFILED finding instead of scanning
-        for real card ids if it ever reached this check unguarded. This
-        exercises check_card_citations()'s own defensive fallback
-        directly."""
-        schema = {"id": {"pattern": ""}}
-        self.assertEqual(check_card_citations(good_files(), schema), [])
-
     def test_syntactically_invalid_id_pattern_is_rejected_by_load_schema(self):
         """load_schema() now validates that a 'pattern' rule's string value
         is syntactically valid regex, so this schema fails closed there --
@@ -197,23 +174,16 @@ class CardCitations(unittest.TestCase):
         }
         self.assertEqual(check_card_citations(files, schema), [])
 
-    def test_escaped_dollar_in_id_pattern_scans_without_crashing(self):
+    def test_escaped_trailing_dollar_in_id_pattern_is_rejected_before_scanning(self):
         """A schema id.pattern ending in an escaped literal '\\$' (an odd
         number of immediately preceding backslashes, not the regex
-        end-anchor) is a syntactically valid, non-degenerate pattern.
-        card_id_scan_pattern() must recognize the escape and leave it
-        untouched instead of blindly stripping the raw trailing '$'
-        character and dangling an unescaped backslash, which would crash
-        re.compile() here."""
+        end-anchor) does not satisfy the id.pattern anchor contract --
+        load_schema() rejects it with a CARD_SCHEMA finding instead of
+        letting check_card_citations() ever derive a scan pattern from it."""
         schema, findings = load_schema(json.dumps(
             {"keys": {"id": {"pattern": r"^src-\d{4}-\d{2}-\d{2}-\d{3}\$"}}}))
-        self.assertEqual(findings, [])
-        result = check_card_citations(good_files(), schema)
-        # The literal '$' in the pattern matches nothing in ordinary wiki
-        # prose, so the one real card is reported UNFILED -- proof the
-        # escape was preserved (not silently dropped) and nothing crashed.
-        self.assertEqual([f.code for f in result], ["UNFILED"])
-        self.assertEqual(result[0].path, "sources/cards/src-2024-01-15-001.md")
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
 
     def test_uncompilable_derived_scan_pattern_fails_closed_not_crashes(self):
         """check_card_citations() must not let re.compile() raise uncaught
@@ -225,17 +195,55 @@ class CardCitations(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].code, "CARD_SCHEMA")
 
-    def test_anchor_only_id_pattern_does_not_flag_every_page_and_card(self):
+    def test_anchor_only_id_pattern_is_rejected_before_scanning(self):
         """An id.pattern of '^$' is syntactically valid regex -- it is not
-        None, not a non-string, not empty -- but stripping its anchors
-        (card_id_scan_pattern) yields the empty string, which matches every
-        position in every string. Left unguarded that turns every wiki page
-        into a CITE-unknown-card finding and every real card into UNFILED,
-        a permanent false positive caused purely by the pattern derivation.
-        It must fall back to DEFAULT_CARD_ID_PATTERN instead."""
+        None, not a non-string, not empty -- but its body between the
+        anchors is empty, so stripping them (card_id_scan_pattern) would
+        yield the empty string, which matches every position in every
+        string. load_schema()'s anchor contract rejects it with a
+        CARD_SCHEMA finding before check_card_citations() ever sees it."""
         schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": "^$"}}}))
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+
+    def test_flags_before_leading_anchor_no_longer_silently_defeats_the_scan(self):
+        """Regression guard for the reported defect: an id.pattern such as
+        '(?i)^src-...$' places an inline flag group before the literal
+        '^'. The pre-fix card_id_scan_pattern() only stripped a leading '^'
+        when it was the pattern's literal FIRST character, so the embedded
+        '^' survived into the derived scan pattern -- and without
+        re.MULTILINE, '^' only matches true position 0 of the searched
+        text, so a real, mid-file citation was never found: the cited card
+        was misreported UNFILED and no CITE finding was ever raised either.
+        load_schema() now rejects the pattern outright (CARD_SCHEMA
+        finding) instead of silently mis-scanning, and check_card_citations
+        falls back to DEFAULT_CARD_ID_PATTERN, which finds the citation."""
+        files = good_files()
+        files[SCHEMA_PATH] = json.dumps(
+            {"keys": {"id": {"pattern": r"(?i)^src-\d{4}-\d{2}-\d{2}-\d{3}$"}}})
+        findings = run(files, [])
+        codes = [f.code for f in findings]
+        self.assertIn("CARD_SCHEMA", codes)
+        self.assertNotIn("UNFILED", codes)
+        self.assertNotIn("CITE", codes)
+
+    def test_scoped_inline_flag_inside_anchors_scans_case_insensitively(self):
+        """The contract's own fix hint for a case-insensitive id family --
+        write the flag inside the anchors, e.g. ^(?i:src-...)$ -- must
+        actually work end to end: load_schema() accepts it, and the
+        derived scan pattern finds an upper-case citation of an upper-case
+        card id."""
+        schema, findings = load_schema(json.dumps(
+            {"keys": {"id": {
+                "pattern": r"^(?i:src-\d{4}-\d{2}-\d{2}-\d{3})$"}}}))
         self.assertEqual(findings, [])
-        self.assertEqual(check_card_citations(good_files(), schema), [])
+        files = {
+            "wiki/notes.md": "---\ntitle: Notes\ntopics: [x]\n---\n"
+                             "As discussed in SRC-2024-01-15-001, "
+                             "the model shipped.\n",
+            "sources/cards/SRC-2024-01-15-001.md": "---\nid: SRC-2024-01-15-001\n---\n",
+        }
+        self.assertEqual(check_card_citations(files, schema), [])
 
 
 class Frontmatter(unittest.TestCase):

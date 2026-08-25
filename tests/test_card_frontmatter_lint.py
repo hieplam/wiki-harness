@@ -19,72 +19,29 @@ FIXTURE_SCHEMA = (FIXTURE / SCHEMA_PATH).read_text(encoding="utf-8")
 class CardIdScanPattern(unittest.TestCase):
     """card_id_scan_pattern() is a pure string transform, not a second
     declaration of card-id shape: it derives lint.py's unanchored
-    citation-scan regex from card-schema.json's own anchored, whole-value
-    id.pattern by stripping exactly one leading '^' and trailing '$'."""
+    citation-scan regex from card-schema.json's own id.pattern by
+    stripping the required leading '^' and trailing '$'. It is trivial
+    (pattern[1:-1]) because load_schema()'s id.pattern contract (see
+    IdPatternAnchorContract above) guarantees any pattern reaching it is
+    exactly one leading '^' and one trailing unescaped '$' around a
+    non-empty, anchor-free body -- there is no other shape left to guess
+    at."""
 
     def test_card_id_scan_pattern_strips_anchors(self):
         self.assertEqual(
             card_id_scan_pattern(r"^src-\d{4}-\d{2}-\d{2}-\d{3}$"),
             r"src-\d{4}-\d{2}-\d{2}-\d{3}")
 
-    def test_no_anchors_present_returns_pattern_unchanged(self):
-        """'if present' -- an already-unanchored pattern passes through as-is."""
-        self.assertEqual(card_id_scan_pattern(r"src-\d{4}-\d{2}-\d{2}-\d{3}"),
-                         r"src-\d{4}-\d{2}-\d{2}-\d{3}")
-
-    def test_escaped_trailing_dollar_is_not_stripped(self):
-        """An escaped literal '\\$' at the end of the pattern (an odd
-        number of immediately preceding backslashes) is not the regex
-        end-anchor and must be left untouched, not stripped as if it were
-        the anchor '$' -- stripping it would dangle an unescaped backslash
-        and crash re.compile() downstream."""
-        self.assertEqual(
-            card_id_scan_pattern(r"^src-\d{4}-\d{2}-\d{2}-\d{3}\$"),
-            r"src-\d{4}-\d{2}-\d{2}-\d{3}\$")
-
-    def test_even_backslashes_before_dollar_is_still_a_genuine_anchor(self):
-        """An even number of trailing backslashes means the last one is
-        itself an escaped literal backslash, so the following '$' is the
-        genuine end-anchor and must still be stripped."""
-        self.assertEqual(card_id_scan_pattern(r"^abc\\$"), r"abc\\")
-
 
 class CardIdPatternFromSchema(unittest.TestCase):
-    """card_id_pattern_from_schema() must fall back to
-    DEFAULT_CARD_ID_PATTERN not only when the schema is None or omits
-    id.pattern, but whenever load_schema() accepts id.pattern as valid JSON
-    yet it is not a usable regex string -- load_schema() only validates rule
-    *names* (that 'pattern' is a known rule key), never rule *value types*,
-    so a schema it reports zero findings for can still declare id.pattern as
-    null, a number, a list, or the empty string."""
-
-    def test_null_pattern_falls_back_to_default(self):
-        """load_schema() now rejects a null id.pattern at the root (see
-        LoadSchema.test_null_pattern_value_is_an_error_for_any_key below),
-        so this exercises card_id_pattern_from_schema()'s own defensive
-        fallback directly, against a schema dict shaped this way by some
-        other route -- the structural guard stays as defense in depth even
-        though the normal load_schema() pipeline can no longer produce it."""
-        self.assertEqual(card_id_pattern_from_schema({"id": {"pattern": None}}),
-                         DEFAULT_CARD_ID_PATTERN)
-
-    def test_number_pattern_falls_back_to_default(self):
-        self.assertEqual(card_id_pattern_from_schema({"id": {"pattern": 42}}),
-                         DEFAULT_CARD_ID_PATTERN)
-
-    def test_list_pattern_falls_back_to_default(self):
-        self.assertEqual(card_id_pattern_from_schema({"id": {"pattern": ["a", "b"]}}),
-                         DEFAULT_CARD_ID_PATTERN)
-
-    def test_empty_string_pattern_falls_back_to_default(self):
-        """An empty string is rejected by load_schema() too (see
-        LoadSchema.test_empty_string_pattern_value_is_an_error below); this
-        exercises card_id_pattern_from_schema()'s own defensive fallback
-        directly. As a regex it matches every position in every string --
-        left unguarded it would silently defeat both call sites' validation
-        rather than reject or scan for anything real."""
-        self.assertEqual(card_id_pattern_from_schema({"id": {"pattern": ""}}),
-                         DEFAULT_CARD_ID_PATTERN)
+    """card_id_pattern_from_schema() falls back to DEFAULT_CARD_ID_PATTERN
+    only for the shapes a schema load_schema() has already accepted as
+    valid can still present: `schema` is None, or the schema omits 'id',
+    or declares 'id' with no 'pattern' rule under it. Every other shape --
+    non-string, non-compiling, or contract-violating id.pattern -- is now
+    rejected earlier, at load_schema() itself (see IdPatternAnchorContract
+    above and LoadSchema below), so this function no longer needs its own
+    defensive guards against them."""
 
     def test_syntactically_invalid_regex_pattern_is_rejected_by_load_schema(self):
         """load_schema() itself now validates that every 'pattern' rule
@@ -100,25 +57,6 @@ class CardIdPatternFromSchema(unittest.TestCase):
         self.assertIsNone(schema)
         self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
         self.assertEqual(card_id_pattern_from_schema(schema), DEFAULT_CARD_ID_PATTERN)
-
-    def test_anchor_only_pattern_falls_back_to_default(self):
-        """card_id_scan_pattern() strips exactly one leading '^' and
-        trailing '$'. A schema id.pattern of '^$' (or degenerating to only
-        '^' or only '$') is a syntactically valid regex -- it passes every
-        other guard here -- but its derived scan pattern is the empty
-        string, which matches every position in every string. Left
-        unguarded, check_card_citations() would report every wiki page as
-        citing an unknown card and every card as UNFILED: a permanent,
-        unfixable false-positive caused by the pattern derivation itself,
-        not by the wiki content. It must fall back to
-        DEFAULT_CARD_ID_PATTERN instead."""
-        for degenerate in ("^$", "^", "$"):
-            with self.subTest(pattern=degenerate):
-                schema, findings = load_schema(
-                    json.dumps({"keys": {"id": {"pattern": degenerate}}}))
-                self.assertEqual(findings, [])
-                self.assertEqual(card_id_pattern_from_schema(schema),
-                                 DEFAULT_CARD_ID_PATTERN)
 
 
 class LoadSchema(unittest.TestCase):
@@ -204,6 +142,87 @@ class LoadSchema(unittest.TestCase):
         schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": None}}}))
         self.assertIsNone(schema)
         self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+
+
+class IdPatternAnchorContract(unittest.TestCase):
+    """card-schema.json's id.pattern is the single, sole declaration of
+    card-id shape, and lint.py's check_card_citations() derives its
+    unanchored citation-scan regex from it by trusting that it is exactly
+    one leading '^' and one trailing unescaped '$' around a non-empty,
+    anchor-free body. Deriving that by guessing at anchor shapes (only
+    recognizing '^' when it is literally the pattern's first character) is
+    an open-ended game -- (?i)^, \\A, \\Z, escaped \\$, ... -- so
+    load_schema() now enforces a narrow, validated contract on 'id's
+    'pattern' rule instead, and fails closed for anything that does not
+    satisfy it."""
+
+    CONTRACT_MESSAGE = (
+        "key 'id': rule 'pattern' must be anchored as ^...$ with no other "
+        "anchors or flags before ^ — write flags inside the anchors, e.g. "
+        "^(?i:src-...)$")
+
+    def test_flags_before_leading_anchor_is_rejected(self):
+        """The reported defect: an id.pattern such as '(?i)^src-...$' places
+        an inline flag group before the pattern's literal '^'. The old
+        card_id_scan_pattern() only stripped a leading '^' when it was
+        literally the pattern's FIRST character, so this pattern's embedded
+        '^' survived into the derived scan pattern -- and, without
+        re.MULTILINE, '^' only matches true position 0 of the searched
+        text, so check_card_citations() could never find a citation
+        anywhere in wiki prose except when it was literally the first
+        characters of the file. load_schema() must reject this pattern
+        outright instead of silently accepting it."""
+        schema, findings = load_schema(json.dumps(
+            {"keys": {"id": {"pattern": r"(?i)^src-\d{4}-\d{2}-\d{2}-\d{3}$"}}}))
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+        self.assertEqual(findings[0].message, self.CONTRACT_MESSAGE)
+
+    def test_escaped_trailing_dollar_is_rejected(self):
+        """An id.pattern ending in an escaped literal '\\$' (an odd number
+        of immediately preceding backslashes, not the regex end-anchor)
+        does not satisfy the contract's requirement of an UNESCAPED
+        trailing '$'."""
+        schema, findings = load_schema(json.dumps(
+            {"keys": {"id": {"pattern": r"^src-\d{4}-\d{2}-\d{2}-\d{3}\$"}}}))
+        self.assertIsNone(schema)
+        self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+        self.assertEqual(findings[0].message, self.CONTRACT_MESSAGE)
+
+    def test_anchor_only_pattern_is_rejected(self):
+        """'^$', '^', and '$' are all syntactically valid regex, but none
+        has a non-empty body between (or including) the required anchors --
+        stripping the anchors would yield an empty (or absent) scan pattern
+        that matches every position in every string. The contract rejects
+        all three at load_schema() itself."""
+        for degenerate in ("^$", "^", "$"):
+            with self.subTest(pattern=degenerate):
+                schema, findings = load_schema(
+                    json.dumps({"keys": {"id": {"pattern": degenerate}}}))
+                self.assertIsNone(schema)
+                self.assertEqual([f.code for f in findings], ["CARD_SCHEMA"])
+                self.assertEqual(findings[0].message, self.CONTRACT_MESSAGE)
+
+    def test_scoped_inline_flag_inside_anchors_is_accepted(self):
+        """The contract's own fix hint -- write flags inside the anchors,
+        e.g. ^(?i:src-...)$ -- must actually be accepted: the flag group is
+        entirely within the required '^...$' body, so it declares no other
+        '^' or '$' and is a legal, non-degenerate pattern."""
+        schema, findings = load_schema(json.dumps(
+            {"keys": {"id": {
+                "pattern": r"^(?i:src-\d{4}-\d{2}-\d{2}-\d{3})$"}}}))
+        self.assertEqual(findings, [])
+        self.assertEqual(schema["id"]["pattern"],
+                         r"^(?i:src-\d{4}-\d{2}-\d{2}-\d{3})$")
+
+    def test_default_shaped_pattern_is_accepted(self):
+        """ogp-wiki's own real id.pattern -- plain '^...$', no groups, no
+        escaped anchors -- must keep loading clean; the contract is a no-op
+        for the shape the library shipped with."""
+        schema, findings = load_schema(FIXTURE_SCHEMA)
+        self.assertEqual(findings, [])
+        self.assertEqual(schema["id"]["pattern"],
+                         DEFAULT_CARD_ID_PATTERN)
 
 
 from card_frontmatter_lint import check_card
