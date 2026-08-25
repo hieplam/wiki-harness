@@ -193,16 +193,29 @@ def _violates_id_pattern_contract(pattern):
 
 def card_id_scan_pattern(schema_id_pattern):
     """Derive an unanchored substring-search pattern from the schema's
-    id.pattern: strip the required leading '^' and trailing '$'. Trivial
-    and provably correct -- not a guess -- because load_schema()'s id.pattern
-    contract (see its docstring) guarantees any pattern this function is
-    ever handed by its real callers is exactly one leading '^' and one
-    trailing unescaped '$' around a non-empty, anchor-free body. A pure
-    string transform, not a second declaration of card-id shape -- lint.py
-    uses this to find card ids embedded anywhere in wiki prose, while
-    check_commit_msg.py's validate() matches the anchored id.pattern
-    itself, whole-value, unchanged."""
-    return schema_id_pattern[1:-1]
+    id.pattern: strip the required leading '^' and trailing '$', then
+    append a trailing '\\b' word boundary. Trivial and provably correct --
+    not a guess -- because load_schema()'s id.pattern contract (see its
+    docstring) guarantees any pattern this function is ever handed by its
+    real callers is exactly one leading '^' and one trailing unescaped '$'
+    around a non-empty, anchor-free body. A pure string transform, not a
+    second declaration of card-id shape -- lint.py uses this to find card
+    ids embedded anywhere in wiki prose, while check_commit_msg.py's
+    validate() matches the anchored id.pattern itself, whole-value,
+    unchanged.
+
+    The trailing '\\b' guards against truncate-matching: without it, a real
+    card id immediately followed by more id-shaped characters (e.g. an
+    extra digit from a typo, or a longer, unrelated id family sharing the
+    same prefix) would silently match as a citation of the shorter,
+    existing id -- masking the broken/typo'd citation and hiding the
+    shorter id's own card behind an accidental match instead of correctly
+    reporting it unfiled. Every schema this function's real callers ever
+    hand it ends its body in a '\\d' (a word character), so '\\b' there
+    requires the next character, if any, to be a non-word character --
+    exactly the boundary an id's own shape implies, with no separate guess
+    about digits vs. letters needed."""
+    return schema_id_pattern[1:-1] + r"\b"
 
 
 def card_id_pattern_from_schema(schema):
@@ -260,7 +273,28 @@ def _check_value(path, key, value, rules, exists):
         if not rules.get("list"):
             return [Finding("ERROR", "CARD_VALUE", path,
                             f"'{key}' must be a single value, not a list")]
-        return []
+        findings = []
+        for item in value:
+            findings += _check_scalar_rules(path, key, item, rules, exists)
+        return findings
+    findings = _check_scalar_rules(path, key, value, rules, exists)
+    if rules.get("matches_filename") and value != PurePosixPath(path).stem:
+        findings.append(Finding("ERROR", "CARD_REF", path,
+                                f"'{key}' is '{value}' but the filename stem is "
+                                f"'{PurePosixPath(path).stem}'"))
+    return findings
+
+
+def _check_scalar_rules(path, key, value, rules, exists):
+    """enum/pattern/path/card_ref checks against a single value. Shared by
+    _check_value()'s scalar branch and, for a list-valued key, applied to
+    EACH item of the list -- RULE_KEYS and load_schema() both permit a key
+    to declare "list": true alongside "enum"/"pattern"/"path"/"card_ref",
+    and every one of those rules must still be enforced per item rather
+    than silently skipped once a value is confirmed to be a legal list.
+    "matches_filename" stays out of this shared helper and scalar-only:
+    it compares a single value to the filename stem, which is not a rule
+    any schema declares against a whole list."""
     findings = []
     if "enum" in rules and value not in rules["enum"]:
         findings.append(Finding("ERROR", "CARD_VALUE", path,
@@ -270,10 +304,6 @@ def _check_value(path, key, value, rules, exists):
         findings.append(Finding("ERROR", "CARD_VALUE", path,
                                 f"'{key}' is '{value}' - must match "
                                 f"{rules['pattern']}"))
-    if rules.get("matches_filename") and value != PurePosixPath(path).stem:
-        findings.append(Finding("ERROR", "CARD_REF", path,
-                                f"'{key}' is '{value}' but the filename stem is "
-                                f"'{PurePosixPath(path).stem}'"))
     if rules.get("path") and not exists(resolve(path, value)):
         findings.append(Finding("ERROR", "CARD_REF", path,
                                 f"'{key}' points at a missing file: {value}"))

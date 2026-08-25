@@ -124,6 +124,23 @@ class CardCitations(unittest.TestCase):
         findings = check_card_citations(files, SCHEMA)
         self.assertEqual(findings, [])
 
+    def test_trailing_digit_after_id_does_not_truncate_match_a_shorter_id(self):
+        """Reported defect: card_id_scan_pattern() derives an unanchored
+        scan regex with no trailing boundary, so a real card id immediately
+        followed by MORE digits (a typo, or a different, longer id family)
+        gets truncate-matched as a citation of the shorter, existing id --
+        silently masking the broken/typo'd citation and hiding the
+        shorter card's sibling behind an accidental match instead of
+        correctly reporting it UNFILED."""
+        files = good_files()
+        files["sources/cards/src-2024-01-15-002.md"] = GOOD_CARD.replace(
+            "src-2024-01-15-001", "src-2024-01-15-002")
+        files["wiki/widget-assembly.md"] += (
+            "\nSee src-2024-01-15-0029 for a related note.\n")
+        findings = check_card_citations(files, SCHEMA)
+        self.assertEqual([(f.code, f.path) for f in findings],
+                         [("UNFILED", "sources/cards/src-2024-01-15-002.md")])
+
     def test_falls_back_to_default_pattern_when_schema_is_none(self):
         """schema=None only when load_schema() could not load one at all --
         check_cards() already reports the CARD_SCHEMA finding for that case,

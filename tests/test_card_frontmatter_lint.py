@@ -20,17 +20,19 @@ class CardIdScanPattern(unittest.TestCase):
     """card_id_scan_pattern() is a pure string transform, not a second
     declaration of card-id shape: it derives lint.py's unanchored
     citation-scan regex from card-schema.json's own id.pattern by
-    stripping the required leading '^' and trailing '$'. It is trivial
-    (pattern[1:-1]) because load_schema()'s id.pattern contract (see
-    IdPatternAnchorContract above) guarantees any pattern reaching it is
-    exactly one leading '^' and one trailing unescaped '$' around a
-    non-empty, anchor-free body -- there is no other shape left to guess
-    at."""
+    stripping the required leading '^' and trailing '$', then appending a
+    trailing '\\b' word boundary so a real id immediately followed by more
+    id-shaped characters (e.g. an extra digit) cannot truncate-match as a
+    citation of the shorter id. It is trivial (pattern[1:-1] + r"\\b")
+    because load_schema()'s id.pattern contract (see IdPatternAnchorContract
+    above) guarantees any pattern reaching it is exactly one leading '^' and
+    one trailing unescaped '$' around a non-empty, anchor-free body -- there
+    is no other shape left to guess at."""
 
-    def test_card_id_scan_pattern_strips_anchors(self):
+    def test_card_id_scan_pattern_strips_anchors_and_adds_trailing_boundary(self):
         self.assertEqual(
             card_id_scan_pattern(r"^src-\d{4}-\d{2}-\d{2}-\d{3}$"),
-            r"src-\d{4}-\d{2}-\d{2}-\d{3}")
+            r"src-\d{4}-\d{2}-\d{2}-\d{3}\b")
 
 
 class CardIdPatternFromSchema(unittest.TestCase):
@@ -225,7 +227,7 @@ class IdPatternAnchorContract(unittest.TestCase):
                          DEFAULT_CARD_ID_PATTERN)
 
 
-from card_frontmatter_lint import check_card
+from card_frontmatter_lint import _check_value, check_card
 
 SCHEMA, _SCHEMA_ERRORS = load_schema(FIXTURE_SCHEMA)
 
@@ -346,6 +348,46 @@ class CheckCard(unittest.TestCase):
 
     def test_missing_frontmatter(self):
         self.assertEqual(self.codes("## Claims\n- a claim\n"), ["CARD_FM"])
+
+
+class CheckValueListItems(unittest.TestCase):
+    """Regression guard for the reported defect: a schema key declaring
+    both "list": true and "enum"/"pattern"/"path"/"card_ref" -- a
+    combination RULE_KEYS and load_schema() both permit -- used to return
+    `[]` unconditionally the moment a value was confirmed to be a list
+    (card_frontmatter_lint.py's old `if isinstance(value, list): ...
+    return []`), silently skipping enum/pattern/path/card_ref validation of
+    every individual list item. Today's shipped card-schema.json fixture
+    does not combine list with those rules, so these exercise the schema
+    shapes directly via `_check_value` rather than through a card fixture."""
+
+    def test_list_item_not_in_enum_is_reported(self):
+        findings = _check_value(PATH, "topics", ["a", "ZZZ-not-in-enum"],
+                                {"list": True, "enum": ["a", "b", "c"]}, exists)
+        self.assertEqual([f.code for f in findings], ["CARD_VALUE"])
+        self.assertIn("ZZZ-not-in-enum", findings[0].message)
+
+    def test_list_item_not_matching_pattern_is_reported(self):
+        findings = _check_value(PATH, "topics", ["ok", "NOT-OK"],
+                                {"list": True, "pattern": r"^[a-z-]+$"}, exists)
+        self.assertEqual([f.code for f in findings], ["CARD_VALUE"])
+        self.assertIn("NOT-OK", findings[0].message)
+
+    def test_list_item_path_rule_is_checked_per_item(self):
+        findings = _check_value(PATH, "attachments", ["missing.html"],
+                                {"list": True, "path": True}, exists)
+        self.assertEqual([f.code for f in findings], ["CARD_REF"])
+        self.assertIn("missing.html", findings[0].message)
+
+    def test_list_item_card_ref_rule_is_checked_per_item(self):
+        findings = _check_value(PATH, "related", ["src-2024-01-15-404"],
+                                {"list": True, "card_ref": True}, exists)
+        self.assertEqual([f.code for f in findings], ["CARD_REF"])
+
+    def test_all_list_items_satisfying_the_rules_produce_no_findings(self):
+        self.assertEqual(
+            _check_value(PATH, "topics", ["a", "b"],
+                         {"list": True, "enum": ["a", "b", "c"]}, exists), [])
 
 
 class Primitives(unittest.TestCase):
