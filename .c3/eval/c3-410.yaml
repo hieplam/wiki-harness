@@ -1,0 +1,5 @@
+fact: c3-410
+claim: "lint-test-suite is implemented at tests/test_lint_*.py and tests/test_genericity.py"
+code:
+  - tests/test_lint_*.py
+  - tests/test_genericity.py

@@ -1,0 +1,57 @@
+---
+target: c3-201
+scope: whole
+type: component
+parent: c3-2
+category: foundation
+title: manifest
+---
+
+## Goal
+
+Compute and diff the one integrity ledger — path, role, sha256 per MANAGED/TEMPLATE file plus
+`harness_version`/`source_ref`/`source_commit`/`source_url`/`vars` — that `init` writes once and
+`upgrade` reads, diffs, and rewrites on every run.
+
+## Parent Fit
+
+| Field | Value |
+|---|---|
+| Container | c3-2 (lifecycle) |
+| Category | Foundation — both `c3-210` (init) and `c3-211` (upgrade) depend on this component for the manifest they write/read; neither reimplements manifest logic |
+| Depends on | `ref-ownership-classes` (the `role` values this component persists per path come directly from that ref's four classes) |
+| Depended on by | `c3-210` (init step 10: write `.wiki-harness-manifest.json`); `c3-211` (upgrade steps 1, 3, 9, 12: drift check, `--adopt-drift`, template var read-back, rewrite) |
+
+## Purpose
+
+Own `manifest.py`: `compute_manifest(files, vars, source_url, ...) -> dict` (pure — builds the
+`{"library": ..., "harness_version": ..., "files": {path: {"role": ..., "sha256": ...}}}`
+structure from an already-hashed `{path: sha256}` map, never hashing files itself) and
+`diff_manifest(old, new) -> ...` (pure — compares two manifest dicts and reports per-path drift:
+hash mismatch, missing, or match), plus a thin I/O edge that reads/writes
+`.wiki-harness-manifest.json` and computes the actual sha256 of on-disk bytes. Non-goal: this
+component never decides *what to do* about drift (abort, `--adopt-drift`, print) — that decision
+lives in `c3-211` (upgrade), which calls `diff_manifest` and branches on its pure result.
+
+## Governance
+
+| Reference | Type | Governs | Precedence | Notes |
+|---|---|---|---|---|
+| rule-pure-core-impure-edge | rule | `compute_manifest`/`diff_manifest` take pre-hashed data in, return dicts out; only the I/O edge reads files/writes the manifest file | Hard | Same split `c3-101` follows for its own pure/impure boundary |
+| rule-stdlib-only-py39 | rule | Uses only `hashlib`/`json`/`pathlib` (or equivalent stdlib), opens with `from __future__ import annotations` | Hard | Same floor every module in `scripts`/`lifecycle` targets |
+| ref-ownership-classes | ref | The `role` field this component persists per path is exactly the four classes that ref defines | Hard | This component is the one place a path's `role` is actually stored and read back |
+
+## Contract
+
+| Surface | Direction | Contract | Boundary | Evidence |
+|---|---|---|---|---|
+| `compute_manifest(hashes, vars, source_url, harness_version, source_ref, source_commit) -> dict` | IN/OUT | Given an already-computed `{path: sha256}` map (managed/template roles only) plus the run's metadata, returns the exact manifest dict shape plan-v3 §2.4 specifies, including the reserved-but-unused `"removed"` role value | Pure function boundary | plan-v3.md §2.4 (Manifest format) |
+| `diff_manifest(recorded, actual) -> list[Drift]` | IN | Given the manifest's recorded `{path: {"role", "sha256"}}` and a freshly recomputed `{path: sha256}` for the same paths, returns per-path drift — `match`, `hash-mismatch`, or `missing` — for every `managed`/`template` path; never for `seeded`/`instance`/`instance-fork` | Pure function boundary | plan-v3.md §3.2 step 1 |
+| `source_url` field | IN/OUT | Always non-empty after any `init` or `upgrade --apply`, recording wherever that run actually fetched the library from | Data contract on the manifest structure itself | plan-v3.md §2.4 |
+
+## Derived Materials
+
+| Material | Must derive from | Allowed variance | Evidence |
+|---|---|---|---|
+| `wiki-harness/manifest.py` | This component's own `Contract` surfaces (plan-v3.md §2.4's manifest JSON shape, the `role` values `ref-ownership-classes` defines) | Implementation detail of the hashing edge (e.g. chunk size) may vary; the dict shape and pure/impure split may not | plan-v3.md §7 Phase 2 (T09) |
+| `.wiki-harness-manifest.json` (per wiki instance, written by `c3-210`/`c3-211`) | The `compute_manifest` surface in this component's `Contract`, unmodified | None — this file is MANAGED-BY-TOOL, never hand-edited | plan-v3.md §2.3 (ownership map) |

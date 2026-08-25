@@ -1,0 +1,6 @@
+fact: c3-411
+claim: "lifecycle-test-suite is implemented at tests/test_init.py, tests/test_upgrade.py, tests/test_harness_integrity.py"
+code:
+  - tests/test_init.py
+  - tests/test_upgrade.py
+  - tests/test_harness_integrity.py

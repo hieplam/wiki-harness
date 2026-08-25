@@ -1,0 +1,8 @@
+fact: ref-verbatim-port
+claim: "the byte-identical fork this ref mandates covers all 3 vendored linters plus both git hooks"
+code:
+  - scripts/lint.py
+  - scripts/card_frontmatter_lint.py
+  - scripts/check_commit_msg.py
+  - githooks/pre-commit
+  - githooks/commit-msg

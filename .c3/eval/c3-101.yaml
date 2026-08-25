@@ -1,0 +1,4 @@
+fact: c3-101
+claim: "lint-core is implemented at scripts/lint.py, ported verbatim from ogp-wiki plus T03/T04/T08"
+code:
+  - scripts/lint.py

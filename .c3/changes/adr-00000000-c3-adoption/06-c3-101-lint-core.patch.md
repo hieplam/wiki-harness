@@ -1,0 +1,56 @@
+---
+target: c3-101
+scope: whole
+type: component
+parent: c3-1
+category: foundation
+title: lint-core
+---
+
+## Goal
+
+Run the wiki-wide mechanical lint (broken links, orphans, card citations, card checks,
+frontmatter, index sync, raw-immutability) against a wiki instance's tree and its git-diff
+changes, and report every finding.
+
+## Parent Fit
+
+| Field | Value |
+|---|---|
+| Container | c3-1 (scripts) |
+| Category | Foundation — `c3-110` (git-hooks) depends on this component to produce the findings a pre-commit hook exits non-zero on |
+| Depends on | Nothing inside `c3-1`; `check_cards`/`check_frontmatter` call into `c3-102` (card-lint)'s `check_card`/`parse_frontmatter`/`resolve` helpers |
+| Depended on by | `c3-110` (git-hooks, invokes this as `python3 scripts/lint.py`); `c3-410` (lint-test-suite, the ~72 moved pure tests exercise this directly) |
+
+## Purpose
+
+Own `scripts/lint.py`: the pure `check_*` functions (`check_broken_links`, `check_orphans`,
+`check_card_citations`, `check_cards`, `check_frontmatter`, `check_index_sync`,
+`check_raw_immutability`) plus the pure orchestrator `run(files, changes)`, and the three impure
+edges that feed them real data — `scan(root)` (read the tree from disk), `git_changes(root)`
+(git-diff the changes), `hooks_finding(root)` (verify `core.hooksPath`). Non-goal: this component
+never decides what to do with a finding (exit code, print format) — that is `main()`'s job at the
+very bottom of the same file, itself a thin edge over `run`.
+
+## Governance
+
+| Reference | Type | Governs | Precedence | Notes |
+|---|---|---|---|---|
+| rule-pure-core-impure-edge | rule | Every `check_*` function and `run()` stay pure; only `scan()`/`git_changes()`/`hooks_finding()` touch disk/subprocess | Hard — no override on this component | This component is the literal source the rule's Golden Example is drawn from |
+| rule-stdlib-only-py39 | rule | `lint.py` imports only `re`/`subprocess`/`sys`/`pathlib` and opens with `from __future__ import annotations` | Hard | Matches the rule's own Golden Example, drawn from this same file |
+| ref-verbatim-port | ref | `lint.py` is forked byte-identical from ogp-wiki HEAD `f8b43fb`, T03/T04/T08 fixes only | Hard for the port; T03/T04/T08 are the only sanctioned deltas | This component's `Contract` surfaces are the exact behaviour the ref requires stay byte-identical |
+
+## Contract
+
+| Surface | Direction | Contract | Boundary | Evidence |
+|---|---|---|---|---|
+| `run(files, changes) -> list[Finding]` | IN/OUT | Given a `{path: text}` dict and a `[(status, path), ...]` change list, returns every `Finding` in the fixed check order `check_broken_links, check_orphans, check_card_citations, check_cards, check_frontmatter, check_index_sync` then `check_raw_immutability` — same inputs always produce the same list, same order | Pure function boundary — no I/O inside `run` or any `check_*` it calls | `/Users/hip/repo/ogp-wiki/scripts/lint.py:139-145` |
+| `scan(root) -> (files, encoding_findings)` | OUT | Reads exactly the glob set `index.md, AGENTS.md, VISION.md, sources/AGENTS.md, sources/cards/card-schema.json, wiki/**/*.md, sources/cards/*.md` plus `sources/raw/*` (existence-only), decoding as `utf-8-sig`; a non-UTF-8 file becomes an `ENCODING` finding instead of raising | Impure edge — the only place this component touches the filesystem to build `files` | `/Users/hip/repo/ogp-wiki/scripts/lint.py:169-190` |
+| `git_changes(root) -> list[(status, path)]` | OUT | Runs `git -C <root> diff HEAD --name-status`; a rename line becomes a modeled `(D, old)` + `(A, new)` pair | Impure edge — the only place this component shells out to git for change data | `/Users/hip/repo/ogp-wiki/scripts/lint.py:199-206` |
+
+## Derived Materials
+
+| Material | Must derive from | Allowed variance | Evidence |
+|---|---|---|---|
+| `wiki-harness/scripts/lint.py` | `/Users/hip/repo/ogp-wiki/scripts/lint.py` at HEAD `f8b43fb`, byte-for-byte, per this component's own Contract surfaces, plus T03/T04/T08 | Only the specific line-level changes T03/T04/T08 itemize; nothing else | plan-v3.md §7 Phase 1 (T01/T03/T04/T08) |
+| `tests/test_lint_*.py` | The ~72 moved pure tests already proving this component's Contract surfaces in ogp-wiki, repackaged into `c3-4` | Test framing/imports may change; asserted behaviour must not | plan-v3.md §7 Phase 1 (T02/T05/T06/T07) |

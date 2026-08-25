@@ -1,0 +1,51 @@
+---
+target: c3-410
+scope: whole
+type: component
+parent: c3-4
+category: feature
+title: lint-test-suite
+---
+
+## Goal
+
+Prove `c3-1` (scripts) behaves correctly — including that it stays byte-identical to ogp-wiki and
+that the library carries zero OGP-specific strings — with a suite that is itself the acceptance
+proof plan-v3's baseline oracle checks this whole extraction against.
+
+## Parent Fit
+
+| Field | Value |
+|---|---|
+| Container | c3-4 (tests) |
+| Category | Feature — this component is the business flow that exercises `c3-1`'s three Foundation components against `c3-401`'s fixture |
+| Depends on | `c3-401` (fixture, every test in this suite runs against it); `c3-101`/`c3-102`/`c3-103` (this suite's entire subject matter) |
+| Depended on by | Nothing inside `c3-4` |
+
+## Purpose
+
+Own `tests/test_lint_*.py` (the ~72 moved pure tests from ogp-wiki, repackaged, plus a new
+`git_changes()`/`HOOKS`-positive-path end-to-end test) and `tests/test_genericity.py` (a
+grep-based test asserting 0 OGP-specific strings appear anywhere in the `wiki-harness` repo).
+Non-goal: this component never tests `init`/`upgrade`/`manifest` behaviour — that is `c3-411`'s
+job entirely; this suite's subject is exactly `c3-1`'s three components and nothing in `c3-2`.
+
+## Governance
+
+| Reference | Type | Governs | Precedence | Notes |
+|---|---|---|---|---|
+| rule-stdlib-only-py39 | rule | Every `test_*.py` module here imports only the standard library (`unittest`), opens with `from __future__ import annotations` | Hard | Same floor every module in `scripts`/`lifecycle`/`tests` targets |
+| ref-verbatim-port | ref | This suite is the mechanical proof that the byte-identical fork this ref mandates actually holds — every assertion here traces back to a behaviour ogp-wiki's current tree already exhibits | Hard — a failing test here means the fork drifted | The one component whose Contract is literally "assert `c3-1`'s Contract rows hold" |
+
+## Contract
+
+| Surface | Direction | Contract | Boundary | Evidence |
+|---|---|---|---|---|
+| `tests/test_lint_*.py` | IN | Every one of the ~72 moved pure tests plus the new `git_changes()` end-to-end RAW test and the `HOOKS`-positive-path test must pass against `c3-101`/`c3-102`/`c3-103` unmodified | Test-suite boundary — consumes `c3-1`'s public functions and `c3-401`'s fixture | plan-v3.md §2.1 (`tests/test_lint_*.py`) |
+| `tests/test_genericity.py` | IN | Greps the whole `wiki-harness` repo tree and asserts 0 OGP-specific strings (e.g. no hardcoded `ogp`/organization name) appear anywhere outside this test itself | Test-suite boundary — a static grep over the checked-out repo, not over any fixture | plan-v3.md §2.1 (`test_genericity.py`) |
+
+## Derived Materials
+
+| Material | Must derive from | Allowed variance | Evidence |
+|---|---|---|---|
+| `tests/test_lint_*.py`, `tests/test_genericity.py` | The ~72 existing tests already proving this component's own `Contract` surfaces against `c3-1`'s behaviour in ogp-wiki, plus the two new tests plan-v3 names by name | New test cases only for the two named gaps (`git_changes()`/`HOOKS` E2E, genericity); existing assertions must not weaken | plan-v3.md §7 Phase 1 (T02/T05/T06/T07) |

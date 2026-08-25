@@ -1,0 +1,8 @@
+fact: c3-302
+claim: "managed-sources is implemented at the 5 MANAGED-class sources under templates/"
+code:
+  - templates/sources.AGENTS.md
+  - templates/wiki.AGENTS.md
+  - templates/sources.cards.AGENTS.md
+  - templates/CLAUDE.root.tmpl
+  - templates/CLAUDE.nested.tmpl
