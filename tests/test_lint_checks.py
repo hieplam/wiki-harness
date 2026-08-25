@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import sys
 import unittest
@@ -141,6 +142,29 @@ class CardCitations(unittest.TestCase):
             schema, findings = load_schema(schema_text)
             self.assertEqual(findings, [])
             self.assertEqual(check_card_citations(good_files(), schema), [])
+
+    def test_falls_back_to_default_pattern_when_schema_id_pattern_is_not_a_string(self):
+        """load_schema() only validates rule *names* -- it never checks that
+        a rule's *value* is the right type. A schema it reports zero
+        findings for can still declare id.pattern as null, a number, or a
+        list. Each such shape must not crash this check with an
+        AttributeError from card_id_scan_pattern(); it falls back to
+        DEFAULT_CARD_ID_PATTERN exactly like the schema=None case."""
+        for bad_pattern in (None, 42, ["a", "b"]):
+            schema_text = json.dumps({"keys": {"id": {"pattern": bad_pattern}}})
+            schema, findings = load_schema(schema_text)
+            self.assertEqual(findings, [])
+            self.assertEqual(check_card_citations(good_files(), schema), [])
+
+    def test_falls_back_to_default_pattern_when_schema_id_pattern_is_empty_string(self):
+        """An empty-string id.pattern is also accepted by load_schema() with
+        zero findings, but as a regex it matches every position in every
+        string, producing a degenerate, meaningless CITE/UNFILED finding
+        instead of scanning for real card ids. It must fall back to
+        DEFAULT_CARD_ID_PATTERN instead of being used verbatim."""
+        schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": ""}}}))
+        self.assertEqual(findings, [])
+        self.assertEqual(check_card_citations(good_files(), schema), [])
 
 
 class Frontmatter(unittest.TestCase):

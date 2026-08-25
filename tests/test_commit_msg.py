@@ -148,6 +148,36 @@ class RootFlagSchemaDriven(unittest.TestCase):
             result = self.run_cli(root, "ingest(src-2026-08-06-001): sample summary")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_schema_id_pattern_null_falls_back_to_default_pattern(self):
+        """load_schema() only validates rule *names* -- it never checks that
+        a rule's *value* is the right type. A schema it reports zero
+        findings for can still declare id.pattern as null. That must not
+        crash main() with an unhandled TypeError from re.match(None, ref);
+        it falls back to DEFAULT_CARD_ID_PATTERN exactly like an absent
+        id.pattern."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sources" / "cards").mkdir(parents=True)
+            (root / "sources" / "cards" / "card-schema.json").write_text(
+                json.dumps({"keys": {"id": {"pattern": None}}}), encoding="utf-8")
+            result = self.run_cli(root, "ingest(src-2026-08-06-001): sample summary")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_schema_id_pattern_empty_string_still_rejects_garbage_ref(self):
+        """An empty-string id.pattern is also accepted by load_schema() with
+        zero findings, but re.match('', ref) matches everything, silently
+        defeating ingest-ref validation for ANY ref. It must fall back to
+        DEFAULT_CARD_ID_PATTERN instead, so a ref that is not a real card id
+        is still rejected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sources" / "cards").mkdir(parents=True)
+            (root / "sources" / "cards" / "card-schema.json").write_text(
+                json.dumps({"keys": {"id": {"pattern": ""}}}), encoding="utf-8")
+            result = self.run_cli(root, "ingest(totally-not-a-card-id): sample summary")
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("ingest commits require ref = card id", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

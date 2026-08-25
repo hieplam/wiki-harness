@@ -129,18 +129,25 @@ def card_id_scan_pattern(schema_id_pattern):
 
 def card_id_pattern_from_schema(schema):
     """Derive the card-id pattern from a loaded schema (load_schema()'s
-    return value), falling back to DEFAULT_CARD_ID_PATTERN both when `schema`
-    is None (missing/malformed -- CARD_SCHEMA already reports that case) and
-    when a schema load_schema() accepts as valid simply omits 'id', or
-    declares 'id' with no 'pattern' rule under it -- load_schema() only
-    requires a non-empty 'keys' object using recognized rule names; it never
-    requires an 'id' key or a 'pattern' rule inside it, so this lookup must
-    tolerate both shapes rather than assume 'id.pattern' is always present.
-    The single call site both check_card_citations() and
+    return value), falling back to DEFAULT_CARD_ID_PATTERN in every case
+    where the schema itself cannot supply a usable one: when `schema` is
+    None (missing/malformed -- CARD_SCHEMA already reports that case), when
+    a schema load_schema() accepts as valid simply omits 'id', or declares
+    'id' with no 'pattern' rule under it, and when it declares 'pattern' but
+    not as a non-empty regex string -- load_schema() validates rule *names*
+    (that 'pattern' is a known rule key), never rule *value types*, so a
+    schema it reports zero findings for can still declare id.pattern as
+    null, a number, a list, or the empty string. None of those is a usable
+    matcher: passing them on would crash re.match/re.compile at the call
+    sites, or -- for the empty string -- silently match everything instead
+    of raising. The single call site both check_card_citations() and
     check_commit_msg.py's main() use to derive their matcher."""
     if schema is None:
         return DEFAULT_CARD_ID_PATTERN
-    return schema.get("id", {}).get("pattern", DEFAULT_CARD_ID_PATTERN)
+    pattern = schema.get("id", {}).get("pattern", DEFAULT_CARD_ID_PATTERN)
+    if not isinstance(pattern, str) or pattern == "":
+        return DEFAULT_CARD_ID_PATTERN
+    return pattern
 
 
 def check_card(path, text, schema, exists):

@@ -7,7 +7,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from card_frontmatter_lint import SCHEMA_PATH, card_id_scan_pattern, load_schema
+from card_frontmatter_lint import (DEFAULT_CARD_ID_PATTERN, SCHEMA_PATH,
+                                   card_id_pattern_from_schema,
+                                   card_id_scan_pattern, load_schema)
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample-wiki"
@@ -29,6 +31,40 @@ class CardIdScanPattern(unittest.TestCase):
         """'if present' -- an already-unanchored pattern passes through as-is."""
         self.assertEqual(card_id_scan_pattern(r"src-\d{4}-\d{2}-\d{2}-\d{3}"),
                          r"src-\d{4}-\d{2}-\d{2}-\d{3}")
+
+
+class CardIdPatternFromSchema(unittest.TestCase):
+    """card_id_pattern_from_schema() must fall back to
+    DEFAULT_CARD_ID_PATTERN not only when the schema is None or omits
+    id.pattern, but whenever load_schema() accepts id.pattern as valid JSON
+    yet it is not a usable regex string -- load_schema() only validates rule
+    *names* (that 'pattern' is a known rule key), never rule *value types*,
+    so a schema it reports zero findings for can still declare id.pattern as
+    null, a number, a list, or the empty string."""
+
+    def test_null_pattern_falls_back_to_default(self):
+        schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": None}}}))
+        self.assertEqual(findings, [])
+        self.assertEqual(card_id_pattern_from_schema(schema), DEFAULT_CARD_ID_PATTERN)
+
+    def test_number_pattern_falls_back_to_default(self):
+        schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": 42}}}))
+        self.assertEqual(findings, [])
+        self.assertEqual(card_id_pattern_from_schema(schema), DEFAULT_CARD_ID_PATTERN)
+
+    def test_list_pattern_falls_back_to_default(self):
+        schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": ["a", "b"]}}}))
+        self.assertEqual(findings, [])
+        self.assertEqual(card_id_pattern_from_schema(schema), DEFAULT_CARD_ID_PATTERN)
+
+    def test_empty_string_pattern_falls_back_to_default(self):
+        """An empty string is also accepted by load_schema() with zero
+        findings, but as a regex it matches every position in every string --
+        left unguarded it would silently defeat both call sites' validation
+        rather than reject or scan for anything real."""
+        schema, findings = load_schema(json.dumps({"keys": {"id": {"pattern": ""}}}))
+        self.assertEqual(findings, [])
+        self.assertEqual(card_id_pattern_from_schema(schema), DEFAULT_CARD_ID_PATTERN)
 
 
 class LoadSchema(unittest.TestCase):
