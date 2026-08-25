@@ -34,15 +34,21 @@ def extract_links(text):
 
 PAGE_REQUIRED = ("title", "topics")
 
+# Filenames that hold rules, not wiki/card content, wherever they land inside
+# the directories _wiki_pages()/_cards() sweep: AGENTS.md (progressive-
+# disclosure rules), recipes.md (sources/cards/recipes.md, T10's split), and
+# CLAUDE.md (the tracked, single-line "@AGENTS.md" pointer files, A7).
+RULES_FILES = {"AGENTS.md", "recipes.md", "CLAUDE.md"}
+
 
 def _wiki_pages(files):
     return [p for p in files if p.startswith("wiki/") and p.endswith(".md")
-            and PurePosixPath(p).name != "AGENTS.md"]
+            and PurePosixPath(p).name not in RULES_FILES]
 
 
 def _cards(files):
     return [p for p in files if p.startswith("sources/cards/") and p.endswith(".md")
-            and PurePosixPath(p).name != "AGENTS.md"]
+            and PurePosixPath(p).name not in RULES_FILES]
 
 
 def check_broken_links(files):
@@ -211,7 +217,7 @@ def scan(root):
     files = {}
     encoding_findings = []
     for pattern in ("index.md", "AGENTS.md", "VISION.md", "sources/AGENTS.md",
-                    "sources/cards/card-schema.json",
+                    "sources/cards/card-schema.json", "sources/cards/recipes.md",
                     "wiki/**/*.md", "sources/cards/*.md"):
         for f in root.glob(pattern):
             if f.is_file():
