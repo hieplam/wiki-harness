@@ -422,7 +422,7 @@ def main(argv):
     target = Path(args.target)
     library_root = Path(__file__).resolve().parent
 
-    exists = target.exists()
+    exists = target.exists() or target.is_symlink()
     target_is_dir = target.is_dir() if exists else True
     is_empty = not exists or (target_is_dir and not any(target.iterdir()))
     refusal = resolve_target_refusal(target, exists, is_empty, args.force,

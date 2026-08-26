@@ -142,6 +142,43 @@ class InitRefusesWhenTargetIsAFile(unittest.TestCase):
             self._assert_graceful_refusal(result, target, original)
 
 
+class InitRefusesWhenTargetIsABrokenSymlink(unittest.TestCase):
+    """A target path that already exists on disk as a dangling/broken
+    symlink (the link entry is there; whatever it points at is not) is the
+    sibling of InitRefusesWhenTargetIsAFile's 'target exists as a
+    non-directory' case: Path.exists() reports False for it (it follows
+    the link), but Path.mkdir(exist_ok=True) still raises FileExistsError
+    (it stats the link entry itself). init.py must route this through
+    resolve_target_refusal()'s graceful exit-2 refusal too, never crash
+    with an unhandled FileExistsError traceback, for either invocation."""
+
+    def _assert_graceful_refusal(self, result, target):
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("not empty", result.stderr)
+        self.assertIn("--force", result.stderr)
+        self.assertTrue(target.is_symlink())
+        self.assertFalse(target.exists())
+
+    def test_init_refuses_when_target_is_a_broken_symlink_without_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            target.symlink_to(Path(tmp) / "nonexistent-target-xyz")
+
+            result = _run_init(target)
+
+            self._assert_graceful_refusal(result, target)
+
+    def test_init_refuses_when_target_is_a_broken_symlink_with_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            target.symlink_to(Path(tmp) / "nonexistent-target-xyz")
+
+            result = _run_init(target, extra_args=("--force",))
+
+            self._assert_graceful_refusal(result, target)
+
+
 class InitFirstCommitGoesThroughRealHooks(unittest.TestCase):
     """Subprocess-level proof that .githooks/* are real, live hooks on the
     freshly-scaffolded repo, not merely files copied to disk: a second,
