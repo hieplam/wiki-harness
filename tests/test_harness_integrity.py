@@ -259,5 +259,85 @@ class HarnessManifestMissingRoleKeyFailsClosed(unittest.TestCase):
             self.assertIn("ERROR HARNESS", result.stdout)
 
 
+# Regression guard (Skinner finding, scripts/lint.py:378-381
+# read_harness_manifest / manifest.py:136 read_manifest): read_manifest()
+# does Path.read_text(encoding="utf-8") before json.loads(), so a manifest
+# whose bytes are not valid UTF-8 at all (not merely invalid JSON) raises
+# UnicodeDecodeError -- a distinct exception type from json.JSONDecodeError
+# -- which read_harness_manifest()'s except clause did not catch, letting
+# it propagate uncaught instead of failing closed like every other
+# untrustworthy-manifest case above.
+class HarnessNonUtf8ManifestFailsClosed(unittest.TestCase):
+    def test_harness_non_utf8_manifest_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_tree(root, CLEAN_WIKI_FILES)
+            # Not valid UTF-8 at all (as opposed to
+            # HarnessMalformedJsonManifestFailsClosed's syntactically
+            # invalid-but-UTF-8 case above) -- raises UnicodeDecodeError,
+            # not json.JSONDecodeError.
+            (root / MANIFEST_FILENAME).write_bytes(
+                b"\xff\xfe\x80\x81 not valid utf-8 at all")
+
+            # The impure edge itself must fail closed instead of letting
+            # UnicodeDecodeError propagate out of read_harness_manifest().
+            findings = check_harness(read_harness_manifest(root))
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(
+                (findings[0].severity, findings[0].code, findings[0].path),
+                ("ERROR", "HARNESS", MANIFEST_FILENAME))
+
+            # End-to-end: the actual CLI (the mandatory pre-commit hook)
+            # must not crash with a bare traceback and zero lint output.
+            lint_py = ROOT / "scripts" / "lint.py"
+            result = subprocess.run(
+                [sys.executable, str(lint_py), "--root", str(root)],
+                capture_output=True, text=True)
+            self.assertNotIn("Traceback", result.stderr, result.stderr)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("ERROR HARNESS", result.stdout)
+
+
+# Regression guard (Skinner finding, scripts/lint.py:346-361
+# _manifest_shape_error / scripts/lint.py:227-262 check_harness):
+# _manifest_shape_error() only checked that a "files" entry carries the
+# 'role'/'sha256' KEYS, never that the 'role' VALUE is one of
+# manifest.VALID_ROLES. An unrecognized role string (e.g. a hand-edit
+# typo) fell through check_harness()'s if/elif role chain with zero
+# findings emitted -- silently swallowing real drift instead of failing
+# closed like every other untrustworthy-manifest case.
+class HarnessManifestUnknownRoleFailsClosed(unittest.TestCase):
+    def test_harness_manifest_unknown_role_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            recorded_hash = hash_bytes(MANAGED_CONTENT)
+            # Real drift: the on-disk bytes no longer match the manifest's
+            # recorded hash at all.
+            drifted_content = b"scripts/lint.py HAND-EDITED, drifted contents\n"
+            (root / "scripts/lint.py").write_bytes(drifted_content)
+            manifest = compute_manifest(
+                {}, {}, "git@example.com:hieplam/wiki-harness.git",
+                harness_version="1.0.0", source_ref="v1.0.0",
+                source_commit="0" * 40, initialised_at="2026-08-26")
+            # A typo'd role value that is not one of manifest.VALID_ROLES
+            # ("managed"/"template"/"instance-fork"/"removed") --
+            # check_harness()'s if/elif role chain has no branch for it.
+            manifest["files"]["scripts/lint.py"] = {
+                "role": "mangaed",
+                "sha256": recorded_hash,
+            }
+            write_manifest(root / MANIFEST_FILENAME, manifest)
+
+            # Without role-value validation this returned [] -- the real
+            # drift above was silently swallowed. Must fail closed with
+            # exactly one ERROR HARNESS finding instead.
+            findings = check_harness(read_harness_manifest(root))
+            self.assertEqual(len(findings), 1, [tuple(f) for f in findings])
+            self.assertEqual(
+                (findings[0].severity, findings[0].code, findings[0].path),
+                ("ERROR", "HARNESS", MANIFEST_FILENAME))
+
+
 if __name__ == "__main__":
     unittest.main()

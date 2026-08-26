@@ -21,7 +21,7 @@ from card_frontmatter_lint import (  # noqa: E402  (needs the sys.path line abov
     card_id_scan_pattern, check_card, load_schema, parse_frontmatter, resolve)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from manifest import diff_manifest, hash_tree, read_manifest  # noqa: E402
+from manifest import diff_manifest, hash_tree, is_valid_role, read_manifest  # noqa: E402
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 
@@ -351,13 +351,19 @@ def _manifest_shape_error(manifest):
     even one malformed "files" entry is treated as fully untrustworthy --
     there is no principled way to trust the OTHER entries once the ledger
     itself is shown to be unreliable, e.g. by a hand edit or a partial
-    migration."""
+    migration. Also rejects a 'role' value that is not one of
+    manifest.VALID_ROLES (manifest.is_valid_role()) -- check_harness()'s
+    if/elif role chain has no branch for an unrecognized role, so letting
+    one through here would silently swallow any real drift on that path
+    instead of failing closed."""
     recorded = manifest.get("files")
     if not isinstance(recorded, dict):
         return "'files' is missing or not an object"
     for path, entry in recorded.items():
         if not isinstance(entry, dict) or "role" not in entry or "sha256" not in entry:
             return f"files entry {path!r} is missing 'role' or 'sha256'"
+        if not is_valid_role(entry["role"]):
+            return f"files entry {path!r} has unknown role {entry['role']!r}"
     return None
 
 
@@ -373,12 +379,18 @@ def read_harness_manifest(root):
     Returns None when the manifest file itself does not exist, or a
     ManifestMalformed when it exists but is not valid, trustworthy JSON --
     a truncated write (manifest.write_manifest() is a plain non-atomic
-    Path.write_text()) or a hand edit must fail closed here, not raise."""
+    Path.write_text()) or a hand edit must fail closed here, not raise.
+    This includes bytes that are not valid UTF-8 at all: read_manifest()
+    decodes with Path.read_text(encoding="utf-8") before ever parsing
+    JSON, so that decode step's UnicodeDecodeError must fail closed here
+    too, not just json.JSONDecodeError."""
     root = Path(root)
     try:
         manifest = read_manifest(root / MANIFEST_FILENAME)
     except json.JSONDecodeError as exc:
         return ManifestMalformed(f"invalid JSON: {exc}")
+    except UnicodeDecodeError as exc:
+        return ManifestMalformed(f"invalid UTF-8: {exc}")
     if manifest is None:
         return None
     shape_error = _manifest_shape_error(manifest)
