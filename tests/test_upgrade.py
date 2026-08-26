@@ -120,6 +120,24 @@ class TestCheck(unittest.TestCase):
             result = _run_check(target)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
 
+    def test_check_malformed_local_version_does_not_claim_up_to_date(self):
+        """Regression guard: a manifest whose harness_version is missing or
+        not well-formed semver must never be reported as 'up to date' --
+        that fabricates a comparison result nobody actually made, even when
+        (as here) the remote genuinely carries a newer release. --check
+        must instead surface that the local version could not be
+        determined, while still honouring the exit-0 contract (only an
+        unreachable remote/checkout exits 1)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            remote = _make_remote(tmp / "remote", ["v1.0.0", "v9.9.9"])
+            target = _make_target(tmp / "target", "not-a-semver-string", remote)
+            result = _run_check(target)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            combined = result.stdout + result.stderr
+            self.assertNotIn("up to date", combined)
+            self.assertIn("not-a-semver-string", combined)
+
 
 if __name__ == "__main__":
     unittest.main()

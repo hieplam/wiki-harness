@@ -103,16 +103,26 @@ def check_message(local_version, tags):
     3.2: "up to date at vX.Y.Z" when no remote tag's semver exceeds the
     local version (or no remote tag is well-formed semver at all), else
     the exact "vY.Z.W available -- run `upgrade --to vY.Z.W --apply`"
-    message naming the highest one."""
+    message naming the highest one.
+
+    When `local_version` is missing or not well-formed semver, no
+    comparison against `tags` is possible either way -- claiming "up to
+    date" here would fabricate a result nobody actually computed, even
+    when the remote genuinely carries a newer release. This case is
+    surfaced explicitly instead, still under the module's unchanged exit-0
+    contract (only an unreachable remote/checkout exits 1)."""
     local_parsed = parse_semver(local_version)
-    local_display = "v{}.{}.{}".format(*local_parsed) if local_parsed \
-        else f"v{local_version}"
+    if local_parsed is None:
+        return (
+            f"upgrade --check: local harness_version {local_version!r} is "
+            "not valid semver -- cannot determine whether an upgrade is "
+            "available")
     highest = highest_semver_tag(tags)
     highest_parsed = parse_semver(highest) if highest is not None else None
-    if (highest_parsed is not None and local_parsed is not None
-            and compare_semver(highest_parsed, local_parsed) > 0):
+    if highest_parsed is not None and compare_semver(highest_parsed, local_parsed) > 0:
         remote_display = "v{}.{}.{}".format(*highest_parsed)
         return f"{remote_display} available -- run `upgrade --to {remote_display} --apply`"
+    local_display = "v{}.{}.{}".format(*local_parsed)
     return f"up to date at {local_display}"
 
 
