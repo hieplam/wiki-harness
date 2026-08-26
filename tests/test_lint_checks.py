@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
+import card_frontmatter_lint
+import lint
 from card_frontmatter_lint import SCHEMA_PATH, check_card, load_schema
 from lint import (check_broken_links, check_card_citations, check_cards,
                   check_frontmatter, check_index_sync, check_orphans, run)
@@ -361,6 +363,15 @@ class RulesFilesGeneralization(unittest.TestCase):
                      if f.path in ("wiki/CLAUDE.md", "sources/cards/CLAUDE.md")
                      and f.code in ("FM", "INDEX", "ORPHAN", "CARD_FM")]
         self.assertEqual(offending, [])
+
+    def test_rules_files_single_declaration(self):
+        """RULES_FILES is declared exactly once, in card_frontmatter_lint.py
+        (lint.py already imports from that module, so the reverse import is
+        impossible); lint.py imports it rather than keeping a second copy,
+        so the wiki-wide lint and the standalone card-lint CLI can never
+        drift apart on which filenames hold rules, not content."""
+        self.assertIs(lint.RULES_FILES, card_frontmatter_lint.RULES_FILES)
+        self.assertEqual(lint.RULES_FILES, {"AGENTS.md", "recipes.md", "CLAUDE.md"})
 
 
 class TestCardKeyDoc(unittest.TestCase):

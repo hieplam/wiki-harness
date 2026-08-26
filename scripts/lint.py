@@ -15,8 +15,8 @@ from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from card_frontmatter_lint import (  # noqa: E402  (needs the sys.path line above)
-    SCHEMA_PATH, Finding, card_id_pattern_from_schema, card_id_scan_pattern,
-    check_card, load_schema, parse_frontmatter, resolve)
+    RULES_FILES, SCHEMA_PATH, Finding, card_id_pattern_from_schema,
+    card_id_scan_pattern, check_card, load_schema, parse_frontmatter, resolve)
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 
@@ -33,12 +33,6 @@ def extract_links(text):
 
 
 PAGE_REQUIRED = ("title", "topics")
-
-# Filenames that hold rules, not wiki/card content, wherever they land inside
-# the directories _wiki_pages()/_cards() sweep: AGENTS.md (progressive-
-# disclosure rules), recipes.md (sources/cards/recipes.md, T10's split), and
-# CLAUDE.md (the tracked, single-line "@AGENTS.md" pointer files, A7).
-RULES_FILES = {"AGENTS.md", "recipes.md", "CLAUDE.md"}
 
 
 def _wiki_pages(files):
