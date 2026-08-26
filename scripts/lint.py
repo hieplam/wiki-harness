@@ -24,11 +24,55 @@ from manifest import diff_manifest, hash_tree, is_valid_role, read_manifest  # n
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 
 FENCE_OPEN_RE = re.compile(r"^(`{3,}|~{3,})")
-# A run of N backticks, non-greedily up to the NEXT run of exactly N
-# backticks (CommonMark inline-code-span matching, via backreference).
-# DOTALL: per CommonMark an inline code span's opening and closing runs
-# may sit on DIFFERENT lines, so "." must match a newline too.
-INLINE_CODE_SPAN_RE = re.compile(r"(`+)(?:(?!\1).)*?\1", re.DOTALL)
+# A leading run of blockquote markers ('>' , each with up to 3 spaces of
+# indent and an optional single trailing space, repeatable for nested
+# blockquotes), plus any remaining plain indentation -- stripped before a
+# line is checked against FENCE_OPEN_RE (or, once inside a fence, against
+# the closing-fence test) so a fence marker written inside a blockquote
+# (e.g. "> ```") is still recognised as a real fence, not left for the
+# inline-code fallback (which only ever matches backtick runs, never
+# tildes) to accidentally rescue.
+CONTAINER_PREFIX_RE = re.compile(r"^(?:[ \t]{0,3}>[ \t]?)*[ \t]*")
+# A run of backtick characters (CommonMark inline-code-span delimiters).
+# Every match of this pattern is already a MAXIMAL run by construction
+# (finditer never starts mid-run and `+` is greedy), so pairing runs by
+# exact length below satisfies CommonMark's "isolated run of the same
+# length" rule without any extra bookkeeping.
+BACKTICK_RUN_RE = re.compile(r"`+")
+
+
+def _strip_backtick_delimited_spans(chunk):
+    """Pure. CommonMark inline-code-span matching over one paragraph
+    `chunk`: the leftmost backtick run is a candidate opener; scan forward
+    for the next run of the SAME length to close it. If none exists, that
+    run is not an opener at all (literal text) and the NEXT run becomes
+    the new candidate -- exactly CommonMark's rule, and (because each run
+    found here is already maximal) immune to matching a same-length
+    PREFIX of a longer run the way a backreference substring match would.
+    A matched span's embedded newlines are kept (its content is blanked,
+    not removed) so the line count stays unchanged."""
+    runs = list(BACKTICK_RUN_RE.finditer(chunk))
+    out = []
+    last_end = 0
+    i = 0
+    n = len(runs)
+    while i < n:
+        opener = runs[i]
+        j = i + 1
+        while j < n and len(runs[j].group(0)) != len(opener.group(0)):
+            j += 1
+        if j == n:
+            i += 1
+            continue
+        closer = runs[j]
+        out.append(chunk[last_end:opener.start()])
+        inner = chunk[opener.end():closer.start()]
+        out.append("\n" * inner.count("\n"))
+        last_end = closer.end()
+        i = j + 1
+    out.append(chunk[last_end:])
+    return "".join(out)
+
 
 MANIFEST_FILENAME = ".wiki-harness-manifest.json"
 
@@ -67,14 +111,15 @@ def _strip_code(text):
     fence_char = None
     fence_len = 0
     for line in text.split("\n"):
+        content = CONTAINER_PREFIX_RE.sub("", line, count=1)
         if fence_char is not None:
-            core = line.strip()
+            core = content.strip()
             if len(core) >= fence_len and core and set(core) == {fence_char}:
                 fence_char = None
                 fence_len = 0
             out_lines.append("")
             continue
-        opener = FENCE_OPEN_RE.match(line.lstrip())
+        opener = FENCE_OPEN_RE.match(content)
         if opener:
             fence_char = opener.group(1)[0]
             fence_len = len(opener.group(1))
@@ -85,9 +130,9 @@ def _strip_code(text):
 
 
 def _strip_inline_code_spans(lines):
-    """Pure. Applies INLINE_CODE_SPAN_RE to each contiguous run of
-    non-blank lines (a paragraph) independently, joins with '\\n' -- same
-    line count as `lines` in, same line count out."""
+    """Pure. Applies _strip_backtick_delimited_spans() to each contiguous
+    run of non-blank lines (a paragraph) independently, joins with '\\n'
+    -- same line count as `lines` in, same line count out."""
     result = []
     para_start = None
 
@@ -96,8 +141,7 @@ def _strip_inline_code_spans(lines):
         if para_start is None:
             return
         chunk = "\n".join(lines[para_start:end])
-        stripped = INLINE_CODE_SPAN_RE.sub(
-            lambda m: "\n" * m.group(0).count("\n"), chunk)
+        stripped = _strip_backtick_delimited_spans(chunk)
         result.extend(stripped.split("\n"))
         para_start = None
 

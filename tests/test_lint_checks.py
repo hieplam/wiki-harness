@@ -534,6 +534,37 @@ class LinksInsideCode(unittest.TestCase):
         self.assertEqual([(f.code, f.message) for f in index_findings],
                          [("INDEX", "wiki page not listed: wiki/real.md")])
 
+    def test_link_inside_blockquoted_fenced_code_is_not_a_link(self):
+        """A fence marker prefixed by a blockquote '>' still opens/closes a
+        real fenced code block per CommonMark; a tilde fence must be
+        honoured there too (the inline-code fallback only ever matches
+        backtick runs, so it cannot rescue a tilde-fenced block)."""
+        files = {
+            "wiki/page.md": (
+                "# Page\n"
+                "> ~~~\n"
+                "> [ghost](./ghost.md)\n"
+                "> ~~~\n"
+            ),
+        }
+        self.assertEqual(check_broken_links(files), [])
+
+    def test_inline_code_span_delimiters_must_be_maximal_runs(self):
+        """CommonMark inline code spans match backtick runs by EXACT length
+        against an ISOLATED (maximal) run -- a backreference substring match
+        can close early against a same-length PREFIX of a longer interior
+        run, leaving a stray backtick that then pairs with an unrelated
+        later backtick and swallows a genuine link in between. Per real
+        CommonMark this text has NO code span at all (the 4-backtick run
+        never matches the 3-backtick opener, and the lone trailing backtick
+        has no closer), so the link is real and must be checked."""
+        files = {
+            "wiki/page.md": "See ```abc```` link [ghost](./ghost.md) end`.\n",
+        }
+        findings = check_broken_links(files)
+        self.assertEqual([f.code for f in findings], ["LINK"])
+        self.assertIn("./ghost.md", findings[0].message)
+
     def test_rules_file_example_links_do_not_fail_a_fresh_scaffold(self):
         """The REAL templates/wiki.AGENTS.md and the REAL, rendered
         templates/AGENTS.root.md.tmpl both carry documentation-example links
