@@ -2,7 +2,7 @@ fact: rule-stdlib-only-py39
 claim: "every wiki-harness Python module targets Python 3.9, stdlib only, with from __future__ import annotations first"
 code:
   - scripts/*.py
-  - manifest.py
+  - scripts/manifest.py
   - init.py
   - upgrade.py
   - tests/*.py

@@ -19,8 +19,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from card_frontmatter_lint import (  # noqa: E402  (needs the sys.path line above)
     RULES_FILES, SCHEMA_PATH, Finding, card_id_pattern_from_schema,
     card_id_scan_pattern, check_card, load_schema, parse_frontmatter, resolve)
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from manifest import diff_manifest, hash_tree, is_valid_role, read_manifest  # noqa: E402
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")

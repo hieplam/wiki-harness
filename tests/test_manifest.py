@@ -14,7 +14,7 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from manifest import (Drift, VALID_ROLES, compute_manifest, diff_manifest,
                       hash_bytes, is_valid_role, read_manifest, write_manifest)

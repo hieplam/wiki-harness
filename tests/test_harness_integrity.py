@@ -12,6 +12,8 @@ pure judgment.
 """
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,10 +21,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from manifest import compute_manifest, hash_bytes, write_manifest  # noqa: E402
+from manifest import compute_manifest, hash_bytes, hash_tree, write_manifest  # noqa: E402
 from lint import (MANIFEST_FILENAME, check_harness, read_harness_manifest,  # noqa: E402
                   run, scan)
 
@@ -337,6 +338,49 @@ class HarnessManifestUnknownRoleFailsClosed(unittest.TestCase):
             self.assertEqual(
                 (findings[0].severity, findings[0].code, findings[0].path),
                 ("ERROR", "HARNESS", MANIFEST_FILENAME))
+
+
+# Regression guard (Skinner-tracker Blocker, A8): plan-v3 section 2.2 only
+# vendors scripts/{lint,card_frontmatter_lint,check_commit_msg}.py into a
+# real wiki -- lint.py's `from manifest import ...` cannot resolve there
+# unless manifest.py is ALSO vendored under scripts/ (A8). This test proves
+# lint.py runs standalone from a directory that carries only scripts/*.py
+# copied by glob (never a hardcoded 3-file list) and nothing else on
+# PYTHONPATH -- exactly the shape init.py/--adopt actually produce in a
+# real wiki.
+class LintRunsFromVendoredScriptsDirAlone(unittest.TestCase):
+    def test_lint_runs_from_vendored_scripts_dir_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_tree(root, CLEAN_WIKI_FILES)
+            (root / "scripts").mkdir()
+            # Glob, never a hardcoded 3-file list, so a future fourth
+            # vendored module (e.g. scripts/manifest.py, A8) is covered
+            # by this test without editing it.
+            managed_paths = []
+            for src in sorted((ROOT / "scripts").glob("*.py")):
+                shutil.copy(src, root / "scripts" / src.name)
+                managed_paths.append(f"scripts/{src.name}")
+
+            actual = hash_tree(root, managed_paths)
+            hashes = {path: {"role": "managed", "sha256": actual[path]}
+                     for path in managed_paths}
+            manifest = compute_manifest(
+                hashes, {}, "git@example.com:hieplam/wiki-harness.git",
+                harness_version="1.0.0", source_ref="v1.0.0",
+                source_commit="0" * 40, initialised_at="2026-08-26")
+            write_manifest(root / MANIFEST_FILENAME, manifest)
+
+            env = dict(os.environ)
+            env.pop("PYTHONPATH", None)
+            result = subprocess.run(
+                [sys.executable, str(root / "scripts" / "lint.py"),
+                 "--root", str(root)],
+                cwd=str(root), env=env, capture_output=True, text=True)
+
+            self.assertNotIn("Traceback", result.stderr, result.stderr)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("HARNESS", result.stdout, result.stdout)
 
 
 if __name__ == "__main__":
