@@ -353,15 +353,23 @@ def _manifest_shape_error(manifest):
     manifest.VALID_ROLES (manifest.is_valid_role()) -- check_harness()'s
     if/elif role chain has no branch for an unrecognized role, so letting
     one through here would silently swallow any real drift on that path
-    instead of failing closed."""
+    instead of failing closed. Rejects a non-object top-level manifest (a
+    JSON list/string/number/bool) before ever calling .get() on it, and
+    rejects a non-string 'role' value (a JSON array or object) before ever
+    feeding it to is_valid_role()'s frozenset membership test -- both
+    would otherwise raise (AttributeError, TypeError respectively) instead
+    of failing closed."""
+    if not isinstance(manifest, dict):
+        return "manifest is not a JSON object"
     recorded = manifest.get("files")
     if not isinstance(recorded, dict):
         return "'files' is missing or not an object"
     for path, entry in recorded.items():
         if not isinstance(entry, dict) or "role" not in entry or "sha256" not in entry:
             return f"files entry {path!r} is missing 'role' or 'sha256'"
-        if not is_valid_role(entry["role"]):
-            return f"files entry {path!r} has unknown role {entry['role']!r}"
+        role = entry["role"]
+        if not isinstance(role, str) or not is_valid_role(role):
+            return f"files entry {path!r} has unknown role {role!r}"
     return None
 
 

@@ -383,5 +383,81 @@ class LintRunsFromVendoredScriptsDirAlone(unittest.TestCase):
             self.assertNotIn("HARNESS", result.stdout, result.stdout)
 
 
+# Regression guard (Skinner finding, scripts/lint.py:357
+# _manifest_shape_error): a syntactically valid JSON manifest whose
+# top-level value is not a JSON object at all (a list, string, number, or
+# bool) crashed with an uncaught AttributeError from
+# `manifest.get("files")` -- lists/strs/etc have no .get() -- instead of
+# failing closed like every other untrustworthy-manifest shape above.
+class HarnessNonObjectTopLevelManifestFailsClosed(unittest.TestCase):
+    def test_harness_non_object_top_level_manifest_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_tree(root, CLEAN_WIKI_FILES)
+            # Valid JSON (a bare list), but not a JSON object -- the exact
+            # shape `manifest.get("files")` cannot survive.
+            (root / MANIFEST_FILENAME).write_text("[]", encoding="utf-8")
+
+            # The impure edge itself must fail closed instead of letting
+            # AttributeError propagate out of read_harness_manifest().
+            findings = check_harness(read_harness_manifest(root))
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(
+                (findings[0].severity, findings[0].code, findings[0].path),
+                ("ERROR", "HARNESS", MANIFEST_FILENAME))
+
+            # End-to-end: the actual CLI (the mandatory pre-commit hook)
+            # must not crash with a bare traceback and zero lint output.
+            lint_py = ROOT / "scripts" / "lint.py"
+            result = subprocess.run(
+                [sys.executable, str(lint_py), "--root", str(root)],
+                capture_output=True, text=True)
+            self.assertNotIn("Traceback", result.stderr, result.stderr)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("ERROR HARNESS", result.stdout)
+
+
+# Regression guard (Skinner finding, scripts/lint.py:363
+# _manifest_shape_error -> scripts/manifest.py:42 is_valid_role): a
+# manifest "files" entry whose 'role' value is an unhashable type (a JSON
+# array or object) crashed with an uncaught TypeError from the frozenset
+# membership test `role in VALID_ROLES` instead of failing closed like the
+# unknown-role-string case above.
+class HarnessManifestUnhashableRoleFailsClosed(unittest.TestCase):
+    def test_harness_manifest_unhashable_role_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            (root / "scripts/lint.py").write_bytes(MANAGED_CONTENT)
+            manifest = compute_manifest(
+                {}, {}, "git@example.com:hieplam/wiki-harness.git",
+                harness_version="1.0.0", source_ref="v1.0.0",
+                source_commit="0" * 40, initialised_at="2026-08-26")
+            # An unhashable role value (a JSON array) -- `role in
+            # VALID_ROLES` (a frozenset membership test) cannot even
+            # evaluate this without raising TypeError.
+            manifest["files"]["scripts/lint.py"] = {
+                "role": ["managed"],
+                "sha256": hash_bytes(MANAGED_CONTENT),
+            }
+            write_manifest(root / MANIFEST_FILENAME, manifest)
+
+            # The impure edge itself must fail closed instead of letting
+            # TypeError propagate out of read_harness_manifest().
+            findings = check_harness(read_harness_manifest(root))
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(
+                (findings[0].severity, findings[0].code, findings[0].path),
+                ("ERROR", "HARNESS", MANIFEST_FILENAME))
+
+            lint_py = ROOT / "scripts" / "lint.py"
+            result = subprocess.run(
+                [sys.executable, str(lint_py), "--root", str(root)],
+                capture_output=True, text=True)
+            self.assertNotIn("Traceback", result.stderr, result.stderr)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("ERROR HARNESS", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
