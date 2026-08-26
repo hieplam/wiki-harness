@@ -133,12 +133,39 @@ def parse_origins(raw):
     return items or ["session"]
 
 
+class AnswersFileError(Exception):
+    """Raised when --answers-file's content cannot be parsed into the shape
+    collect_vars() expects (invalid JSON, a non-object top level, or a
+    required variable whose value is not a JSON string) -- caught by
+    main() and converted into the same clean exit-2 stderr refusal every
+    other invalid-input path in this module uses (resolve_target_refusal(),
+    missing_vars_message()), never an unhandled traceback."""
+
+
 def parse_answers_file(text):
     """Pure. Parses --answers-file's JSON text (the 4 required variables
     plus an optional 'origins' comma-separated string, same shape as the
     individual flags) into a dict; no filesystem access of its own --
-    read_answers_file() below is the impure edge that supplies `text`."""
-    return json.loads(text)
+    read_answers_file() below is the impure edge that supplies `text`.
+    Raises AnswersFileError -- deterministically, never an unhandled
+    json.JSONDecodeError/AttributeError -- for malformed JSON, a non-object
+    top level, or a required variable whose value is not a JSON string
+    (the individual --flags are argparse-guaranteed to always be a str;
+    the file path must guarantee the same shape)."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise AnswersFileError(f"is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise AnswersFileError(
+            "must be a JSON object mapping variable names to string "
+            f"values, not {type(data).__name__}")
+    for key in REQUIRED_VARS:
+        if key in data and not isinstance(data[key], str):
+            raise AnswersFileError(
+                f"value for {key!r} must be a JSON string, got "
+                f"{type(data[key]).__name__}")
+    return data
 
 
 def merge_answers(cli_values, cli_origins, file_values):
@@ -225,9 +252,19 @@ def _copy_verbatim(src, dst):
 
 def read_answers_file(path):
     """Impure edge: reads and JSON-decodes an --answers-file path.
-    parse_answers_file() above does the actual (pure) parsing."""
-    text = Path(path).read_text(encoding="utf-8")
-    return parse_answers_file(text)
+    parse_answers_file() above does the actual (pure) parsing/validation;
+    this edge folds the filesystem-level failure (missing file, permission
+    denied, ...) into the same AnswersFileError channel and prefixes every
+    message with `path` so the caller always knows which file was at
+    fault -- never an unhandled OSError traceback."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise AnswersFileError(f"--answers-file {path} could not be read: {exc}") from exc
+    try:
+        return parse_answers_file(text)
+    except AnswersFileError as exc:
+        raise AnswersFileError(f"--answers-file {path} {exc}") from exc
 
 
 def parse_args(argv):
@@ -468,7 +505,11 @@ def main(argv):
         print(refusal, file=sys.stderr)
         return 2
 
-    values, origins_raw = collect_vars(args)
+    try:
+        values, origins_raw = collect_vars(args)
+    except AnswersFileError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     missing = missing_required_vars(values)
     if missing:
         print(missing_vars_message(missing), file=sys.stderr)
