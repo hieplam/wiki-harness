@@ -7,9 +7,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from lint import check_index_sync, check_raw_immutability, parse_name_status, run, scan
+from lint import (MANIFEST_FILENAME, check_index_sync, check_raw_immutability,  # noqa: E402
+                  parse_name_status, run, scan)
+from manifest import compute_manifest, write_manifest  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample-wiki"
@@ -104,6 +107,11 @@ class RunAndScan(unittest.TestCase):
                 p = root / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(text, encoding="utf-8")
+            # a lint-clean tree under wiki-harness carries a self-consistent manifest (T11)
+            write_manifest(root / MANIFEST_FILENAME, compute_manifest(
+                {}, {}, "git@example.com:hieplam/wiki-harness.git",
+                harness_version="1.0.0", source_ref="v1.0.0",
+                source_commit="0" * 40, initialised_at="2026-08-26"))
             lint_py = Path(__file__).resolve().parent.parent / "scripts" / "lint.py"
             result = subprocess.run(
                 [sys.executable, str(lint_py), "--root", str(root)],

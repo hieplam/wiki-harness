@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+from collections import namedtuple
 from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -18,7 +19,19 @@ from card_frontmatter_lint import (  # noqa: E402  (needs the sys.path line abov
     RULES_FILES, SCHEMA_PATH, Finding, card_id_pattern_from_schema,
     card_id_scan_pattern, check_card, load_schema, parse_frontmatter, resolve)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from manifest import diff_manifest, hash_tree, read_manifest  # noqa: E402
+
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
+
+MANIFEST_FILENAME = ".wiki-harness-manifest.json"
+
+# read_harness_manifest()'s return type: harness_version is the manifest's
+# recorded library version (used only by the instance-fork WARN message
+# below); recorded is the manifest's "files" map ({path: {"role":...,
+# "sha256":...}}); actual is {path: sha256} freshly hashed off disk for
+# every path recorded with a role this check judges.
+ManifestState = namedtuple("ManifestState", "harness_version recorded actual")
 
 
 def extract_links(text):
@@ -162,6 +175,58 @@ def check_raw_immutability(changes):
             if path.startswith("sources/raw/") and not status.startswith("A")]
 
 
+def check_harness(manifest_state):
+    """Pure. Eighth check, mirroring check_raw_immutability(): plain data
+    (a ManifestState, or None) in, Finding list out -- never touches the
+    filesystem itself. `manifest_state` is whatever read_harness_manifest()
+    (the impure edge below) returned.
+
+    manifest_state is None -> the manifest itself is missing entirely: one
+    ERROR, and every other check keeps running normally (this function is
+    never called from run(), so nothing else is short-circuited by it).
+
+    Otherwise, judges each recorded path's drift (manifest.diff_manifest()
+    against the freshly-hashed actual bytes): a managed/template path
+    that's missing or hash-mismatched is an ERROR (harness-owned content
+    changed or vanished without the manifest being updated); an
+    instance-fork path whose hash differs from its recorded (pre-fork)
+    hash is a WARN reminder that it will never receive future updates. No
+    upgrade-in-progress-marker branch (v3, A3) -- that mechanism does not
+    exist."""
+    if manifest_state is None:
+        return [Finding(
+            "ERROR", "HARNESS", MANIFEST_FILENAME,
+            "manifest missing — this wiki was not initialised with "
+            "wiki-harness, or the manifest was deleted; run 'upgrade "
+            "--adopt' to generate one.")]
+    findings = []
+    for drift in diff_manifest(manifest_state.recorded, manifest_state.actual):
+        role = manifest_state.recorded[drift.path]["role"]
+        if role in ("managed", "template"):
+            if drift.status == "missing":
+                findings.append(Finding(
+                    "ERROR", "HARNESS", drift.path,
+                    "managed file missing — harness is incomplete; "
+                    "re-run upgrade or re-init."))
+            elif drift.status == "hash_mismatch":
+                expected = manifest_state.recorded[drift.path]["sha256"]
+                found = manifest_state.actual[drift.path]
+                findings.append(Finding(
+                    "ERROR", "HARNESS", drift.path,
+                    "local edit conflicts with library-managed content "
+                    f"(expected sha256 {expected}, found sha256 {found}) "
+                    "— this file is harness-owned; run 'upgrade "
+                    f"--adopt-drift {drift.path}' if this is intentional, "
+                    f"or 'git checkout -- {drift.path}' to discard it."))
+        elif role == "instance-fork" and drift.status == "hash_mismatch":
+            findings.append(Finding(
+                "WARN", "HARNESS", drift.path,
+                f"forked from wiki-harness at v{manifest_state.harness_version}; "
+                "local edits are permanent and will not receive future "
+                "updates."))
+    return findings
+
+
 def run(files, changes):
     """Loads the schema once here so check_card_citations() can be
     schema-driven; check_cards() still loads it a second time itself, since
@@ -256,12 +321,34 @@ def hooks_finding(root):
     return []
 
 
+def read_harness_manifest(root):
+    """Impure edge, mirroring hooks_finding(root): reads
+    .wiki-harness-manifest.json directly off disk and, independent of
+    scan()'s decoded files dict, reads raw bytes (manifest.hash_tree()'s
+    Path.read_bytes()) of every path the manifest lists with a role
+    check_harness() judges -- managed/template (the harness-owned content
+    it can flag as drifted/missing) and instance-fork (the once-managed
+    content it can flag as permanently forked) -- so a HARNESS finding is
+    never masked by scan()'s UTF-8 decoding or its file-pattern globs.
+    Returns None when the manifest file itself does not exist."""
+    root = Path(root)
+    manifest = read_manifest(root / MANIFEST_FILENAME)
+    if manifest is None:
+        return None
+    recorded = manifest.get("files", {})
+    hashed_paths = [path for path, entry in recorded.items()
+                    if entry.get("role") in ("managed", "template", "instance-fork")]
+    actual = hash_tree(root, hashed_paths)
+    return ManifestState(manifest.get("harness_version", ""), recorded, actual)
+
+
 def main(argv):
     root = Path(argv[argv.index("--root") + 1]) if "--root" in argv \
         else Path(__file__).resolve().parent.parent
     files, enc = scan(root)
     findings = run(files, git_changes(root)) + enc
     findings += hooks_finding(root)
+    findings += check_harness(read_harness_manifest(root))
     for f in sorted(findings):
         print(f"{f.severity} {f.code} {f.path}: {f.message}")
     errors = sum(1 for f in findings if f.severity == "ERROR")
