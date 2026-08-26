@@ -7,12 +7,16 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 UPGRADE_PY = ROOT / "upgrade.py"
 
 sys.path.insert(0, str(ROOT / "scripts"))
 from manifest import compute_manifest, write_manifest  # noqa: E402
+
+sys.path.insert(0, str(ROOT))
+import upgrade  # noqa: E402  (needs the sys.path line above)
 
 MANIFEST_FILENAME = ".wiki-harness-manifest.json"
 
@@ -119,6 +123,43 @@ class TestCheck(unittest.TestCase):
             target = _make_target(tmp / "target", "1.0.0", unreachable)
             result = _run_check(target)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+
+    def test_check_ls_remote_tags_passes_timeout(self):
+        """Regression guard: ls_remote_tags's `git ls-remote` subprocess
+        call must bound its wait via `timeout=`, so a reachable-but-
+        unresponsive remote (firewall drop, network black hole, stalled
+        VPN path) is reported as unreachable within a bounded time instead
+        of hanging past the module's own 'one round-trip' contract."""
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured.update(kwargs)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with patch.object(upgrade.subprocess, "run", side_effect=fake_run):
+            upgrade.ls_remote_tags("irrelevant")
+
+        self.assertIn("timeout", captured)
+        self.assertIsNotNone(captured["timeout"])
+        self.assertGreater(captured["timeout"], 0)
+
+    def test_check_stalled_remote_exits_1(self):
+        """A remote that is reachable but never responds -- `git ls-remote`
+        hitting the timeout above and subprocess.run raising
+        TimeoutExpired -- must be treated exactly like a hard-failure
+        unreachable remote: --check exits 1, never an uncaught
+        exception/traceback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            target = _make_target(
+                tmp / "target", "1.0.0", "https://example.invalid/repo.git")
+            with patch.object(
+                    upgrade.subprocess, "run",
+                    side_effect=subprocess.TimeoutExpired(
+                        cmd=["git", "ls-remote", "--tags"], timeout=1)):
+                self.assertIsNone(upgrade.ls_remote_tags(str(target)))
+                rc = upgrade.main([str(target), "--check"])
+            self.assertEqual(rc, 1)
 
     def test_check_malformed_local_version_does_not_claim_up_to_date(self):
         """Regression guard: a manifest whose harness_version is missing or

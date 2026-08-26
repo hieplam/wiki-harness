@@ -30,6 +30,12 @@ MANIFEST_FILENAME = ".wiki-harness-manifest.json"
 
 SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
+# --check's one round trip must stay bounded: a remote that is reachable
+# but never responds (firewall drop, network black hole, stalled VPN path)
+# must be reported as unreachable within this many seconds, never left to
+# hang indefinitely.
+LS_REMOTE_TIMEOUT_SECONDS = 10
+
 
 def parse_semver(tag):
     """Pure. Parses a 'vX.Y.Z' or 'X.Y.Z' string into a (major, minor,
@@ -133,11 +139,17 @@ def ls_remote_tags(source_url):
     --check's one round trip (a local filesystem checkout path or a real
     remote URL are both valid arguments to git ls-remote; no fetch of file
     content, no scratch copy, no write, ever). Returns the parsed tag name
-    list on success, or None when the remote/checkout is unreachable
-    (non-zero exit -- unknown host, missing path, network failure)."""
-    result = subprocess.run(
-        ["git", "ls-remote", "--tags", str(source_url)],
-        capture_output=True, text=True)
+    list on success, or None when the remote/checkout is unreachable --
+    either a non-zero exit (unknown host, missing path, network failure) or
+    a reachable-but-unresponsive remote that fails to answer within
+    LS_REMOTE_TIMEOUT_SECONDS (firewall drop, network black hole, stalled
+    VPN path)."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--tags", str(source_url)],
+            capture_output=True, text=True, timeout=LS_REMOTE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return None
     if result.returncode != 0:
         return None
     return parse_ls_remote_tags(result.stdout)
