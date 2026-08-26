@@ -440,6 +440,36 @@ class Cli(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertIn("missing required field 'title'", result.stdout)
 
+    def test_cli_default_discovery_skips_rules_files(self):
+        """main()'s default discovery (no file args) must skip RULES_FILES
+        (sources/cards/recipes.md, sources/cards/CLAUDE.md) exactly like
+        lint.py's own _cards() does: T10/T12 will legitimately place both
+        files there, neither carries frontmatter, and routing either into
+        check_card() would report bogus CARD_FM findings. Explicit file
+        arguments are still checked as given -- passing recipes.md by name
+        must still report CARD_FM."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sources" / "cards").mkdir(parents=True)
+            (root / SCHEMA_PATH).write_text(FIXTURE_SCHEMA, encoding="utf-8")
+            card_path = root / "sources" / "cards" / "src-2024-01-15-001.md"
+            card_path.write_text(CARD, encoding="utf-8")
+            recipes_path = root / "sources" / "cards" / "recipes.md"
+            recipes_path.write_text(
+                "# Recipe: how to file a card\n\nNo frontmatter here.\n",
+                encoding="utf-8")
+            (root / "sources" / "cards" / "CLAUDE.md").write_text(
+                "@AGENTS.md\n", encoding="utf-8")
+
+            result = self.run_cli("--root", str(root))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("0 error(s)", result.stdout)
+
+            explicit = self.run_cli("--root", str(root), str(recipes_path))
+            self.assertEqual(explicit.returncode, 1, explicit.stdout)
+            self.assertIn("CARD_FM", explicit.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

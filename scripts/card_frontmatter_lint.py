@@ -28,6 +28,16 @@ SCHEMA_PATH = "sources/cards/card-schema.json"
 RULE_KEYS = {"required", "enum", "pattern", "list", "path", "card_ref",
              "matches_filename", "description"}
 
+# Filenames that hold rules, not card content, wherever they land inside
+# sources/cards/: AGENTS.md (progressive-disclosure rules), recipes.md
+# (sources/cards/recipes.md, T10's split), and CLAUDE.md (the tracked,
+# single-line "@AGENTS.md" pointer files, A7). Declared here, once, because
+# lint.py already imports from this module -- a reverse import would be
+# circular -- so lint.py imports RULES_FILES rather than keeping its own
+# copy; both entry points then agree on the same set by construction, never
+# by keeping two literals in sync by hand.
+RULES_FILES = {"AGENTS.md", "recipes.md", "CLAUDE.md"}
+
 # Fallback only -- used when the schema is missing or malformed (that case
 # already produces a CARD_SCHEMA finding) or when a schema load_schema()
 # accepts as valid simply does not declare an id.pattern rule (load_schema()
@@ -301,10 +311,10 @@ def main(argv):
         # discovery must not stay pinned to the library's former default
         # id prefix once a wiki customizes it away -- mirrors lint.py's own
         # location-based _cards() definition (sources/cards/*.md, minus
-        # AGENTS.md, which holds rules, not card content).
+        # RULES_FILES, which hold rules, not card content).
         targets = [Path(a) for a in args] or \
             sorted(p for p in (root / "sources" / "cards").glob("*.md")
-                   if p.name != "AGENTS.md")
+                   if p.name not in RULES_FILES)
         for target in targets:
             if not target.is_absolute() and not target.is_file() and (root / target).is_file():
                 target = root / target
