@@ -460,12 +460,15 @@ class LinksInsideCode(unittest.TestCase):
         self.assertEqual([f.code for f in findings], ["LINK"])
         self.assertIn("./ghost.md", findings[0].message)
 
-    def test_multiline_inline_code_span_is_not_a_link(self):
-        """CommonMark allows an inline code span's opening and closing
-        backtick run to sit on DIFFERENT lines (a line ending inside the
-        span becomes a space, it does not close the span). A regex applied
-        independently per line would leave the link inside this still-open
-        span unstripped -- reproduce that exact false positive."""
+    def test_multiline_inline_code_span_is_scanned_by_design(self):
+        """The A10 spec pairs an inline code span's backtick runs on ONE
+        line only (CommonMark's cross-line span support is explicitly out
+        of scope -- "when in doubt, scan"). A backtick with no partner on
+        its OWN line is unpaired -- literal text, not a span delimiter --
+        so the link on the following line is scanned as ordinary prose and
+        the broken target is reported (over-check by design, not a defect:
+        CommonMark would treat this as one open span with no visible link,
+        but this linter deliberately does not implement cross-line spans)."""
         files = {
             "wiki/page.md": (
                 "# Page\n"
@@ -473,7 +476,9 @@ class LinksInsideCode(unittest.TestCase):
                 "See [ghost](./ghost.md) for context` to enable logging.\n"
             ),
         }
-        self.assertEqual(check_broken_links(files), [])
+        findings = check_broken_links(files)
+        self.assertEqual([f.code for f in findings], ["LINK"])
+        self.assertIn("./ghost.md", findings[0].message)
 
     def test_stray_backtick_does_not_swallow_a_later_paragraphs_link(self):
         """A single unmatched backtick in one paragraph must not pair with
@@ -534,20 +539,61 @@ class LinksInsideCode(unittest.TestCase):
         self.assertEqual([(f.code, f.message) for f in index_findings],
                          [("INDEX", "wiki page not listed: wiki/real.md")])
 
-    def test_link_inside_blockquoted_fenced_code_is_not_a_link(self):
-        """A fence marker prefixed by a blockquote '>' still opens/closes a
-        real fenced code block per CommonMark; a tilde fence must be
-        honoured there too (the inline-code fallback only ever matches
-        backtick runs, so it cannot rescue a tilde-fenced block)."""
+    def test_blockquoted_fence_is_not_a_fence_links_inside_are_scanned(self):
+        """The A10 spec gives '>' lines no fence/container awareness at
+        all -- a fence marker written inside a blockquote never opens a
+        real fenced block, so its content (and everything after it) is
+        scanned as ordinary prose (over-check by design). This is a
+        regression guard too: the block must not be mistaken for an
+        unclosed fence that swallows the rest of the file -- the broken
+        link written AFTER the blockquote must still be reported."""
         files = {
             "wiki/page.md": (
                 "# Page\n"
-                "> ~~~\n"
+                "> ```\n"
                 "> [ghost](./ghost.md)\n"
-                "> ~~~\n"
+                "> ```\n"
+                "See [also-ghost](./also-ghost.md) here.\n"
             ),
         }
-        self.assertEqual(check_broken_links(files), [])
+        findings = check_broken_links(files)
+        self.assertEqual(len(findings), 2, findings)
+        self.assertEqual({f.code for f in findings}, {"LINK"})
+        messages = {f.message for f in findings}
+        self.assertIn("broken link: ./ghost.md", messages)
+        self.assertIn("broken link: ./also-ghost.md", messages)
+
+    def test_indented_fence_is_not_a_fence(self):
+        """The A10 spec allows at most three leading SPACES on a fence
+        opener -- four or more leading spaces means the line is never a
+        fence marker at all (no indented-code-block awareness either), so
+        its content is scanned as ordinary prose (over-check by design)."""
+        files = {
+            "wiki/page.md": (
+                "# Page\n"
+                "    ```\n"
+                "    [ghost](./ghost.md)\n"
+                "    ```\n"
+            ),
+        }
+        findings = check_broken_links(files)
+        self.assertEqual([f.code for f in findings], ["LINK"])
+        self.assertIn("./ghost.md", findings[0].message)
+
+    def test_unclosed_fence_is_not_a_fence(self):
+        """An opener with no matching closer line before EOF is NOT a
+        fence at all per the A10 spec -- it and everything after it must
+        be scanned as prose, not silently swallowed to end of file."""
+        files = {
+            "wiki/page.md": (
+                "# Page\n"
+                "```\n"
+                "See [ghost](./ghost.md) for context.\n"
+            ),
+        }
+        findings = check_broken_links(files)
+        self.assertEqual([f.code for f in findings], ["LINK"])
+        self.assertIn("./ghost.md", findings[0].message)
 
     def test_inline_code_span_delimiters_must_be_maximal_runs(self):
         """CommonMark inline code spans match backtick runs by EXACT length
