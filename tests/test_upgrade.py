@@ -179,6 +179,56 @@ class TestCheck(unittest.TestCase):
             self.assertNotIn("up to date", combined)
             self.assertIn("not-a-semver-string", combined)
 
+    def test_check_null_local_version_does_not_crash(self):
+        """Regression guard: a manifest whose harness_version field is
+        present but JSON null (e.g. a hand-edited or partially-written
+        manifest) must be treated exactly like any other malformed local
+        version -- surfaced via check_message()'s documented 'not valid
+        semver -- cannot determine whether an upgrade is available'
+        message -- never an uncaught TypeError/traceback out of
+        parse_semver()/check_message()."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            remote = _make_remote(tmp / "remote", ["v1.0.0", "v9.9.9"])
+            target = _make_target(tmp / "target", None, remote)
+            result = _run_check(target)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            combined = result.stdout + result.stderr
+            self.assertNotIn("Traceback", combined)
+            self.assertNotIn("up to date", combined)
+            self.assertIn("not valid semver", combined)
+
+    def test_check_invalid_json_manifest_exits_cleanly(self):
+        """Regression guard: a manifest file that exists but is not
+        syntactically valid JSON (a truncated write, a hand edit) must
+        make --check exit 1 with a clean error message on stderr, never
+        an uncaught JSONDecodeError traceback -- the same clean
+        error-message-plus-exit-1 pattern run_check() already uses for an
+        unreachable remote."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            target = tmp / "target"
+            target.mkdir()
+            (target / MANIFEST_FILENAME).write_text("{not valid json", encoding="utf-8")
+            result = _run_check(target)
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_check_non_object_manifest_exits_cleanly(self):
+        """Regression guard: a manifest file that parses as valid JSON but
+        is not a JSON object (e.g. a bare JSON array) must not crash
+        run_check()'s manifest.get(...) field access with an uncaught
+        AttributeError -- it must exit 1 with a clean error message on
+        stderr instead, same pattern as the invalid-JSON case above."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            target = tmp / "target"
+            target.mkdir()
+            (target / MANIFEST_FILENAME).write_text("[1, 2, 3]", encoding="utf-8")
+            result = _run_check(target)
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn("Traceback", result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

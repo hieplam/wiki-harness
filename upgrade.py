@@ -18,6 +18,7 @@ task table.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -42,7 +43,13 @@ def parse_semver(tag):
     patch) int tuple usable for ordering, or returns None for anything that
     doesn't match (a non-semver tag -- e.g. a release-candidate suffix, or
     an unrelated branch-name-shaped ref -- is simply ignored by every
-    caller here, never raises)."""
+    caller here, never raises). This includes a non-string `tag` (e.g. a
+    manifest's harness_version field read back as JSON null): a caller
+    such as check_message() feeds this whatever the manifest recorded,
+    unvalidated, so a type mismatch here must return None exactly like an
+    ill-formed string, never raise a TypeError out of the regex match."""
+    if not isinstance(tag, str):
+        return None
     m = SEMVER_RE.match(tag)
     if not m:
         return None
@@ -160,9 +167,28 @@ def run_check(target):
     3.2). Reads the local manifest's harness_version/source_url, fetches
     remote tags, prints the exact message check_message() computes, and
     returns the process exit code -- 1 only when the remote/checkout was
-    unreachable, 0 in every other case. Never fetches file content, never
-    writes anything."""
-    manifest = read_manifest(Path(target) / MANIFEST_FILENAME)
+    unreachable OR the manifest itself could not be trusted, 0 in every
+    other case. Never fetches file content, never writes anything.
+
+    A manifest that exists but is not syntactically valid JSON (a
+    truncated write, a hand edit) or that parses but is not a JSON object
+    (e.g. a bare array/string/number) must fail closed here with the same
+    clean error-message-plus-exit-1 pattern this function already uses
+    for an unreachable remote (ls_remote_tags()'s own explicit
+    try/except around TimeoutExpired) -- never an uncaught
+    JSONDecodeError/AttributeError traceback out of read_manifest()'s
+    json.loads() or this function's own manifest.get() field access."""
+    manifest_path = Path(target) / MANIFEST_FILENAME
+    try:
+        manifest = read_manifest(manifest_path)
+    except json.JSONDecodeError as exc:
+        print(f"upgrade --check: manifest {str(manifest_path)!r} is not "
+              f"valid JSON ({exc})", file=sys.stderr)
+        return 1
+    if manifest is not None and not isinstance(manifest, dict):
+        print(f"upgrade --check: manifest {str(manifest_path)!r} is not a "
+              "JSON object", file=sys.stderr)
+        return 1
     local_version = manifest.get("harness_version", "") if manifest else ""
     source_url = manifest.get("source_url", "") if manifest else ""
     tags = ls_remote_tags(source_url)
