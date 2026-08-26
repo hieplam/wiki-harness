@@ -23,6 +23,8 @@ Pure: is_clean_tree(), managed_template_files(), blocking_drifts(), and
 format_drift_abort() take already-fetched data in and return a
 predicate/dict/list/string out -- none of them run git, touch the clock, or
 read the filesystem. Impure edges: git_status_porcelain(),
+classify_manifest() (the single shared read-and-classify-the-manifest edge
+behind both run_check() and read_manifest_for_upgrade()),
 read_manifest_for_upgrade(), and run_upgrade() (the orchestrator that wires
 porcelain -> clean predicate -> manifest read -> hash_tree -> diff_manifest
 -> the pure blocking-drift decision -> print + exit code) at the bottom,
@@ -35,12 +37,19 @@ import json
 import re
 import subprocess
 import sys
+from collections import namedtuple
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
 from manifest import diff_manifest, hash_tree, read_manifest  # noqa: E402
 
 MANIFEST_FILENAME = ".wiki-harness-manifest.json"
+
+# kind: "ok" (manifest holds the parsed dict) | "missing" | "invalid_json"
+# (error holds the JSONDecodeError) | "invalid_utf8" (error holds the
+# UnicodeDecodeError) | "non_object". Carries no message text and no exit
+# code -- classify_manifest()'s callers each own their own presentation.
+ManifestClassification = namedtuple("ManifestClassification", "kind manifest error")
 
 SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
@@ -225,6 +234,28 @@ def format_drift_abort(blocking, recorded, actual, harness_version):
 
 # ---- impure edges below this line ----
 
+def classify_manifest(manifest_path):
+    """Impure edge: reads `manifest_path` off disk ONCE and classifies it
+    into exactly one of the four failure modes {missing, invalid_json,
+    invalid_utf8, non_object} or success -- the single shared classification
+    ladder behind both run_check() (T15) and read_manifest_for_upgrade()
+    (T16), which each map this structural result onto their own message
+    wording, print-vs-return presentation, and exit-code-vs-tuple
+    presentation. Never lets a JSONDecodeError/UnicodeDecodeError escape as
+    a traceback; carries no message text and no exit code of its own."""
+    if not manifest_path.is_file():
+        return ManifestClassification("missing", None, None)
+    try:
+        manifest = read_manifest(manifest_path)
+    except json.JSONDecodeError as exc:
+        return ManifestClassification("invalid_json", None, exc)
+    except UnicodeDecodeError as exc:
+        return ManifestClassification("invalid_utf8", None, exc)
+    if not isinstance(manifest, dict):
+        return ManifestClassification("non_object", None, None)
+    return ManifestClassification("ok", manifest, None)
+
+
 def ls_remote_tags(source_url):
     """Impure edge. Runs `git ls-remote --tags <source_url>` -- upgrade
     --check's one round trip (a local filesystem checkout path or a real
@@ -263,25 +294,25 @@ def run_check(target):
     JSONDecodeError/AttributeError traceback out of read_manifest()'s
     json.loads() or this function's own manifest.get() field access."""
     manifest_path = Path(target) / MANIFEST_FILENAME
-    if not manifest_path.is_file():
+    classification = classify_manifest(manifest_path)
+    if classification.kind == "missing":
         print(f"upgrade --check: manifest {str(manifest_path)!r} is missing — this "
               "wiki was not initialised with wiki-harness; run 'upgrade --adopt' to "
               "generate one", file=sys.stderr)
         return 1
-    try:
-        manifest = read_manifest(manifest_path)
-    except json.JSONDecodeError as exc:
+    if classification.kind == "invalid_json":
         print(f"upgrade --check: manifest {str(manifest_path)!r} is not "
-              f"valid JSON ({exc})", file=sys.stderr)
+              f"valid JSON ({classification.error})", file=sys.stderr)
         return 1
-    except UnicodeDecodeError as exc:
+    if classification.kind == "invalid_utf8":
         print(f"upgrade --check: manifest {str(manifest_path)!r} is not "
-              f"valid UTF-8 ({exc})", file=sys.stderr)
+              f"valid UTF-8 ({classification.error})", file=sys.stderr)
         return 1
-    if not isinstance(manifest, dict):
+    if classification.kind == "non_object":
         print(f"upgrade --check: manifest {str(manifest_path)!r} is not a "
               "JSON object", file=sys.stderr)
         return 1
+    manifest = classification.manifest
     local_version = manifest.get("harness_version", "") if manifest else ""
     source_url = manifest.get("source_url", "") if manifest else ""
     tags = ls_remote_tags(source_url)
@@ -311,23 +342,22 @@ def read_manifest_for_upgrade(manifest_path):
     manifest precondition. Returns (manifest_dict, None) on success, or
     (None, <one-line error message>) for every failure mode, never letting
     a JSONDecodeError/UnicodeDecodeError escape as a traceback."""
-    if not manifest_path.is_file():
+    classification = classify_manifest(manifest_path)
+    if classification.kind == "missing":
         return None, (
             f"upgrade: manifest {str(manifest_path)!r} is missing — this "
             "wiki was not initialised with wiki-harness; pass --adopt to "
             "adopt it")
-    try:
-        manifest = read_manifest(manifest_path)
-    except json.JSONDecodeError as exc:
+    if classification.kind == "invalid_json":
         return None, (f"upgrade: manifest {str(manifest_path)!r} is not "
-                      f"valid JSON ({exc})")
-    except UnicodeDecodeError as exc:
+                      f"valid JSON ({classification.error})")
+    if classification.kind == "invalid_utf8":
         return None, (f"upgrade: manifest {str(manifest_path)!r} is not "
-                      f"valid UTF-8 ({exc})")
-    if not isinstance(manifest, dict):
+                      f"valid UTF-8 ({classification.error})")
+    if classification.kind == "non_object":
         return None, (f"upgrade: manifest {str(manifest_path)!r} is not a "
                       "JSON object")
-    return manifest, None
+    return classification.manifest, None
 
 
 def run_upgrade(target, adopt, adopt_drift_paths):
