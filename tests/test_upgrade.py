@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import os
 import subprocess
 import sys
@@ -228,6 +230,34 @@ class TestCheck(unittest.TestCase):
             result = _run_check(target)
             self.assertEqual(result.returncode, 1)
             self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_check_missing_manifest_exits_1_without_remote_call(self):
+        """Regression guard (amendment A11): a target directory with NO
+        manifest file at all must fail closed before any remote contact --
+        ls_remote_tags() must never be called -- with the exact clarity
+        message on stderr, never the misleading "remote '' is
+        unreachable" that falls out of treating a missing manifest like an
+        empty one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            target.mkdir()
+
+            def _must_not_be_called(*args, **kwargs):
+                raise AssertionError(
+                    "ls_remote_tags must not be called for a missing manifest")
+
+            stderr = io.StringIO()
+            with patch.object(upgrade, "ls_remote_tags", side_effect=_must_not_be_called):
+                with contextlib.redirect_stderr(stderr):
+                    rc = upgrade.run_check(target)
+
+            self.assertEqual(rc, 1)
+            expected = (
+                f"upgrade --check: manifest {str(target / MANIFEST_FILENAME)!r} "
+                "is missing — this wiki was not initialised with "
+                "wiki-harness; run 'upgrade --adopt' to generate one")
+            self.assertIn(expected, stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
 
 
 if __name__ == "__main__":

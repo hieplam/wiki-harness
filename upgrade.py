@@ -179,6 +179,11 @@ def run_check(target):
     JSONDecodeError/AttributeError traceback out of read_manifest()'s
     json.loads() or this function's own manifest.get() field access."""
     manifest_path = Path(target) / MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        print(f"upgrade --check: manifest {str(manifest_path)!r} is missing — this "
+              "wiki was not initialised with wiki-harness; run 'upgrade --adopt' to "
+              "generate one", file=sys.stderr)
+        return 1
     try:
         manifest = read_manifest(manifest_path)
     except json.JSONDecodeError as exc:
