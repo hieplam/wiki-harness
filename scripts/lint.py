@@ -358,7 +358,14 @@ def _manifest_shape_error(manifest):
     rejects a non-string 'role' value (a JSON array or object) before ever
     feeding it to is_valid_role()'s frozenset membership test -- both
     would otherwise raise (AttributeError, TypeError respectively) instead
-    of failing closed."""
+    of failing closed. Also rejects an absolute path, or a path with a
+    '..' segment: read_harness_manifest() below joins every recorded path
+    onto `root` (manifest.hash_tree()'s `root / path`), and
+    Path.__truediv__ silently discards `root` entirely for an absolute
+    right-hand side and walks upward for a '..' segment -- so an
+    unvalidated path here would make lint.py (the mandatory pre-commit
+    hook) hash and report the sha256 of an arbitrary file outside the
+    wiki root, driven purely by a manifest-recorded string."""
     if not isinstance(manifest, dict):
         return "manifest is not a JSON object"
     recorded = manifest.get("files")
@@ -370,6 +377,8 @@ def _manifest_shape_error(manifest):
         role = entry["role"]
         if not isinstance(role, str) or not is_valid_role(role):
             return f"files entry {path!r} has unknown role {role!r}"
+        if PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts:
+            return f"files entry {path!r} escapes the wiki root"
     return None
 
 

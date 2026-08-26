@@ -459,5 +459,67 @@ class HarnessManifestUnhashableRoleFailsClosed(unittest.TestCase):
             self.assertIn("ERROR HARNESS", result.stdout)
 
 
+# Regression guard (Skinner finding, scripts/lint.py:397-421
+# read_harness_manifest / scripts/manifest.py:121-127 hash_tree): none of
+# _manifest_shape_error()'s validation checked the recorded PATH strings
+# themselves for containment inside `root`. hash_tree() does
+# `f = root / path; ... f.read_bytes()`, and Path.__truediv__ discards
+# `root` entirely when `path` is absolute, and simply walks upward when
+# `path` contains ".." segments -- so a manifest carrying a
+# ".."-prefixed or absolute-path key (a malicious PR, a hand edit, or a
+# future init.py/upgrade.py bug) made lint.py -- "the mandatory pre-commit
+# hook" -- silently hash and print the sha256 of an arbitrary file outside
+# the wiki root. Must fail closed exactly like every other
+# untrustworthy-manifest shape above, before hash_tree() is ever called.
+class HarnessManifestPathTraversalFailsClosed(unittest.TestCase):
+    def test_harness_manifest_path_traversal_fails_closed(self):
+        cases = {
+            "dotdot_relative": "../outside-secret.txt",
+            "absolute": "/etc/outside-secret.txt",
+        }
+        for name, traversal_path in cases.items():
+            with self.subTest(case=name, path=traversal_path):
+                with tempfile.TemporaryDirectory() as tmp:
+                    outer = Path(tmp)
+                    root = outer / "wiki-root"
+                    root.mkdir()
+                    _write_tree(root, CLEAN_WIKI_FILES)
+                    # A real file that a naive root/path join would
+                    # escape to -- placed one directory above `root` so
+                    # the relative ".." case has something real to leak.
+                    secret = outer / "outside-secret.txt"
+                    secret.write_bytes(b"TOP SECRET, never read by lint.py\n")
+
+                    manifest = compute_manifest(
+                        {}, {}, "git@example.com:hieplam/wiki-harness.git",
+                        harness_version="1.0.0", source_ref="v1.0.0",
+                        source_commit="0" * 40, initialised_at="2026-08-26")
+                    manifest["files"][traversal_path] = {
+                        "role": "managed", "sha256": "0" * 64}
+                    write_manifest(root / MANIFEST_FILENAME, manifest)
+
+                    # The pure shape check must reject the traversal path
+                    # before read_harness_manifest() ever calls
+                    # hash_tree() on it -- exactly one ERROR HARNESS
+                    # finding on the manifest itself, never on the
+                    # escaping path, and the outside file's real sha256
+                    # must never appear anywhere in the finding.
+                    findings = check_harness(read_harness_manifest(root))
+                    self.assertEqual(len(findings), 1, [tuple(f) for f in findings])
+                    f = findings[0]
+                    self.assertEqual((f.severity, f.code, f.path),
+                                     ("ERROR", "HARNESS", MANIFEST_FILENAME))
+                    self.assertNotIn(hash_bytes(secret.read_bytes()), f.message)
+
+                    # End-to-end: the actual CLI must not leak the
+                    # outside file's hash either.
+                    lint_py = ROOT / "scripts" / "lint.py"
+                    result = subprocess.run(
+                        [sys.executable, str(lint_py), "--root", str(root)],
+                        capture_output=True, text=True)
+                    self.assertNotIn("Traceback", result.stderr, result.stderr)
+                    self.assertNotIn(hash_bytes(secret.read_bytes()), result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
