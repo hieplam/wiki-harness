@@ -12,6 +12,7 @@ pure judgment.
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -182,6 +183,80 @@ class HarnessInstanceForkWarn(unittest.TestCase):
                  "forked from wiki-harness at v1.4.0; local edits are "
                  "permanent and will not receive future updates."),
             ], [tuple(f) for f in findings])
+
+
+# Regression guards (Skinner finding, scripts/lint.py:334-342/196-227): a
+# malformed or schema-incomplete .wiki-harness-manifest.json must degrade
+# gracefully -- exactly one ERROR HARNESS finding, no uncaught traceback --
+# like every other check in this file (check_card_citations' try/except
+# around a bad regex, check_cards' graceful missing-schema handling), since
+# lint.py is the mandatory pre-commit hook and a bare traceback there blocks
+# every commit with zero diagnostic output.
+class HarnessMalformedJsonManifestFailsClosed(unittest.TestCase):
+    def test_harness_malformed_json_manifest_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_tree(root, CLEAN_WIKI_FILES)
+            # A left-over merge-conflict marker / a write interrupted
+            # mid-flight -- manifest.write_manifest() is a plain
+            # non-atomic Path.write_text(), so a truncated file after a
+            # crashed upgrade.py/init.py run is realistic. This is
+            # syntactically invalid JSON.
+            (root / MANIFEST_FILENAME).write_text(
+                "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> branch\n",
+                encoding="utf-8")
+
+            # The impure edge itself must fail closed instead of letting
+            # json.JSONDecodeError propagate out of read_harness_manifest().
+            findings = check_harness(read_harness_manifest(root))
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(
+                (findings[0].severity, findings[0].code, findings[0].path),
+                ("ERROR", "HARNESS", MANIFEST_FILENAME))
+
+            # End-to-end: the actual CLI (the mandatory pre-commit hook)
+            # must not crash with a bare traceback and zero lint output.
+            lint_py = ROOT / "scripts" / "lint.py"
+            result = subprocess.run(
+                [sys.executable, str(lint_py), "--root", str(root)],
+                capture_output=True, text=True)
+            self.assertNotIn("Traceback", result.stderr, result.stderr)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("ERROR HARNESS", result.stdout)
+
+
+class HarnessManifestMissingRoleKeyFailsClosed(unittest.TestCase):
+    def test_harness_manifest_missing_role_key_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_tree(root, CLEAN_WIKI_FILES)
+            (root / "scripts").mkdir()
+            (root / "scripts/lint.py").write_bytes(MANAGED_CONTENT)
+            # Syntactically valid JSON, but a hand-edited / partially
+            # migrated manifest: this files entry has no 'role' key.
+            manifest = compute_manifest(
+                {}, {}, "git@example.com:hieplam/wiki-harness.git",
+                harness_version="1.0.0", source_ref="v1.0.0",
+                source_commit="0" * 40, initialised_at="2026-08-26")
+            manifest["files"]["scripts/lint.py"] = {
+                "sha256": hash_bytes(MANAGED_CONTENT)}
+            write_manifest(root / MANIFEST_FILENAME, manifest)
+
+            # The pure check itself must fail closed instead of letting
+            # KeyError('role') propagate out of check_harness().
+            findings = check_harness(read_harness_manifest(root))
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(
+                (findings[0].severity, findings[0].code, findings[0].path),
+                ("ERROR", "HARNESS", MANIFEST_FILENAME))
+
+            lint_py = ROOT / "scripts" / "lint.py"
+            result = subprocess.run(
+                [sys.executable, str(lint_py), "--root", str(root)],
+                capture_output=True, text=True)
+            self.assertNotIn("Traceback", result.stderr, result.stderr)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("ERROR HARNESS", result.stdout)
 
 
 if __name__ == "__main__":

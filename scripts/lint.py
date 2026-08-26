@@ -8,6 +8,7 @@ Python 3 stdlib only.
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -32,6 +33,12 @@ MANIFEST_FILENAME = ".wiki-harness-manifest.json"
 # "sha256":...}}); actual is {path: sha256} freshly hashed off disk for
 # every path recorded with a role this check judges.
 ManifestState = namedtuple("ManifestState", "harness_version recorded actual")
+
+# read_harness_manifest()'s other possible return value: the manifest file
+# exists but cannot be trusted (invalid JSON, or a "files" entry missing
+# the 'role'/'sha256' keys check_harness() relies on) -- `detail` is a
+# short human-readable reason, folded into check_harness()'s one Finding.
+ManifestMalformed = namedtuple("ManifestMalformed", "detail")
 
 
 def extract_links(text):
@@ -177,13 +184,22 @@ def check_raw_immutability(changes):
 
 def check_harness(manifest_state):
     """Pure. Eighth check, mirroring check_raw_immutability(): plain data
-    (a ManifestState, or None) in, Finding list out -- never touches the
-    filesystem itself. `manifest_state` is whatever read_harness_manifest()
-    (the impure edge below) returned.
+    (a ManifestState, a ManifestMalformed, or None) in, Finding list out --
+    never touches the filesystem itself. `manifest_state` is whatever
+    read_harness_manifest() (the impure edge below) returned.
 
     manifest_state is None -> the manifest itself is missing entirely: one
     ERROR, and every other check keeps running normally (this function is
     never called from run(), so nothing else is short-circuited by it).
+
+    manifest_state is a ManifestMalformed -> the manifest file exists but
+    is not trustworthy (invalid JSON, or a "files" entry missing its
+    'role'/'sha256' keys): one ERROR, same narrow blast radius as the
+    missing-manifest case above. Fails closed exactly like
+    check_card_citations()'s try/except around a bad regex and
+    check_cards()'s graceful missing-schema handling -- a malformed
+    manifest must never crash lint.py (the mandatory pre-commit hook)
+    with an uncaught traceback and zero diagnostic output.
 
     Otherwise, judges each recorded path's drift (manifest.diff_manifest()
     against the freshly-hashed actual bytes): a managed/template path
@@ -199,6 +215,12 @@ def check_harness(manifest_state):
             "manifest missing — this wiki was not initialised with "
             "wiki-harness, or the manifest was deleted; run 'upgrade "
             "--adopt' to generate one.")]
+    if isinstance(manifest_state, ManifestMalformed):
+        return [Finding(
+            "ERROR", "HARNESS", MANIFEST_FILENAME,
+            f"manifest is malformed ({manifest_state.detail}) — this "
+            "wiki's harness state cannot be trusted; run 'upgrade "
+            "--adopt' to regenerate it.")]
     findings = []
     for drift in diff_manifest(manifest_state.recorded, manifest_state.actual):
         role = manifest_state.recorded[drift.path]["role"]
@@ -321,6 +343,24 @@ def hooks_finding(root):
     return []
 
 
+def _manifest_shape_error(manifest):
+    """Pure. Returns a short, human-readable reason `manifest` (an
+    already-JSON-parsed dict) cannot be trusted as a files->role/sha256
+    ledger, or None when its shape is usable. Mirrors load_schema()'s
+    (card_frontmatter_lint.py) all-or-nothing validation: a manifest with
+    even one malformed "files" entry is treated as fully untrustworthy --
+    there is no principled way to trust the OTHER entries once the ledger
+    itself is shown to be unreliable, e.g. by a hand edit or a partial
+    migration."""
+    recorded = manifest.get("files")
+    if not isinstance(recorded, dict):
+        return "'files' is missing or not an object"
+    for path, entry in recorded.items():
+        if not isinstance(entry, dict) or "role" not in entry or "sha256" not in entry:
+            return f"files entry {path!r} is missing 'role' or 'sha256'"
+    return None
+
+
 def read_harness_manifest(root):
     """Impure edge, mirroring hooks_finding(root): reads
     .wiki-harness-manifest.json directly off disk and, independent of
@@ -330,12 +370,21 @@ def read_harness_manifest(root):
     it can flag as drifted/missing) and instance-fork (the once-managed
     content it can flag as permanently forked) -- so a HARNESS finding is
     never masked by scan()'s UTF-8 decoding or its file-pattern globs.
-    Returns None when the manifest file itself does not exist."""
+    Returns None when the manifest file itself does not exist, or a
+    ManifestMalformed when it exists but is not valid, trustworthy JSON --
+    a truncated write (manifest.write_manifest() is a plain non-atomic
+    Path.write_text()) or a hand edit must fail closed here, not raise."""
     root = Path(root)
-    manifest = read_manifest(root / MANIFEST_FILENAME)
+    try:
+        manifest = read_manifest(root / MANIFEST_FILENAME)
+    except json.JSONDecodeError as exc:
+        return ManifestMalformed(f"invalid JSON: {exc}")
     if manifest is None:
         return None
-    recorded = manifest.get("files", {})
+    shape_error = _manifest_shape_error(manifest)
+    if shape_error is not None:
+        return ManifestMalformed(shape_error)
+    recorded = manifest["files"]
     hashed_paths = [path for path, entry in recorded.items()
                     if entry.get("role") in ("managed", "template", "instance-fork")]
     actual = hash_tree(root, hashed_paths)
