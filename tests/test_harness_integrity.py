@@ -521,5 +521,81 @@ class HarnessManifestPathTraversalFailsClosed(unittest.TestCase):
                     self.assertNotIn(hash_bytes(secret.read_bytes()), result.stdout)
 
 
+# Regression guard (Skinner finding, scripts/lint.py:401-419
+# read_harness_manifest / scripts/manifest.py:116-127 hash_tree): neither
+# read_harness_manifest() nor hash_tree() caught OSError (PermissionError,
+# a mid-run FileNotFoundError race between hash_tree()'s is_file() and
+# read_bytes(), etc.) raised while reading a file straight off disk --
+# either the manifest file itself, or a managed/template/instance-fork
+# path it records -- letting it propagate uncaught out of
+# read_harness_manifest() -> check_harness() in main(), crashing lint.py
+# (the mandatory pre-commit hook) with a bare traceback and zero
+# diagnostic output, exactly the failure class every other
+# untrustworthy-manifest case above already fails closed against.
+class HarnessUnreadableFileFailsClosed(unittest.TestCase):
+    def test_harness_unreadable_manifest_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_tree(root, CLEAN_WIKI_FILES)
+            _write_manifest(root, {})
+            manifest_file = root / MANIFEST_FILENAME
+            manifest_file.chmod(0o000)
+            try:
+                # The impure edge itself must fail closed instead of
+                # letting PermissionError propagate out of
+                # read_harness_manifest().
+                findings = check_harness(read_harness_manifest(root))
+                self.assertEqual(len(findings), 1, [tuple(f) for f in findings])
+                self.assertEqual(
+                    (findings[0].severity, findings[0].code, findings[0].path),
+                    ("ERROR", "HARNESS", MANIFEST_FILENAME))
+
+                # End-to-end: the actual CLI (the mandatory pre-commit
+                # hook) must not crash with a bare traceback and zero
+                # lint output.
+                lint_py = ROOT / "scripts" / "lint.py"
+                result = subprocess.run(
+                    [sys.executable, str(lint_py), "--root", str(root)],
+                    capture_output=True, text=True)
+                self.assertNotIn("Traceback", result.stderr, result.stderr)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("ERROR HARNESS", result.stdout)
+            finally:
+                manifest_file.chmod(0o644)
+
+    def test_harness_unreadable_managed_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_tree(root, CLEAN_WIKI_FILES)
+            (root / "scripts").mkdir()
+            managed_file = root / "scripts/lint.py"
+            managed_file.write_bytes(MANAGED_CONTENT)
+            _write_manifest(root, {
+                "scripts/lint.py": ("managed", hash_bytes(MANAGED_CONTENT)),
+            })
+            managed_file.chmod(0o000)
+            try:
+                # The impure edge itself must fail closed instead of
+                # letting PermissionError propagate out of
+                # read_harness_manifest() -> manifest.hash_tree().
+                findings = check_harness(read_harness_manifest(root))
+                self.assertEqual(len(findings), 1, [tuple(f) for f in findings])
+                self.assertEqual(
+                    (findings[0].severity, findings[0].code, findings[0].path),
+                    ("ERROR", "HARNESS", MANIFEST_FILENAME))
+
+                # End-to-end: the actual CLI must not crash with a bare
+                # traceback and zero lint output either.
+                lint_py = ROOT / "scripts" / "lint.py"
+                result = subprocess.run(
+                    [sys.executable, str(lint_py), "--root", str(root)],
+                    capture_output=True, text=True)
+                self.assertNotIn("Traceback", result.stderr, result.stderr)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("ERROR HARNESS", result.stdout)
+            finally:
+                managed_file.chmod(0o644)
+
+
 if __name__ == "__main__":
     unittest.main()

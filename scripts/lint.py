@@ -398,7 +398,14 @@ def read_harness_manifest(root):
     This includes bytes that are not valid UTF-8 at all: read_manifest()
     decodes with Path.read_text(encoding="utf-8") before ever parsing
     JSON, so that decode step's UnicodeDecodeError must fail closed here
-    too, not just json.JSONDecodeError."""
+    too, not just json.JSONDecodeError. Also fails closed on any plain
+    filesystem OSError (PermissionError, or a mid-run FileNotFoundError
+    race between hash_tree()'s is_file() check and its read_bytes() call)
+    raised while reading the manifest file itself or any managed/
+    template/instance-fork path it records -- otherwise lint.py (the
+    mandatory pre-commit hook) crashes with a bare traceback and zero
+    diagnostic output on a permission problem exactly like it must not
+    on a JSON/encoding/shape one."""
     root = Path(root)
     try:
         manifest = read_manifest(root / MANIFEST_FILENAME)
@@ -406,6 +413,8 @@ def read_harness_manifest(root):
         return ManifestMalformed(f"invalid JSON: {exc}")
     except UnicodeDecodeError as exc:
         return ManifestMalformed(f"invalid UTF-8: {exc}")
+    except OSError as exc:
+        return ManifestMalformed(f"cannot read manifest: {exc}")
     if manifest is None:
         return None
     shape_error = _manifest_shape_error(manifest)
@@ -414,7 +423,10 @@ def read_harness_manifest(root):
     recorded = manifest["files"]
     hashed_paths = [path for path, entry in recorded.items()
                     if entry.get("role") in ("managed", "template", "instance-fork")]
-    actual = hash_tree(root, hashed_paths)
+    try:
+        actual = hash_tree(root, hashed_paths)
+    except OSError as exc:
+        return ManifestMalformed(f"cannot read harness-tracked file: {exc}")
     return ManifestState(manifest.get("harness_version", ""), recorded, actual)
 
 
