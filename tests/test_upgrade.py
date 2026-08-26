@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 UPGRADE_PY = ROOT / "upgrade.py"
 
 sys.path.insert(0, str(ROOT / "scripts"))
-from manifest import compute_manifest, write_manifest  # noqa: E402
+from manifest import compute_manifest, hash_tree, write_manifest  # noqa: E402
 
 sys.path.insert(0, str(ROOT))
 import upgrade  # noqa: E402  (needs the sys.path line above)
@@ -78,6 +78,40 @@ def _run_check(target):
     return subprocess.run(
         [sys.executable, str(UPGRADE_PY), str(target), "--check"],
         capture_output=True, text=True)
+
+
+def _run_upgrade(target, *extra_args):
+    return subprocess.run(
+        [sys.executable, str(UPGRADE_PY), str(target), *extra_args],
+        capture_output=True, text=True)
+
+
+def _make_wiki(root, harness_version="1.0.0"):
+    """T16's fixture: a REAL git-backed wiki instance carrying actual
+    managed files on disk (wiki/AGENTS.md, index.md), a self-consistent
+    manifest recording them as role 'managed' with their real sha256
+    (computed the same way compute_manifest()/hash_tree() do it -- no
+    hand-typed hex), then a clean, committed git baseline -- so every test
+    below mutates from a known-clean starting tree, isolated from the
+    host's global/system git config exactly like _git()'s other callers."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "wiki").mkdir(parents=True, exist_ok=True)
+    (root / "wiki" / "AGENTS.md").write_text("# Wiki rules\n", encoding="utf-8")
+    (root / "index.md").write_text("# Index\n", encoding="utf-8")
+    managed_paths = ["wiki/AGENTS.md", "index.md"]
+    hashes = {p: {"role": "managed", "sha256": h}
+             for p, h in hash_tree(root, managed_paths).items()}
+    manifest = compute_manifest(
+        hashes, {}, "https://example.invalid/wiki-harness.git",
+        harness_version=harness_version, source_ref=f"v{harness_version}",
+        source_commit="0" * 40, initialised_at="2026-08-26")
+    write_manifest(root / MANIFEST_FILENAME, manifest)
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "hunter@example.com")
+    _git(root, "config", "user.name", "Hunter")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "init")
+    return root
 
 
 class TestCheck(unittest.TestCase):
@@ -313,6 +347,95 @@ class TestCheck(unittest.TestCase):
             self.assertNotIn("unreachable", value)
             self.assertIn("is not a JSON object", value)
             self.assertNotIn("Traceback", value)
+
+
+class TestDriftCheck(unittest.TestCase):
+    """T16: the refuse-before-write drift check -- the fatal-flaw fix and
+    the single most load-bearing test in the whole plan (plan-v3 section
+    3.2 step 1, quoted verbatim in the T16 brief)."""
+
+    def test_clean_upgrade_no_drift(self):
+        """A clean fixture, no local edits at all -> every gate passes and
+        step 1 reaches the (not-yet-implemented) apply-pipeline stub: not
+        the dirty-tree exit (2), not the drift-abort exit (1)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = _make_wiki(Path(tmp) / "target")
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply")
+            combined = result.stdout + result.stderr
+            self.assertNotIn(
+                "commit or stash local changes before running upgrade",
+                combined)
+            self.assertNotIn("refusing to proceed", combined)
+            self.assertNotIn(result.returncode, (1, 2), combined)
+
+    def test_hand_edited_managed_file_blocks_upgrade(self):
+        """A managed file is hand-edited AND COMMITTED (clean tree, drifted
+        hash). upgrade must abort with exit 1, name the drifted path and
+        BOTH hashes, and -- the entire point of this test -- leave every
+        single file on disk byte-for-byte unchanged: proving nothing was
+        fetched or written, not merely that the exit code looks right."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            target = _make_wiki(tmp / "target")
+            recorded_hash = hashlib.sha256(b"# Wiki rules\n").hexdigest()
+            edited_bytes = b"# Wiki rules (hand-edited)\n"
+            actual_hash = hashlib.sha256(edited_bytes).hexdigest()
+            (target / "wiki" / "AGENTS.md").write_bytes(edited_bytes)
+            _git(target, "add", "-A")
+            _git(target, "commit", "-q", "-m", "hand edit of a managed file")
+
+            before = _tree_snapshot(target)
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply")
+            after = _tree_snapshot(target)
+
+            combined = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 1, combined)
+            self.assertIn("wiki/AGENTS.md", combined)
+            self.assertIn(recorded_hash, combined)
+            self.assertIn(actual_hash, combined)
+            self.assertEqual(after, before,
+                             "upgrade wrote/modified something on disk -- "
+                             "step 1 must abort before any fetch or write")
+
+    def test_missing_managed_path_is_drift_not_crash(self):
+        """A managed file is git-rm'd and committed (clean tree, path gone
+        entirely). upgrade must refuse with the DISTINCT deleted-path
+        message, exit 1 -- never a crash, never a silent recreate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            target = _make_wiki(tmp / "target", harness_version="1.0.0")
+            _git(target, "rm", "-q", "wiki/AGENTS.md")
+            _git(target, "commit", "-q", "-m", "remove a managed file")
+
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply")
+            combined = result.stdout + result.stderr
+
+            self.assertEqual(result.returncode, 1, combined)
+            self.assertIn(
+                "file was deleted, expected to exist at v1.0.0.", combined)
+            self.assertNotIn("Traceback", combined)
+
+    def test_dirty_tree_precondition_names_checkout_remedy(self):
+        """An ordinary UNCOMMITTED edit (not a crashed upgrade -- just a
+        local edit) must refuse at the very first gate: exit 2, with the
+        exact clean-tree message quoted verbatim in the T16 brief -- the
+        entire crash-recovery story, byte-for-byte."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            target = _make_wiki(tmp / "target")
+            (target / "wiki" / "AGENTS.md").write_text(
+                "# uncommitted local edit\n", encoding="utf-8")
+
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply")
+            combined = result.stdout + result.stderr
+
+            self.assertEqual(result.returncode, 2, combined)
+            self.assertIn(
+                "commit or stash local changes before running upgrade -- "
+                "if this follows an interrupted `upgrade --apply`, run "
+                "`git checkout -- .` to discard the partial write and "
+                "restore the pre-upgrade tree.",
+                combined)
 
 
 if __name__ == "__main__":

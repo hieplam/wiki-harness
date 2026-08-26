@@ -9,11 +9,24 @@ filesystem. Impure edges: ls_remote_tags() (runs `git ls-remote --tags`),
 run_check(), and main() (read the manifest off disk, print, exit) at the
 bottom.
 
-This module currently implements only --check (T15): a standalone, no-write,
-one-round-trip remote-tag comparison against the manifest's harness_version.
-Every other flag and ordered step in plan-v3 section 3.2 (drift check,
-promote, --adopt, ...) lands in later tasks (T16 onward) -- see plan-v3.md's
-task table.
+This module implements --check (T15) plus step 1 of the ordered upgrade
+flow (T16): the clean-tree precondition, the manifest precondition, and the
+refuse-before-write drift check over every manifest-recorded managed/
+template path (a missing path counts as drift too, with its own distinct
+message). All three gates run before any fetch or write. Everything past
+the gates -- the actual fetch/scratch-copy/write apply pipeline (T16B),
+promote (T21), the downgrade guard (T17), the --adopt-drift role-flip
+mechanism (T18), the MAJOR-removal guard (T19) -- lands in later tasks; see
+plan-v3.md's task table.
+
+Pure: is_clean_tree(), managed_template_files(), blocking_drifts(), and
+format_drift_abort() take already-fetched data in and return a
+predicate/dict/list/string out -- none of them run git, touch the clock, or
+read the filesystem. Impure edges: git_status_porcelain(),
+read_manifest_for_upgrade(), and run_upgrade() (the orchestrator that wires
+porcelain -> clean predicate -> manifest read -> hash_tree -> diff_manifest
+-> the pure blocking-drift decision -> print + exit code) at the bottom,
+alongside run_check().
 """
 from __future__ import annotations
 
@@ -25,11 +38,19 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
-from manifest import read_manifest  # noqa: E402  (needs the sys.path line above)
+from manifest import diff_manifest, hash_tree, read_manifest  # noqa: E402
 
 MANIFEST_FILENAME = ".wiki-harness-manifest.json"
 
 SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+
+# v3 (A3): this single message is the ENTIRE crash-recovery story -- no
+# separate marker-file precondition, no --resume branch, anywhere. Quoted
+# byte-for-byte in the T16 brief; reproduce it verbatim.
+DIRTY_TREE_MESSAGE = (
+    "commit or stash local changes before running upgrade -- if this "
+    "follows an interrupted `upgrade --apply`, run `git checkout -- .` "
+    "to discard the partial write and restore the pre-upgrade tree.")
 
 # --check's one round trip must stay bounded: a remote that is reachable
 # but never responds (firewall drop, network black hole, stalled VPN path)
@@ -139,6 +160,69 @@ def check_message(local_version, tags):
     return f"up to date at {local_display}"
 
 
+def is_clean_tree(porcelain_output):
+    """Pure. `porcelain_output` is git_status_porcelain()'s raw stdout
+    (the impure edge below). True iff it indicates a clean working tree --
+    `git status --porcelain` prints nothing at all (no leading/trailing
+    whitespace either) for a clean tree, so any non-blank content is
+    treated as dirty."""
+    return porcelain_output.strip() == ""
+
+
+def managed_template_files(files):
+    """Pure. `files` is a manifest's "files" map ({path: {"role": ...,
+    "sha256": ...}}). Returns the subset whose role is managed or
+    template -- the only two roles step 1's drift check covers (plan-v3
+    section 3.2); instance-fork/removed/any other recorded role is out of
+    scope for this check entirely, exactly like check_harness() in
+    lint.py."""
+    return {path: entry for path, entry in files.items()
+            if entry.get("role") in ("managed", "template")}
+
+
+def blocking_drifts(drifts, adopt_drift_paths):
+    """Pure. `drifts` is diff_manifest()'s list[Drift]; `adopt_drift_paths`
+    is the set of paths named by --adopt-drift on this invocation. Returns
+    the drifts that must abort this upgrade: any status other than "match"
+    whose path was NOT named by --adopt-drift this run. (--adopt-drift
+    itself does not yet flip the path's manifest role to instance-fork --
+    that mechanism is T18; here it only suppresses the abort for this
+    run.)"""
+    adopt = set(adopt_drift_paths)
+    return [d for d in drifts if d.status != "match" and d.path not in adopt]
+
+
+def format_drift_abort(blocking, recorded, actual, harness_version):
+    """Pure. `blocking` is blocking_drifts()'s output; `recorded` is a
+    manifest's "files" map (or a role-filtered subset of it, e.g.
+    managed_template_files()'s return value) covering every path named in
+    `blocking`; `actual` is hash_tree()'s freshly-computed {path: sha256};
+    `harness_version` is the manifest's recorded harness_version string.
+    Returns the exact multi-line stderr message step 1 prints before
+    aborting: a header stating nothing was fetched or written, then one
+    line per drifted path naming the path, its expected-vs-actual hash (or
+    the DISTINCT "file was deleted, expected to exist at v<X.Y.Z>."
+    message when the drift is a missing path), and both remediation
+    options (`git checkout -- <path>`, `upgrade --adopt-drift <path>`)."""
+    lines = [
+        "upgrade: refusing to proceed -- the following managed/template "
+        "path(s) have drifted from the manifest; nothing was fetched or "
+        "written:",
+    ]
+    for drift in blocking:
+        if drift.status == "missing":
+            detail = f"file was deleted, expected to exist at v{harness_version}."
+        else:
+            expected = recorded[drift.path]["sha256"]
+            found = actual[drift.path]
+            detail = f"expected sha256 {expected}, found sha256 {found}"
+        lines.append(
+            f"  {drift.path}: {detail} -- run `git checkout -- "
+            f"{drift.path}` to discard the local change, or `upgrade "
+            f"--adopt-drift {drift.path}` if this is intentional.")
+    return "\n".join(lines)
+
+
 # ---- impure edges below this line ----
 
 def ls_remote_tags(source_url):
@@ -208,10 +292,98 @@ def run_check(target):
     return 0
 
 
+def git_status_porcelain(target):
+    """Impure edge. Runs `git status --porcelain` in `target` and returns
+    its raw stdout (never raises on a non-zero exit -- there is no test
+    coverage or brief requirement for a target that is not a git work tree
+    at all, so this stays exactly as thin as the brief specifies: "a new
+    edge ... returning its raw output")."""
+    result = subprocess.run(
+        ["git", "-C", str(target), "status", "--porcelain"],
+        capture_output=True, text=True)
+    return result.stdout
+
+
+def read_manifest_for_upgrade(manifest_path):
+    """Impure edge. Reads and parses `manifest_path`, mirroring run_check's
+    existing fail-closed pattern (T15) for a missing, unparseable,
+    non-UTF-8, or non-object manifest -- extended here to cover step 2's
+    manifest precondition. Returns (manifest_dict, None) on success, or
+    (None, <one-line error message>) for every failure mode, never letting
+    a JSONDecodeError/UnicodeDecodeError escape as a traceback."""
+    if not manifest_path.is_file():
+        return None, (
+            f"upgrade: manifest {str(manifest_path)!r} is missing — this "
+            "wiki was not initialised with wiki-harness; pass --adopt to "
+            "adopt it")
+    try:
+        manifest = read_manifest(manifest_path)
+    except json.JSONDecodeError as exc:
+        return None, (f"upgrade: manifest {str(manifest_path)!r} is not "
+                      f"valid JSON ({exc})")
+    except UnicodeDecodeError as exc:
+        return None, (f"upgrade: manifest {str(manifest_path)!r} is not "
+                      f"valid UTF-8 ({exc})")
+    if not isinstance(manifest, dict):
+        return None, (f"upgrade: manifest {str(manifest_path)!r} is not a "
+                      "JSON object")
+    return manifest, None
+
+
+def run_upgrade(target, adopt, adopt_drift_paths):
+    """Impure edge: the orchestrator for every ordered step 3.2 gate this
+    task implements. Wires git_status_porcelain() -> is_clean_tree()
+    (precondition 1, exit 2) -> read_manifest_for_upgrade() (precondition
+    2, exit 1 unless --adopt suppresses it) -> hash_tree()/diff_manifest()
+    -> blocking_drifts()/format_drift_abort() (step 1, exit 1) -> the
+    not-yet-implemented apply-pipeline stub (T16B; a distinct exit code,
+    never 0/1/2, so it can never be mistaken for a real upgrade or for
+    either refusal above).
+
+    When --adopt is passed and the manifest precondition would otherwise
+    fail (missing/unparseable/non-object/non-UTF-8), the adoption
+    mechanism itself is out of scope for this task (T16 brief, "explicitly
+    OUT of scope") -- this is reported as not-yet-implemented too, rather
+    than either crashing or silently fabricating a manifest."""
+    porcelain = git_status_porcelain(target)
+    if not is_clean_tree(porcelain):
+        print(DIRTY_TREE_MESSAGE, file=sys.stderr)
+        return 2
+
+    manifest_path = Path(target) / MANIFEST_FILENAME
+    manifest, error = read_manifest_for_upgrade(manifest_path)
+    if error is not None:
+        if not adopt:
+            print(error, file=sys.stderr)
+            return 1
+        print("upgrade: --adopt without an existing, valid manifest is "
+              "not yet implemented", file=sys.stderr)
+        return 3
+
+    harness_version = manifest.get("harness_version", "")
+    recorded = managed_template_files(manifest.get("files", {}))
+    actual = hash_tree(target, recorded.keys())
+    drifts = diff_manifest(recorded, actual)
+    blocking = blocking_drifts(drifts, adopt_drift_paths)
+    if blocking:
+        print(format_drift_abort(blocking, recorded, actual, harness_version),
+              file=sys.stderr)
+        return 1
+
+    print("upgrade: all step-1 gates passed; the apply pipeline (fetch, "
+          "scratch-copy, write) is not yet implemented (T16B)",
+          file=sys.stderr)
+    return 3
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(prog="upgrade.py")
     parser.add_argument("target")
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--to")
+    parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--adopt", action="store_true")
+    parser.add_argument("--adopt-drift", action="append", default=[])
     return parser.parse_args(argv)
 
 
@@ -219,11 +391,9 @@ def main(argv):
     args = parse_args(argv)
     if args.check:
         # --check ignores every other flag and runs as an early, standalone
-        # branch, before any of the ordered steps in plan-v3 section 3.2 --
-        # none of which exist yet (T16 onward).
+        # branch, before any of the ordered steps in plan-v3 section 3.2.
         return run_check(Path(args.target))
-    print("upgrade.py: only --check is implemented so far", file=sys.stderr)
-    return 2
+    return run_upgrade(Path(args.target), args.adopt, args.adopt_drift)
 
 
 if __name__ == "__main__":
