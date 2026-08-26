@@ -597,5 +597,66 @@ class HarnessUnreadableFileFailsClosed(unittest.TestCase):
                 managed_file.chmod(0o644)
 
 
+# Regression guard (Skinner finding, scripts/lint.py:196-203
+# _manifest_shape_error / scripts/manifest.py:116-127 hash_tree): the
+# path-traversal guard above only rejects a recorded path that is itself
+# absolute or carries a '..' segment. It does nothing about a path that
+# is, on disk, a symlink whose TARGET lies outside the wiki root -- the
+# recorded string ("scripts/evil-managed.py") is perfectly well-formed,
+# so _manifest_shape_error() passes it, and hash_tree()'s
+# Path.is_file()/Path.read_bytes() both transparently follow the symlink
+# and hash whatever is on the other end. lint.py (the mandatory
+# pre-commit hook) would then print that outside file's sha256 to stdout
+# in a "local edit conflicts" ERROR HARNESS finding -- the exact class of
+# leak HarnessManifestPathTraversalFailsClosed above closes for the
+# absolute/'..' vectors, just reached through a third vector (symlink)
+# that neither the string checks nor is_file()/read_bytes() reject.
+class HarnessManifestSymlinkEscapeFailsClosed(unittest.TestCase):
+    def test_harness_symlinked_managed_path_does_not_leak_outside_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outer = Path(tmp)
+            root = outer / "wiki-root"
+            root.mkdir()
+            _write_tree(root, CLEAN_WIKI_FILES)
+
+            # A real file OUTSIDE root that a symlink will point at.
+            secret = outer / "outside-secret.txt"
+            secret.write_bytes(b"TOP SECRET, never read by lint.py\n")
+            secret_hash = hash_bytes(secret.read_bytes())
+
+            # The recorded path itself is perfectly well-formed (no '..',
+            # not absolute) -- only the actual filesystem entry at that
+            # path is a symlink escaping root.
+            (root / "scripts").mkdir()
+            link = root / "scripts" / "evil-managed.py"
+            os.symlink(secret, link)
+            self.assertTrue(link.is_symlink())
+
+            _write_manifest(root, {
+                "scripts/evil-managed.py": ("managed", "0" * 64),
+            })
+
+            # The pure judgment must never see, let alone report, the
+            # outside file's real sha256.
+            findings = check_harness(read_harness_manifest(root))
+            self.assertEqual(len(findings), 1, [tuple(f) for f in findings])
+            f = findings[0]
+            self.assertEqual((f.severity, f.code, f.path),
+                              ("ERROR", "HARNESS", "scripts/evil-managed.py"))
+            self.assertNotIn(secret_hash, f.message)
+            # A symlink escaping root is treated exactly like a path that
+            # does not exist: "missing", never a leaked hash.
+            self.assertIn("managed file missing", f.message)
+
+            # End-to-end: the actual CLI (the mandatory pre-commit hook)
+            # must not leak the outside file's hash either.
+            lint_py = ROOT / "scripts" / "lint.py"
+            result = subprocess.run(
+                [sys.executable, str(lint_py), "--root", str(root)],
+                capture_output=True, text=True)
+            self.assertNotIn("Traceback", result.stderr, result.stderr)
+            self.assertNotIn(secret_hash, result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
