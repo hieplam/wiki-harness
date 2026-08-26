@@ -23,6 +23,13 @@ from manifest import diff_manifest, hash_tree, is_valid_role, read_manifest  # n
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 
+FENCE_OPEN_RE = re.compile(r"^(`{3,}|~{3,})")
+# A run of N backticks, non-greedily up to the NEXT run of exactly N
+# backticks (CommonMark inline-code-span matching, via backreference).
+# DOTALL: per CommonMark an inline code span's opening and closing runs
+# may sit on DIFFERENT lines, so "." must match a newline too.
+INLINE_CODE_SPAN_RE = re.compile(r"(`+)(?:(?!\1).)*?\1", re.DOTALL)
+
 MANIFEST_FILENAME = ".wiki-harness-manifest.json"
 
 # read_harness_manifest()'s return type: harness_version is the manifest's
@@ -39,9 +46,74 @@ ManifestState = namedtuple("ManifestState", "harness_version recorded actual")
 ManifestMalformed = namedtuple("ManifestMalformed", "detail")
 
 
+def _strip_code(text):
+    """Pure. Returns `text` with every fenced code block (a line starting
+    with three or more backticks or tildes, any info string, closed by a
+    line consisting of at least as many of the same fence character) and
+    every inline code span (INLINE_CODE_SPAN_RE) blanked out -- same line
+    count, so callers needing positions stay unaffected, but no code-only
+    content survives for LINK_RE to ever see (A10). Fenced blocks are
+    stripped per line (fence state carried across lines); inline spans are
+    then stripped per PARAGRAPH -- a contiguous run of non-blank lines --
+    because CommonMark allows a span's opening and closing backtick run to
+    sit on different lines within the same paragraph, but inline parsing
+    never crosses a blank-line block boundary. Scoping to the paragraph
+    (rather than the whole document) stops a single stray/unmatched
+    backtick from pairing with an unrelated backtick run in a later,
+    unrelated paragraph and blanking everything (including real links) in
+    between. A matched span's embedded newlines are kept (blanking only
+    their content) so the line count stays unchanged."""
+    out_lines = []
+    fence_char = None
+    fence_len = 0
+    for line in text.split("\n"):
+        if fence_char is not None:
+            core = line.strip()
+            if len(core) >= fence_len and core and set(core) == {fence_char}:
+                fence_char = None
+                fence_len = 0
+            out_lines.append("")
+            continue
+        opener = FENCE_OPEN_RE.match(line.lstrip())
+        if opener:
+            fence_char = opener.group(1)[0]
+            fence_len = len(opener.group(1))
+            out_lines.append("")
+            continue
+        out_lines.append(line)
+    return _strip_inline_code_spans(out_lines)
+
+
+def _strip_inline_code_spans(lines):
+    """Pure. Applies INLINE_CODE_SPAN_RE to each contiguous run of
+    non-blank lines (a paragraph) independently, joins with '\\n' -- same
+    line count as `lines` in, same line count out."""
+    result = []
+    para_start = None
+
+    def flush(end):
+        nonlocal para_start
+        if para_start is None:
+            return
+        chunk = "\n".join(lines[para_start:end])
+        stripped = INLINE_CODE_SPAN_RE.sub(
+            lambda m: "\n" * m.group(0).count("\n"), chunk)
+        result.extend(stripped.split("\n"))
+        para_start = None
+
+    for i, line in enumerate(lines):
+        if line == "":
+            flush(i)
+            result.append("")
+        elif para_start is None:
+            para_start = i
+    flush(len(lines))
+    return "\n".join(result)
+
+
 def extract_links(text):
     out = []
-    for target in LINK_RE.findall(text):
+    for target in LINK_RE.findall(_strip_code(text)):
         if target.startswith(("http://", "https://", "mailto:", "#")):
             continue
         base = target.split("#")[0]

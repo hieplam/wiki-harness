@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from string import Template
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -12,8 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import card_frontmatter_lint
 import lint
 from card_frontmatter_lint import SCHEMA_PATH, check_card, load_schema
-from lint import (check_broken_links, check_card_citations, check_cards,
-                  check_frontmatter, check_index_sync, check_orphans, run)
+from lint import (MANIFEST_FILENAME, check_broken_links, check_card_citations,
+                  check_cards, check_frontmatter, check_index_sync,
+                  check_orphans, run)
+from manifest import compute_manifest, write_manifest
 
 TEMPLATE_ROOT = Path(__file__).resolve().parent.parent / "templates"
 
@@ -419,6 +424,161 @@ class TestCardKeyDoc(unittest.TestCase):
         doc_path, doc_message = self._doc_worked_example()
         self.assertEqual(doc_path, card_key[0].path)
         self.assertEqual(doc_message, card_key[0].message)
+
+
+class LinksInsideCode(unittest.TestCase):
+    """Amendment A10: extract_links() (shared by check_broken_links,
+    check_orphans and check_index_sync) must ignore a markdown link that
+    sits inside a fenced code block or an inline code span -- it is a
+    documentation example, not a real link."""
+
+    def test_link_inside_fenced_block_is_not_a_link(self):
+        files = {
+            "wiki/page.md": (
+                "# Page\n"
+                "```python\n"
+                "See [ghost](./ghost.md) for context.\n"
+                "```\n"
+            ),
+        }
+        self.assertEqual(check_broken_links(files), [])
+
+    def test_link_inside_inline_code_is_not_a_link(self):
+        files = {
+            "wiki/page.md": "Note: `[ghost](./ghost.md)` is just an example.\n",
+        }
+        self.assertEqual(check_broken_links(files), [])
+
+    def test_link_outside_code_is_still_checked(self):
+        """Regression guard: a REAL link and a neighbouring inline code span
+        on the SAME line must not let stripping the code span swallow the
+        real link too."""
+        files = {
+            "wiki/page.md": "See [ghost](./ghost.md) and also `inline code` here.\n",
+        }
+        findings = check_broken_links(files)
+        self.assertEqual([f.code for f in findings], ["LINK"])
+        self.assertIn("./ghost.md", findings[0].message)
+
+    def test_multiline_inline_code_span_is_not_a_link(self):
+        """CommonMark allows an inline code span's opening and closing
+        backtick run to sit on DIFFERENT lines (a line ending inside the
+        span becomes a space, it does not close the span). A regex applied
+        independently per line would leave the link inside this still-open
+        span unstripped -- reproduce that exact false positive."""
+        files = {
+            "wiki/page.md": (
+                "# Page\n"
+                "Run `python script.py\n"
+                "See [ghost](./ghost.md) for context` to enable logging.\n"
+            ),
+        }
+        self.assertEqual(check_broken_links(files), [])
+
+    def test_stray_backtick_does_not_swallow_a_later_paragraphs_link(self):
+        """A single unmatched backtick in one paragraph must not pair with
+        an unrelated backtick run in a LATER paragraph and blank everything
+        (including a real broken link) in between -- inline code spans do
+        not cross a blank-line paragraph boundary."""
+        files = {
+            "wiki/page.md": (
+                "# Page\n"
+                "This has a stray backtick ` in prose text like a typo.\n"
+                "\n"
+                "## Another section\n"
+                "See [ghost](./ghost.md) for details.\n"
+                "\n"
+                "## Yet another\n"
+                "code example uses a single backtick ` too.\n"
+            ),
+        }
+        findings = check_broken_links(files)
+        self.assertEqual([f.code for f in findings], ["LINK"])
+        self.assertIn("./ghost.md", findings[0].message)
+
+    def test_tilde_fence_and_longer_closing_fence(self):
+        """A ~~~ fence is honoured exactly like a ``` fence, and a closing
+        fence LONGER than the opening one still closes the block (per
+        CommonMark, the closing fence need only be at least as long) -- the
+        real link right after it proves scanning actually resumed rather
+        than the whole rest of the file being silently swallowed."""
+        files = {
+            "wiki/page.md": (
+                "~~~\n"
+                "[ghost](./ghost.md)\n"
+                "~~~~~\n"
+                "[real-ghost](./real-ghost.md)\n"
+            ),
+        }
+        findings = check_broken_links(files)
+        self.assertEqual([f.code for f in findings], ["LINK"])
+        self.assertIn("./real-ghost.md", findings[0].message)
+
+    def test_orphans_and_index_ignore_links_in_code(self):
+        # check_orphans: an inbound link that exists only inside a fenced
+        # code block must not count -- the target page is still an orphan.
+        files = good_files()
+        files["wiki/lonely.md"] = (
+            "---\ntitle: Lonely\ntopics: [misc]\n---\nNo real inbound link exists.\n")
+        files["wiki/widget-assembly.md"] += "\n```\n[lonely](./lonely.md)\n```\n"
+        orphan_findings = check_orphans(files)
+        self.assertEqual([(f.severity, f.code, f.path) for f in orphan_findings],
+                         [("WARN", "ORPHAN", "wiki/lonely.md")])
+
+        # check_index_sync: an index.md entry that exists only inside a
+        # fenced code block must not count as the page being listed.
+        files2 = good_files()
+        files2["wiki/real.md"] = "---\ntitle: Real\ntopics: [x]\n---\ncontent\n"
+        files2["index.md"] += "\n```\n- [Real](./wiki/real.md)\n```\n"
+        index_findings = check_index_sync(files2)
+        self.assertEqual([(f.code, f.message) for f in index_findings],
+                         [("INDEX", "wiki page not listed: wiki/real.md")])
+
+    def test_rules_file_example_links_do_not_fail_a_fresh_scaffold(self):
+        """The REAL templates/wiki.AGENTS.md and the REAL, rendered
+        templates/AGENTS.root.md.tmpl both carry documentation-example links
+        inside code (A10's whole motivation). A freshly scaffolded wiki --
+        these two files, the seeded index.md header, and an empty manifest,
+        nothing else -- must lint with zero LINK findings even though none
+        of the example targets (./wiki/widget-assembly.md,
+        ../sources/cards/src-2024-01-15-001.md, ./quality-checks.md) exist
+        anywhere in the tree."""
+        variables = {
+            "wiki_title": "Sample Wiki",
+            "org_name": "Sample Org",
+            "content_language": "English",
+            "repo_name": "sample-wiki",
+        }
+        rendered_root_agents = Template(
+            (TEMPLATE_ROOT / "AGENTS.root.md.tmpl").read_text(encoding="utf-8")
+        ).substitute(variables)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tree = {
+                "AGENTS.md": rendered_root_agents,
+                "wiki/AGENTS.md": (TEMPLATE_ROOT / "wiki.AGENTS.md").read_text(encoding="utf-8"),
+                "sources/AGENTS.md": "# Rules for sources/\n",
+                "sources/cards/AGENTS.md": "# Rules for sources/cards/\n",
+                "sources/cards/card-schema.json": FIXTURE_SCHEMA,
+                "VISION.md": "# Deferred work\n",
+                "index.md": (TEMPLATE_ROOT / "index.md.header.tmpl").read_text(encoding="utf-8"),
+            }
+            for rel, text in tree.items():
+                p = root / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(text, encoding="utf-8")
+            write_manifest(root / MANIFEST_FILENAME, compute_manifest(
+                {}, {}, "git@example.com:hieplam/wiki-harness.git",
+                harness_version="1.0.0", source_ref="v1.0.0",
+                source_commit="0" * 40, initialised_at="2026-08-26"))
+
+            lint_py = Path(__file__).resolve().parent.parent / "scripts" / "lint.py"
+            result = subprocess.run(
+                [sys.executable, str(lint_py), "--root", str(root)],
+                capture_output=True, text=True)
+            self.assertEqual(result.stderr, "", result.stderr)
+            self.assertNotRegex(result.stdout, r"(?m)^(ERROR|WARN) LINK ")
 
 
 if __name__ == "__main__":

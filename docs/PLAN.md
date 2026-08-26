@@ -28,6 +28,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 - [x] T10 — Split sources/cards/AGENTS.md into managed mechanism + templates/recipes.md
 - [x] T11 — Add HARNESS finding to lint.py as an eighth impure edge (no marker branch)
 - [x] T12 — Author remaining templates (AGENTS.root, README, CLAUDE.root/nested MANAGED, gitignore, etc.)
+- [x] T12b — lint.py: links inside code (fenced blocks, inline spans) are not links (A10)
 - [ ] T13 — Write init.py full flow (no --ci; CLAUDE.md tracked MANAGED)
 - [ ] T14 — init.py --non-interactive/--answers-file/--origins flags
 - [ ] T15 — upgrade --check standalone mode
