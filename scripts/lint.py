@@ -23,6 +23,50 @@ from manifest import diff_manifest, hash_tree, is_valid_role, read_manifest  # n
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 
+# At most three leading SPACES (no blockquote/list-item prefix handling --
+# a '>' or four-or-more-space indent is never a fence, by design, see
+# _strip_code's docstring), then a run of three or more backticks or
+# tildes.
+FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# A run of backtick characters (CommonMark inline-code-span delimiters).
+# Every match of this pattern is already a MAXIMAL run by construction
+# (finditer never starts mid-run and `+` is greedy), so pairing runs by
+# exact length below satisfies CommonMark's "isolated run of the same
+# length" rule without any extra bookkeeping.
+BACKTICK_RUN_RE = re.compile(r"`+")
+
+
+def _strip_backtick_delimited_spans(line):
+    """Pure. CommonMark inline-code-span matching over a single `line`:
+    the leftmost backtick run is a candidate opener; scan forward for the
+    next run of the SAME length to close it. If none exists, that run is
+    not an opener at all (literal text) and the NEXT run becomes the new
+    candidate -- exactly CommonMark's rule, and (because each run found
+    here is already maximal) immune to matching a same-length PREFIX of a
+    longer run the way a backreference substring match would. Scoped to
+    one line only -- a span whose opening and closing runs sit on
+    different lines is never matched here (see _strip_code's docstring)."""
+    runs = list(BACKTICK_RUN_RE.finditer(line))
+    out = []
+    last_end = 0
+    i = 0
+    n = len(runs)
+    while i < n:
+        opener = runs[i]
+        j = i + 1
+        while j < n and len(runs[j].group(0)) != len(opener.group(0)):
+            j += 1
+        if j == n:
+            i += 1
+            continue
+        closer = runs[j]
+        out.append(line[last_end:opener.start()])
+        last_end = closer.end()
+        i = j + 1
+    out.append(line[last_end:])
+    return "".join(out)
+
+
 MANIFEST_FILENAME = ".wiki-harness-manifest.json"
 
 # read_harness_manifest()'s return type: harness_version is the manifest's
@@ -39,9 +83,64 @@ ManifestState = namedtuple("ManifestState", "harness_version recorded actual")
 ManifestMalformed = namedtuple("ManifestMalformed", "detail")
 
 
+def _strip_code(text):
+    """Pure. Returns `text` with every fenced code block and every
+    same-line inline code span blanked out -- same line count, so callers
+    needing positions stay unaffected, but no code-only content survives
+    for LINK_RE to ever see (A10). Built on one principle, "when in doubt,
+    scan": over-checking (treating something as code that CommonMark would
+    render as prose) is at worst a spurious LINK finding an author fixes
+    in seconds; under-checking (skipping a link CommonMark would render)
+    is silent, so every rule below errs toward scanning. Four documented
+    limitations, each resolved that way: (1) no blockquote awareness -- a
+    line starting with '>' is never a fence marker, so a fence written
+    inside a blockquote is scanned as ordinary prose. (2) no list-item
+    indentation awareness -- indentation is never adjusted for a list
+    marker, so a fence effectively indented by one is scanned as prose.
+    (3) no indented-code-block support -- a line's own leading spaces
+    beyond three never make it code on that basis alone. (4) an unclosed
+    fence opener (no line before EOF matches the closer pattern) is not a
+    fence at all -- it and everything after it are scanned as prose. A
+    fenced block is found by scanning forward from a line matching
+    FENCE_OPEN_RE for the first following line matching the same-char
+    closer pattern; only if one is found are the fence lines (and every
+    line strictly between them) blanked. Inline code spans are then
+    stripped per line via _strip_backtick_delimited_spans -- a span whose
+    opening and closing backtick runs sit on different lines is never
+    stripped (scanned as prose, over-check by design)."""
+    lines = text.split("\n")
+    out_lines = list(lines)
+    n = len(lines)
+    i = 0
+    while i < n:
+        opener = FENCE_OPEN_RE.match(lines[i])
+        if opener:
+            fence_run = opener.group(1)
+            fence_char = fence_run[0]
+            fence_len = len(fence_run)
+            rest = lines[i][opener.end():]
+            if fence_char == "`" and "`" in rest:
+                i += 1
+                continue
+            closer_re = re.compile(
+                r"^ {0,3}" + re.escape(fence_char) + "{" + str(fence_len) + ",}[ \t]*$")
+            closer_idx = None
+            for j in range(i + 1, n):
+                if closer_re.match(lines[j]):
+                    closer_idx = j
+                    break
+            if closer_idx is not None:
+                for k in range(i, closer_idx + 1):
+                    out_lines[k] = ""
+                i = closer_idx + 1
+                continue
+        i += 1
+    return "\n".join(_strip_backtick_delimited_spans(line) for line in out_lines)
+
+
 def extract_links(text):
     out = []
-    for target in LINK_RE.findall(text):
+    for target in LINK_RE.findall(_strip_code(text)):
         if target.startswith(("http://", "https://", "mailto:", "#")):
             continue
         base = target.split("#")[0]
