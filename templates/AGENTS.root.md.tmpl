@@ -1,0 +1,114 @@
+# $wiki_title — Operating Manual
+
+This repository (`$repo_name`) is $org_name's **knowledge source of truth**: an
+LLM-maintained wiki. The AI agent (Claude Code or GitHub Copilot — this file serves both)
+owns and maintains everything under `wiki/`, `sources/cards/`, and `index.md`. Humans
+curate sources, ask questions, and resolve judgment calls. Pattern based on
+[Karpathy's LLM wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
+
+Everything committed to the wiki is written in **$content_language**, whatever language the
+conversation uses.
+
+## Layout — and where each folder's rules live
+
+Rules are **progressively disclosed**: this file is onboarding only. Format detail lives
+next to the files it governs, in a nested `AGENTS.md`. Read the nested file *before* you
+write into that folder — never infer a convention from existing files.
+
+| Path | What | Mutability | Rules |
+|---|---|---|---|
+| `sources/raw/` | Original source artifacts, ANY format | **Immutable** — write once, never edit/move/delete | [sources/AGENTS.md](./sources/AGENTS.md) |
+| `sources/cards/` | One markdown card per source (envelope + claims) | Mutable — claims/topics may improve | [sources/cards/AGENTS.md](./sources/cards/AGENTS.md) |
+| `sources/cards/card-schema.json` | The ONLY definition of card frontmatter keys | Mutable, but only under a `schema:` commit | [sources/cards/AGENTS.md](./sources/cards/AGENTS.md) |
+| `VISION.md` | Deferred work, each item with a status | Updated whenever something is postponed | this file |
+| `wiki/` | Knowledge pages, FLAT (no subfolders yet) | Mutable, fully agent-maintained | [wiki/AGENTS.md](./wiki/AGENTS.md) |
+| `index.md` | Catalog: every wiki page, grouped by topic | Updated on every ingest | this file |
+| `scripts/lint.py` | Mechanical lint | Run after every operation | this file |
+| `.githooks/` | Commit-format hook | One-time setup: `git config core.hooksPath .githooks` | this file |
+
+## Ownership — who may change what
+
+Every path in this repository belongs to exactly one of four ownership classes. `init` and
+`upgrade` record each MANAGED/TEMPLATE path's role and hash in
+`.wiki-harness-manifest.json`, so a hand-edit to either can be detected as drift instead of
+being silently overwritten.
+
+| Class | Meaning | Examples here |
+|---|---|---|
+| **MANAGED** | Fixed content, copied byte-for-byte on every `init`/`upgrade`; hand-edits are drift | `scripts/*.py`, `.githooks/*`, `CLAUDE.md` and its nested copies, `sources/AGENTS.md`, `wiki/AGENTS.md`, `sources/cards/AGENTS.md` |
+| **TEMPLATE** | Rendered once from the library's template plus this wiki's own variables; re-rendered on `upgrade` | this file, `README.md` |
+| **SEEDED** | Written once, at setup only, then 100% owned by this wiki forever | `VISION.md`, `index.md`, `sources/cards/recipes.md`, `sources/cards/card-schema.json`, `.gitignore` |
+| **INSTANCE** | Never touched by the library, ever | `sources/raw/*`, `sources/cards/src-*.md`, `wiki/*.md` |
+
+## Universal conventions
+
+- Links are plain relative markdown links: `[widget assembly](./wiki/widget-assembly.md)`.
+  Never `[[wikilinks]]`.
+- Frontmatter is a **restricted YAML subset** the lint parser understands: only
+  `key: value` and `key: [a, b]` lines. No nesting, no multiline values.
+- For **cards** the key set is **closed**: every key must be declared in
+  [sources/cards/card-schema.json](./sources/cards/card-schema.json), or lint fails and the
+  commit is blocked. Widening the schema is therefore a visible diff under a `schema:` commit,
+  never a silent line inside an `ingest:` commit. Wiki pages stay open beyond their required
+  keys.
+- There is no log file. **Git is the journal** — see Commit convention.
+- A nested `AGENTS.md` is rules, not content: lint reads it for link-checking but excludes
+  it from card and wiki-page checks.
+
+## Commit convention (one operation = one commit)
+
+Subject: `<op>(<ref>): <summary>` — enforced by `.githooks/commit-msg`.
+
+| op | when | ref |
+|---|---|---|
+| `ingest` | Filing a source into the wiki | REQUIRED: the card id |
+| `lint` | Fixes resulting from lint findings | optional |
+| `schema` | Changes to conventions (any `AGENTS.md`) | optional |
+| `chore` | Scripts, repo infra | optional |
+
+The hook accepts exactly **one** card id. When one operation ingests a tree of sources
+(several cards at once), use the **root** card as the ref and list every card in the body —
+splitting into one commit per card is not an option, because a wiki page citing a
+not-yet-committed card fails lint's `UNFILED` / `CITE` checks in the intermediate commits.
+
+Body lists what changed, e.g. `Touched: wiki/widget-assembly.md, index.md`.
+Never use `--no-verify`. History queries: `git log --oneline --grep='^ingest'`.
+
+## Workflow: Ingest
+
+1. **Raw** — store the artifact verbatim → [sources/AGENTS.md](./sources/AGENTS.md).
+   Wiki-born knowledge (a live session) has no raw; skip to 2.
+2. **Card** — one card per source → [sources/cards/AGENTS.md](./sources/cards/AGENTS.md),
+   which also holds the per-origin recipe for what to extract as claims.
+3. **File claims** — update or create the `wiki/` page(s) each claim belongs to, and cite the
+   card → [wiki/AGENTS.md](./wiki/AGENTS.md).
+4. **Index** — add/update the page's line in `index.md`, grouped under a `##` topic.
+5. **Lint** — `python3 scripts/lint.py` → must exit 0.
+6. **Semantic check (incremental)** — re-read ONLY the pages you touched. Does any new claim
+   contradict what the page already said? If yes: resolve by trust+date if clear, else add to
+   that page's `## Open questions` and tell the human.
+7. **Commit** — `ingest(<card-id>): <summary>`, one commit for the whole operation.
+
+## Workflow: Query
+
+1. Read `index.md` → open the relevant `wiki/` pages.
+2. Answer citing cards by relative link to `sources/cards/`; follow a card's `raw:` pointer
+   only when the card lacks the detail you need.
+3. If the answer produced durable NEW synthesis, offer to file it back — that is just an
+   ingest with `origin: session`.
+
+## Workflow: Lint
+
+- Mechanical: `python3 scripts/lint.py` (broken links, orphans, citations, card and page
+  frontmatter, index sync, raw immutability). Exit 0 required before any commit, and
+  `.githooks/pre-commit` enforces that rather than trusting anyone to run it.
+- Cards only, for a fast single-file check: `python3 scripts/card_frontmatter_lint.py <file>`.
+- Tests for the linter itself live only in `wiki-harness`'s own checkout — not here.
+- Semantic: incremental at every ingest (step 6 above). Full-wiki semantic passes are
+  deferred until the wiki is larger.
+
+## Deferred by design (do NOT build yet)
+
+Everything postponed lives in [VISION.md](./VISION.md), with a status and an unblock condition
+for each item. When we decide to defer something, it goes there — the list must not be
+duplicated here.

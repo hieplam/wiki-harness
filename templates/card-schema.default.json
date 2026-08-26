@@ -1,0 +1,61 @@
+{
+  "_comment": "Single source of truth for card frontmatter. To add or change a key, edit THIS file and commit with op 'schema:'. scripts/card_frontmatter_lint.py reads it; nothing else defines card keys.",
+  "keys": {
+    "id": {
+      "required": true,
+      "pattern": "^src-\\d{4}-\\d{2}-\\d{2}-\\d{3}$",
+      "matches_filename": true,
+      "description": "Card id, src-YYYY-MM-DD-NNN. NNN is a 3-digit sequence within that day, from 001."
+    },
+    "date": {
+      "required": true,
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "The date the SOURCE asserts for itself. Use the ingest date only if the source has none."
+    },
+    "origin": {
+      "required": true,
+      "enum": ["session"],
+      "description": "Which kind of source system this came from. Widen with --origins at init/adopt time."
+    },
+    "trust": {
+      "required": true,
+      "enum": ["verified-in-code", "stated", "hearsay"],
+      "description": "How much to trust the claims. Contradictions resolve by higher trust first, then newer date."
+    },
+    "topics": {
+      "required": true,
+      "list": true,
+      "description": "Non-empty list of wiki topics, [a, b]."
+    },
+    "raw": {
+      "required": false,
+      "path": true,
+      "description": "Relative path to the verbatim artifact. Omit when wiki-born, e.g. a live session."
+    },
+    "parent": {
+      "required": false,
+      "card_ref": true,
+      "description": "Card id of the parent source when ingesting a tree. Omit on the root."
+    },
+    "source_id": {
+      "required": false,
+      "description": "Native id in the source system."
+    },
+    "source_url": {
+      "required": false,
+      "description": "Canonical link back to the source."
+    },
+    "source_version": {
+      "required": false,
+      "description": "Version captured, so a re-ingest can detect drift."
+    },
+    "source_space": {
+      "required": false,
+      "description": "Containing space / project / channel."
+    },
+    "source_parent_id": {
+      "required": false,
+      "description": "Parent in the SOURCE system, recorded even when that parent was not ingested."
+    }
+  }
+}

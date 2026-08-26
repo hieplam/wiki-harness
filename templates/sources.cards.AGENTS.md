@@ -56,11 +56,7 @@ Context that isn't a claim (optional).
 
 ## Trust and contradiction
 
-| trust | meaning |
-|---|---|
-| `verified-in-code` | Confirmed against source code or observed system behaviour |
-| `stated` | Asserted by a person or document, unverified |
-| `hearsay` | Second-hand |
+See [recipes](./recipes.md) for what each `trust` value means and what to extract per `origin`.
 
 Contradictions resolve by **higher trust first, then newer `date`** — which is why `date` is
 the date the claim was *asserted*, not the date it was filed. A specification and a meeting
@@ -74,16 +70,3 @@ phrasing. A claim that needs "and" twice is usually three claims. Anything that 
 rather than a fact goes in `## Notes`.
 
 Every card must be cited by at least one wiki page, or lint reports `UNFILED`.
-
-### Per-origin recipes — what to extract
-
-| origin | extract |
-|---|---|
-| `session` | Verified findings, decisions made, gotchas discovered |
-| `transcript` | Speakers/personas, decisions + owners, commitments |
-| `jira` | Problem → root cause → fix → affected services |
-| `slack` | The question + the tribal answer |
-| `confluence` / `research` | Concepts, definitions, procedures |
-
-All recipes emit the SAME contract: a card with claims, filed into wiki pages. A recipe must
-never invent its own wiki-page shape.

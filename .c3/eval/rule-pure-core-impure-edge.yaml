@@ -4,6 +4,6 @@ code:
   - scripts/lint.py
   - scripts/card_frontmatter_lint.py
   - scripts/check_commit_msg.py
-  - manifest.py
+  - scripts/manifest.py
   - init.py
   - upgrade.py

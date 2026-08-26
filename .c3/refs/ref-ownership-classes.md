@@ -1,6 +1,6 @@
 ---
 id: ref-ownership-classes
-c3-seal: 250ccec3440879707728a9a3206adfcd92cfb60fb616b9caa413967bf57e33cd
+c3-seal: 4e6c1ea2088207153f2d963730fe01216dc4ac9243a3f5480dc95abc9cc2bd19
 title: Four file-ownership classes drive what upgrade may overwrite
 type: ref
 goal: |-
@@ -32,13 +32,13 @@ Without a per-file class, `upgrade` has no way to tell "the owner deliberately e
 `sources/cards/recipes.md`" (SEEDED, now 100% instance-owned) from "this file has drifted from
 the library's canonical bytes and should be repaired" (MANAGED) — conflating the two either
 clobbers real owner content or lets real drift ride forever undetected. The manifest
-(`manifest.py`, `c3-201`) persists the class as a `role` field per path in
+(`scripts/manifest.py`, `c3-201`) persists the class as a `role` field per path in
 `.wiki-harness-manifest.json` precisely so `diff_manifest`'s pure decision logic can apply this
 rule mechanically from the recorded class, instead of guessing from file content or timestamps.
 
 ## How
 
-`manifest.py`'s `files` map records `{"role": "managed" | "template" | "removed", ...}` per
+`scripts/manifest.py`'s `files` map records `{"role": "managed" | "template" | "removed", ...}` per
 path — SEEDED and INSTANCE paths are deliberately absent from the manifest's `files` map
 entirely (plan-v3 §2.4: "`files` covers exactly MANAGED + TEMPLATE paths — never
 SEEDED/INSTANCE, which are expected to diverge"). `upgrade --adopt-drift <path>` is the one
