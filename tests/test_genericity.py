@@ -21,11 +21,12 @@ OGP_SPECIFIC_TERMS = (
     "partner-commissions",
 )
 
-# Globs the OGP-corpus sweep covers today. templates/ doesn't exist yet
-# (T02 is scoped to scripts/, githooks/ only) -- T12 can extend this tuple
-# to include "templates/**/*" once templates/ exists, without rewriting
-# any test in this module.
-GENERICITY_GLOBS = ("scripts/**/*.py", "githooks/*")
+# Globs the OGP-corpus sweep covers. T02 scoped this to scripts/,
+# githooks/ only (templates/ didn't exist yet); T12 extends it to
+# "templates/**/*" now that templates/ exists, without rewriting any test
+# already in this module -- both test_genericity_zero_ogp_strings and
+# test_genericity_extended_to_templates below share this one tuple.
+GENERICITY_GLOBS = ("scripts/**/*.py", "githooks/*", "templates/**/*")
 
 
 def _library_files():
@@ -61,6 +62,20 @@ class GenericityGrep(unittest.TestCase):
     def test_genericity_zero_ogp_strings(self):
         files = [(p.relative_to(ROOT).as_posix(), p.read_text(encoding="utf-8"))
                   for p in _library_files()]
+        self.assertEqual(find_ogp_strings(files), [])
+
+    def test_genericity_extended_to_templates(self):
+        """T12: extends the same OGP-corpus sweep to templates/ (now that
+        it exists), including the two CLAUDE.*.tmpl files -- via
+        GENERICITY_GLOBS above rather than a second, separate grep."""
+        template_paths = [p for p in _library_files()
+                          if p.relative_to(ROOT).parts[0] == "templates"]
+        self.assertTrue(template_paths, "expected templates/ files to be swept")
+        names = {p.name for p in template_paths}
+        self.assertIn("CLAUDE.root.tmpl", names)
+        self.assertIn("CLAUDE.nested.tmpl", names)
+        files = [(p.relative_to(ROOT).as_posix(), p.read_text(encoding="utf-8"))
+                  for p in template_paths]
         self.assertEqual(find_ogp_strings(files), [])
 
 

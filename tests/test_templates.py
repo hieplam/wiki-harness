@@ -4,16 +4,29 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from string import Template
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from card_frontmatter_lint import parse_frontmatter
-from lint import check_broken_links, extract_links, resolve
+from lint import check_broken_links, extract_links, resolve, run, scan
 
 ROOT = Path(__file__).resolve().parent.parent
 LINT_PY = ROOT / "scripts" / "lint.py"
+TEMPLATE_ROOT = ROOT / "templates"
 CARDS_AGENTS_TEMPLATE = ROOT / "templates" / "sources.cards.AGENTS.md"
 RECIPES_TEMPLATE = ROOT / "templates" / "recipes.md"
+FIXTURE = ROOT / "tests" / "fixtures" / "sample-wiki"
+
+
+def render(text, variables):
+    """T12's own minimal renderer: fills a TEMPLATE-class source's ${var}
+    placeholders (stdlib string.Template) from `variables`. Pure -- text
+    and a dict in, text out. Test-only: init.py's real rendering step is
+    T13's job (out of scope here); this exists only so this task's own
+    render-determinism/README tests can exercise the .tmpl SOURCE files
+    this task authors without waiting on init.py to exist."""
+    return Template(text).substitute(variables)
 
 
 def _module_docstring(path):
@@ -125,6 +138,94 @@ class SourceCardsAgentsRecipesSplit(unittest.TestCase):
         self.assertNotIn(self.TRUST_TABLE, mechanism_text)
         self.assertNotIn(self.PER_ORIGIN_TABLE, mechanism_text)
         self.assertIn("(./recipes.md)", mechanism_text)
+
+
+class TemplateRenderDeterminism(unittest.TestCase):
+    """T12: rendering the same TEMPLATE-class source with the same variable
+    dict twice must produce byte-identical output -- init.py's future
+    rendering step (T13) can safely be invoked any number of times (init,
+    then every later upgrade) without ever depending on hidden state."""
+
+    VARS = {
+        "wiki_title": "Sample Wiki",
+        "org_name": "Sample Org",
+        "content_language": "English",
+        "repo_name": "sample-wiki",
+    }
+
+    def test_templates_render_deterministically(self):
+        for name in ("AGENTS.root.md.tmpl", "README.md.tmpl"):
+            text = (TEMPLATE_ROOT / name).read_text(encoding="utf-8")
+            first = render(text, self.VARS)
+            second = render(text, self.VARS)
+            self.assertEqual(first, second)
+            # Proves this is a real substitution, not an identity no-op on
+            # text that happens to carry no placeholders.
+            self.assertNotIn("${", first)
+
+
+class ReadmeNoHandCreatedClaudeMd(unittest.TestCase):
+    """README.md.tmpl v3 (A7): init seeds CLAUDE.md directly, tracked,
+    every time, so the template must never instruct a human to create it
+    by hand -- the exact ogp-wiki README.md:13 line this plan retires
+    ('Claude Code users: create a local CLAUDE.md containing the single
+    line @AGENTS.md')."""
+
+    HAND_CREATION_RE = re.compile(
+        r"create\s+(?:a\s+)?(?:local\s+)?`?CLAUDE\.md`?", re.IGNORECASE)
+
+    def test_readme_has_no_claude_md_hand_creation_instruction(self):
+        text = render((TEMPLATE_ROOT / "README.md.tmpl").read_text(encoding="utf-8"),
+                      TemplateRenderDeterminism.VARS)
+        self.assertNotRegex(text, self.HAND_CREATION_RE)
+
+
+class GitignoreSnippetNoClaudeMd(unittest.TestCase):
+    """templates/gitignore.snippet v3 (A7): CLAUDE.md is now tracked, so
+    the seeded .gitignore must no longer list it (was .gitignore:3 in
+    ogp-wiki today)."""
+
+    def test_gitignore_snippet_has_no_claude_md_line(self):
+        text = (TEMPLATE_ROOT / "gitignore.snippet").read_text(encoding="utf-8")
+        self.assertNotIn("CLAUDE.md", text)
+
+
+class ClaudeTemplatesSingleLineImport(unittest.TestCase):
+    """CLAUDE.root.tmpl / CLAUDE.nested.tmpl (both MANAGED, v3 A7): each
+    renders to the exact single line '@AGENTS.md' and nothing else --
+    Claude Code's own relative-to-importer resolution means a nested stub
+    never needs to also re-import the root file."""
+
+    def test_claude_templates_are_single_line_import(self):
+        for name in ("CLAUDE.root.tmpl", "CLAUDE.nested.tmpl"):
+            text = (TEMPLATE_ROOT / name).read_text(encoding="utf-8")
+            self.assertEqual(text, "@AGENTS.md\n")
+
+
+class SeededClaudeMdZeroFindings(unittest.TestCase):
+    """T08 pre-emptively added 'CLAUDE.md' to RULES_FILES so a nested,
+    tracked CLAUDE.md stub never trips FM/INDEX/ORPHAN/CARD_FM -- this
+    proves that promise against the real, rendered CLAUDE.nested.tmpl
+    bytes, seeded into the two nested dirs lint treats as wiki-page/card
+    content (wiki/ and sources/cards/). If this test fails, the fix
+    belongs in T08's lint.py, not in this task's templates."""
+
+    ATTRIBUTABLE_CODES = frozenset({"FM", "INDEX", "ORPHAN", "CARD_FM"})
+    TARGET_PATHS = frozenset({"wiki/CLAUDE.md", "sources/cards/CLAUDE.md"})
+
+    def test_seeded_claude_md_produces_zero_wiki_page_and_card_findings(self):
+        files, encoding_findings = scan(FIXTURE)
+        self.assertEqual(encoding_findings, [])
+        claude_text = (TEMPLATE_ROOT / "CLAUDE.nested.tmpl").read_text(encoding="utf-8")
+        files["wiki/CLAUDE.md"] = claude_text
+        files["sources/cards/CLAUDE.md"] = claude_text
+
+        findings = run(files, [])
+
+        attributable = [f for f in findings
+                        if f.code in self.ATTRIBUTABLE_CODES
+                        and f.path in self.TARGET_PATHS]
+        self.assertEqual(attributable, [])
 
 
 if __name__ == "__main__":
