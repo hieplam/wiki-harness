@@ -165,6 +165,10 @@ def parse_answers_file(text):
             raise AnswersFileError(
                 f"value for {key!r} must be a JSON string, got "
                 f"{type(data[key]).__name__}")
+    if "origins" in data and not isinstance(data["origins"], str):
+        raise AnswersFileError(
+            "value for 'origins' must be a JSON string, got "
+            f"{type(data['origins']).__name__}")
     return data
 
 

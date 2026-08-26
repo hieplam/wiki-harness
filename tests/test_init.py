@@ -429,6 +429,37 @@ class AnswersFileNonStringRequiredValueExits2(unittest.TestCase):
             self.assertFalse(target.exists())
 
 
+class AnswersFileNonStringOriginsExits2(unittest.TestCase):
+    """A --answers-file 'origins' value that parses as valid JSON but is
+    not a string (a JSON array, the natural way to express a list of
+    origins in a JSON file) must be refused through the same graceful
+    exit-2 refusal as every other malformed --answers-file shape -- never
+    an unhandled AttributeError traceback from parse_origins() calling
+    .split() on a non-string, and nothing gets written."""
+
+    def test_answers_file_non_string_origins_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            answers_path = Path(tmp) / "answers.json"
+            answers_path.write_text(json.dumps({
+                "wiki_title": "Sample Wiki",
+                "org_name": "Sample Org",
+                "content_language": "English",
+                "repo_name": "sample-wiki",
+                "origins": ["session", "jira"],
+            }), encoding="utf-8")
+
+            args = [sys.executable, str(INIT_PY), str(target),
+                    "--answers-file", str(answers_path), "--non-interactive"]
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn("origins", result.stderr)
+            self.assertFalse(target.exists())
+
+
 def _seeded_schema(target):
     """init.py seeds exactly one JSON file into <target>/sources/cards/ --
     located by glob (never a hardcoded filename literal) so this suite
