@@ -11,14 +11,16 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 
 ## P1 — Extract code (library-only, verbatim port + minimal tested fixes)
 
-- [ ] T01 — Fork scripts/.githooks/tests verbatim from ogp-wiki HEAD f8b43fb
-- [ ] T02 — Synthetic-fixture test suite + test_genericity.py
-- [ ] T03 — Prose/code fixes 1-4: genericize examples, byte-match CARD_KEY, fix raw: example, remove dangling spec ref
-- [ ] T04 — Schema-driven card-id mechanism (delete hardcoded CARD_ID_RE)
-- [ ] T05 — git_changes()/HOOKS-positive-path E2E tests in the library suite
-- [ ] T06 — Golden ERROR-before-WARN sort-order test
-- [ ] T07 — Close CARD_VALUE/ENCODING/fixup-squash coverage gaps
-- [ ] T08 — RULES_FILES generalization in lint.py (A1 blocker fix)
+- [x] T01 — Fork scripts/.githooks/tests verbatim from ogp-wiki HEAD f8b43fb
+- [x] T02 — Synthetic-fixture test suite + test_genericity.py
+- [x] T03 — Prose/code fixes 1-4: genericize examples, byte-match CARD_KEY, fix raw: example, remove dangling spec ref
+- [x] T04 — Schema-driven card-id mechanism (delete hardcoded CARD_ID_RE)
+- [x] T05 — git_changes()/HOOKS-positive-path E2E tests in the library suite
+- [x] T06 — Golden ERROR-before-WARN sort-order test
+- [x] T07 — Close CARD_VALUE/ENCODING/fixup-squash coverage gaps
+- [x] T08 — RULES_FILES generalization in lint.py (A1 blocker fix)
+- [x] T08b — RULES_FILES parity in the card-lint CLI discovery (card_frontmatter_lint.py main())
+- [x] C3-1 — C3 change-unit: amend ref-verbatim-port to name T08b and bound audit-driven fixes
 
 ## P2 — Templates / init
 

@@ -1,6 +1,6 @@
 ---
 id: rule-stdlib-only-py39
-c3-seal: ce1da6f4ec71228ef81e26e8f77943b284dd8ca1af31d3ee4e5347f12d6f63e2
+c3-seal: 0fbb5e09718bfe86c9806789971f2e20258af4eb9c963fb9e7b49ef37158b8d4
 title: Python 3.9 floor, stdlib only
 type: rule
 goal: |-
@@ -45,7 +45,7 @@ from pathlib import Path, PurePosixPath
 | Anti-Pattern | Correct | Why Wrong Here |
 | --- | --- | --- |
 | Add a third-party dependency (e.g. pyyaml, click) to simplify CLI/config parsing | Use argparse/json/re and other stdlib modules, exactly as scripts/*.py already does | A wiki instance has no package-manager step; a third-party import breaks python3 scripts/lint.py on a bare interpreter |
-| A new module ships without from __future__ import annotations | Add it as the first import line, matching every existing script | The Python 3.9 floor (plan-v3 D2) relies on this line to accept annotation syntax written as if on a newer interpreter |
+| A new module ships without `from __future__ import annotations` | Add it as the first import line, matching every existing script | The Python 3.9 floor (plan-v3 D2) relies on this line to accept annotation syntax written as if on a newer interpreter |
 | Ship a pyproject.toml/setup.py so the library can declare a dependency | Keep every entry point a plain script invocation, python3 wiki-harness/init.py <target-dir>, same shape scripts/lint.py already uses | plan-v3 §2.1 explicitly rules out pyproject.toml, setup.py, and console-script entry points for this library |
 
 ## Scope
