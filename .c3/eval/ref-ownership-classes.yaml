@@ -2,4 +2,4 @@ fact: ref-ownership-classes
 claim: "the TEMPLATE/MANAGED/SEEDED classes this ref defines are implemented across templates/ and read back by manifest.py"
 code:
   - templates/**
-  - manifest.py
+  - scripts/manifest.py

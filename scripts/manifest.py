@@ -117,12 +117,32 @@ def hash_tree(root, paths):
     """Impure edge. Reads each of `paths` (relative to `root`) off disk via
     Path.read_bytes() and returns {path: sha256}. A path that does not
     exist on disk is simply absent from the returned map -- diff_manifest()
-    is what reports that absence, as "missing", not this function raising."""
+    is what reports that absence, as "missing", not this function raising.
+
+    A recorded path can be a well-formed relative string (no '..', not
+    absolute -- lint.py's _manifest_shape_error() already rejects those
+    two vectors before this function ever runs) and still be, on disk, a
+    symlink whose TARGET resolves outside `root`. Path.is_file() and
+    Path.read_bytes() both transparently follow symlinks, so without this
+    check this function would happily hash and return an arbitrary file
+    outside the wiki root, driven purely by a manifest-recorded string --
+    the same class of leak the absolute/'..' guard closes, reached
+    through a third vector. Such a path is treated exactly like one that
+    does not exist: simply absent from the returned map, so the caller
+    reports "missing" (never a hash) for it, same as any other absent
+    path."""
     root = Path(root)
+    root_resolved = root.resolve()
     hashes = {}
     for path in paths:
         f = root / path
         if f.is_file():
+            try:
+                resolved = f.resolve()
+            except OSError:
+                continue
+            if not resolved.is_relative_to(root_resolved):
+                continue
             hashes[path] = hash_bytes(f.read_bytes())
     return hashes
 
