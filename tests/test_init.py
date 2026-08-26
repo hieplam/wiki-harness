@@ -249,5 +249,121 @@ class InitScaffoldHasNoTestsDir(unittest.TestCase):
             self.assertEqual(found, [])
 
 
+class NonInteractiveWithAllFlagsZeroPrompts(unittest.TestCase):
+    """--non-interactive with all 4 required flags set must never call
+    input() -- proven here by starving stdin (DEVNULL) so an accidental
+    input() call raises EOFError and crashes the subprocess instead of
+    silently reading nothing, plus a rerun proving the output is
+    deterministic (identical stdout modulo the commit hash line)."""
+
+    @staticmethod
+    def _normalized(stdout, target):
+        """Strips the one target path and the one commit-hash prefix that
+        legitimately differ run to run, so two independent scaffolds of
+        identical inputs can be compared for byte-identical remaining
+        output."""
+        text = stdout.replace(str(target), "TARGET")
+        lines = text.splitlines()
+        return [l.split(" -- lint clean")[0] if l.startswith("Scaffolded") else l
+               for l in lines]
+
+    def test_non_interactive_with_all_flags_zero_prompts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            args = [sys.executable, str(INIT_PY), str(target),
+                    *VARS_ARGS, "--non-interactive"]
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            normalized_1 = self._normalized(result.stdout, target)
+
+        with tempfile.TemporaryDirectory() as tmp2:
+            target2 = Path(tmp2) / "wiki"
+            args2 = [sys.executable, str(INIT_PY), str(target2),
+                     *VARS_ARGS, "--non-interactive"]
+            result2 = subprocess.run(args2, capture_output=True, text=True,
+                                     stdin=subprocess.DEVNULL)
+            self.assertEqual(result2.returncode, 0, result2.stderr)
+            normalized_2 = self._normalized(result2.stdout, target2)
+
+            self.assertEqual(normalized_1, normalized_2)
+
+
+class NonInteractiveMissingRequiredFlagExits2(unittest.TestCase):
+    def test_non_interactive_missing_required_flag_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            args = [sys.executable, str(INIT_PY), str(target),
+                    "--org-name", "Sample Org",
+                    "--content-language", "English",
+                    "--repo-name", "sample-wiki",
+                    "--non-interactive"]
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL)
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("--wiki-title", result.stderr)
+            self.assertFalse(target.exists())
+
+
+class AnswersFileSuppliesAllValues(unittest.TestCase):
+    def test_answers_file_supplies_all_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            answers_path = Path(tmp) / "answers.json"
+            answers_path.write_text(json.dumps({
+                "wiki_title": "Answers Wiki",
+                "org_name": "Answers Org",
+                "content_language": "English",
+                "repo_name": "answers-wiki",
+            }), encoding="utf-8")
+
+            args = [sys.executable, str(INIT_PY), str(target),
+                    "--answers-file", str(answers_path), "--non-interactive"]
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(
+                (target / ".wiki-harness-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["vars"]["wiki_title"], "Answers Wiki")
+            self.assertEqual(manifest["vars"]["org_name"], "Answers Org")
+            self.assertEqual(manifest["vars"]["content_language"], "English")
+            self.assertEqual(manifest["vars"]["repo_name"], "answers-wiki")
+
+
+def _seeded_schema(target):
+    """init.py seeds exactly one JSON file into <target>/sources/cards/ --
+    located by glob (never a hardcoded filename literal) so this suite
+    never has to name the schema's on-disk filename, matching the rest of
+    this file's fixture-only sourcing discipline (test_genericity.py's
+    SyntheticFixtureNotOgpCorpus)."""
+    [schema_path] = list((target / "sources/cards").glob("*.json"))
+    return json.loads(schema_path.read_text(encoding="utf-8"))
+
+
+class OriginsFlagSeedsSchemaEnum(unittest.TestCase):
+    def test_origins_flag_seeds_schema_enum(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            result = _run_init(target, extra_args=("--origins", "session,jira,slack"))
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            schema = _seeded_schema(target)
+            self.assertEqual(schema["keys"]["origin"]["enum"], ["session", "jira", "slack"])
+
+
+class OriginsDefaultIsSessionOnly(unittest.TestCase):
+    def test_origins_default_is_session_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            result = _run_init(target)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            schema = _seeded_schema(target)
+            self.assertEqual(schema["keys"]["origin"]["enum"], ["session"])
+
+
 if __name__ == "__main__":
     unittest.main()
