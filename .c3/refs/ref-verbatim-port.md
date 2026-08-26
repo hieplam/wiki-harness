@@ -1,6 +1,6 @@
 ---
 id: ref-verbatim-port
-c3-seal: 16a7afa305645af589678c3f6450cbc0ad74aec303496f3f14dacbc46d0d6725
+c3-seal: 966b6820820b425833f39d20c299a0baa1660005f494c4de21566f11cf949ebb
 title: Fork scripts byte-identical, never rewrite
 type: ref
 goal: |-
@@ -29,6 +29,11 @@ defect inherited byte-identical from ogp-wiki — for example the unanchored cit
 prefix-matching, list-item rule non-enforcement, or `git diff HEAD` vs `--cached` in
 `git_changes()` — is out of scope for the port and is tracked as a post-migration hardening
 candidate, never fixed "freehand" during the port.
+
+Additions the plan itself specifies for `lint.py` (T08's `RULES_FILES`, T11's §4.4 HARNESS
+eighth edge) and Warchief amendment A10 (T12b: links inside code are not links, proven
+byte-identical on ogp-wiki) are sanctioned deltas, distinct from fixes; the byte-identical
+mandate covers inherited behaviour, which the baseline oracle (§6(e)) proves unchanged.
 
 ## Why
 

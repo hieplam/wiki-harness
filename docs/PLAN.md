@@ -32,6 +32,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 - [x] T13 — Write init.py full flow (no --ci; CLAUDE.md tracked MANAGED)
 - [x] T14 — init.py --non-interactive/--answers-file/--origins flags
 - [x] T15 — upgrade --check standalone mode
+- [x] C3-2 — C3 change-unit: reconcile frozen facts with T04/T09/T11 + A8 (scripts/manifest.py vendored)
 
 ## P3 — upgrade
 
