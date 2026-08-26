@@ -190,7 +190,11 @@ def run_check(target):
         print(f"upgrade --check: manifest {str(manifest_path)!r} is not "
               f"valid JSON ({exc})", file=sys.stderr)
         return 1
-    if manifest is not None and not isinstance(manifest, dict):
+    except UnicodeDecodeError as exc:
+        print(f"upgrade --check: manifest {str(manifest_path)!r} is not "
+              f"valid UTF-8 ({exc})", file=sys.stderr)
+        return 1
+    if not isinstance(manifest, dict):
         print(f"upgrade --check: manifest {str(manifest_path)!r} is not a "
               "JSON object", file=sys.stderr)
         return 1

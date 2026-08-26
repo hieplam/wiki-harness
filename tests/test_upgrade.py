@@ -259,6 +259,61 @@ class TestCheck(unittest.TestCase):
             self.assertIn(expected, stderr.getvalue())
             self.assertNotIn("Traceback", stderr.getvalue())
 
+    def test_check_non_utf8_manifest_exits_1_without_remote_call(self):
+        """Regression guard (amendment A11): a manifest file whose bytes are
+        not valid UTF-8 (e.g. a hand edit in a different encoding) must fail
+        closed exactly like an unreadable/invalid-JSON manifest -- exit 1,
+        one clean stderr line, no traceback -- and must never reach the
+        remote round-trip; ls_remote_tags() must never be called."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            target.mkdir()
+            (target / MANIFEST_FILENAME).write_bytes(b"\xff\xfe bad")
+
+            def _must_not_be_called(*args, **kwargs):
+                raise AssertionError(
+                    "ls_remote_tags must not be called for a non-UTF-8 manifest")
+
+            stderr = io.StringIO()
+            with patch.object(upgrade, "ls_remote_tags", side_effect=_must_not_be_called):
+                with contextlib.redirect_stderr(stderr):
+                    rc = upgrade.run_check(target)
+
+            self.assertEqual(rc, 1)
+            lines = stderr.getvalue().splitlines()
+            self.assertEqual(len(lines), 1, stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_check_null_manifest_is_non_object_exits_1_without_remote_call(self):
+        """Regression guard (amendment A11): a manifest file whose content is
+        the JSON literal `null` (read_manifest() returns Python None) is a
+        NON-OBJECT manifest, not an absent one -- --check must fail closed
+        with the existing 'is not a JSON object' message and must never
+        reach the remote round-trip (previously manifest.get(...) was
+        skipped via `if manifest else ""`, source_url became "", and
+        ls_remote_tags("") was called, producing the misleading "remote ''
+        is unreachable")."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            target.mkdir()
+            (target / MANIFEST_FILENAME).write_text("null", encoding="utf-8")
+
+            def _must_not_be_called(*args, **kwargs):
+                raise AssertionError(
+                    "ls_remote_tags must not be called for a null manifest")
+
+            stderr = io.StringIO()
+            with patch.object(upgrade, "ls_remote_tags", side_effect=_must_not_be_called):
+                with contextlib.redirect_stderr(stderr):
+                    rc = upgrade.run_check(target)
+
+            self.assertEqual(rc, 1)
+            value = stderr.getvalue()
+            self.assertNotIn("remote ''", value)
+            self.assertNotIn("unreachable", value)
+            self.assertIn("is not a JSON object", value)
+            self.assertNotIn("Traceback", value)
+
 
 if __name__ == "__main__":
     unittest.main()
