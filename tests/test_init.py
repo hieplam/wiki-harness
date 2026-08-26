@@ -249,5 +249,279 @@ class InitScaffoldHasNoTestsDir(unittest.TestCase):
             self.assertEqual(found, [])
 
 
+class NonInteractiveWithAllFlagsZeroPrompts(unittest.TestCase):
+    """--non-interactive with all 4 required flags set must never call
+    input() -- proven here by starving stdin (DEVNULL) so an accidental
+    input() call raises EOFError and crashes the subprocess instead of
+    silently reading nothing, plus a rerun proving the output is
+    deterministic (identical stdout modulo the commit hash line)."""
+
+    @staticmethod
+    def _normalized(stdout, target):
+        """Strips the one target path and the one commit-hash prefix that
+        legitimately differ run to run, so two independent scaffolds of
+        identical inputs can be compared for byte-identical remaining
+        output."""
+        text = stdout.replace(str(target), "TARGET")
+        lines = text.splitlines()
+        return [l.split(" -- lint clean")[0] if l.startswith("Scaffolded") else l
+               for l in lines]
+
+    def test_non_interactive_with_all_flags_zero_prompts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            args = [sys.executable, str(INIT_PY), str(target),
+                    *VARS_ARGS, "--non-interactive"]
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            normalized_1 = self._normalized(result.stdout, target)
+
+        with tempfile.TemporaryDirectory() as tmp2:
+            target2 = Path(tmp2) / "wiki"
+            args2 = [sys.executable, str(INIT_PY), str(target2),
+                     *VARS_ARGS, "--non-interactive"]
+            result2 = subprocess.run(args2, capture_output=True, text=True,
+                                     stdin=subprocess.DEVNULL)
+            self.assertEqual(result2.returncode, 0, result2.stderr)
+            normalized_2 = self._normalized(result2.stdout, target2)
+
+            self.assertEqual(normalized_1, normalized_2)
+
+
+class NonInteractiveMissingRequiredFlagExits2(unittest.TestCase):
+    def test_non_interactive_missing_required_flag_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            args = [sys.executable, str(INIT_PY), str(target),
+                    "--org-name", "Sample Org",
+                    "--content-language", "English",
+                    "--repo-name", "sample-wiki",
+                    "--non-interactive"]
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL)
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("--wiki-title", result.stderr)
+            self.assertFalse(target.exists())
+
+
+class AnswersFileSuppliesAllValues(unittest.TestCase):
+    def test_answers_file_supplies_all_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            answers_path = Path(tmp) / "answers.json"
+            answers_path.write_text(json.dumps({
+                "wiki_title": "Answers Wiki",
+                "org_name": "Answers Org",
+                "content_language": "English",
+                "repo_name": "answers-wiki",
+            }), encoding="utf-8")
+
+            args = [sys.executable, str(INIT_PY), str(target),
+                    "--answers-file", str(answers_path), "--non-interactive"]
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(
+                (target / ".wiki-harness-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["vars"]["wiki_title"], "Answers Wiki")
+            self.assertEqual(manifest["vars"]["org_name"], "Answers Org")
+            self.assertEqual(manifest["vars"]["content_language"], "English")
+            self.assertEqual(manifest["vars"]["repo_name"], "answers-wiki")
+
+
+class AnswersFileMalformedJsonExits2(unittest.TestCase):
+    """A --answers-file that is not valid JSON must be routed through the
+    same graceful exit-2 refusal as every other invalid-input path in
+    init.py (resolve_target_refusal(), missing_vars_message()) -- never an
+    unhandled json.JSONDecodeError traceback, and nothing gets written."""
+
+    def test_answers_file_malformed_json_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            answers_path = Path(tmp) / "answers.json"
+            answers_path.write_text("{not valid json", encoding="utf-8")
+
+            args = [sys.executable, str(INIT_PY), str(target),
+                    "--answers-file", str(answers_path), "--non-interactive"]
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn(str(answers_path), result.stderr)
+            self.assertFalse(target.exists())
+
+
+class AnswersFileMissingPathExits2(unittest.TestCase):
+    """A --answers-file path that does not exist on disk must be routed
+    through the same graceful exit-2 refusal -- never an unhandled
+    FileNotFoundError traceback, and nothing gets written."""
+
+    def test_answers_file_missing_path_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            answers_path = Path(tmp) / "does-not-exist.json"
+
+            args = [sys.executable, str(INIT_PY), str(target),
+                    "--answers-file", str(answers_path), "--non-interactive"]
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn(str(answers_path), result.stderr)
+            self.assertFalse(target.exists())
+
+
+class AnswersFileNonObjectTopLevelExits2(unittest.TestCase):
+    """A --answers-file whose JSON top level parses fine but is not an
+    object (a JSON array, in this case) must be routed through the same
+    graceful exit-2 refusal -- never an unhandled AttributeError traceback
+    from merge_answers() calling .get() on a list, and nothing gets
+    written."""
+
+    def test_answers_file_non_object_top_level_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            answers_path = Path(tmp) / "answers.json"
+            answers_path.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
+
+            args = [sys.executable, str(INIT_PY), str(target),
+                    "--answers-file", str(answers_path), "--non-interactive"]
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(target.exists())
+
+
+class AnswersFileNonStringRequiredValueExits2(unittest.TestCase):
+    """A --answers-file value for a required variable that parses as valid
+    JSON but is not a JSON string (a JSON number, here) must be refused,
+    not silently accepted and persisted as a non-string type -- the CLI
+    flag path is argparse-guaranteed to always supply a str for the same
+    variable, so the file path must guarantee the same shape."""
+
+    def test_answers_file_non_string_required_value_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            answers_path = Path(tmp) / "answers.json"
+            answers_path.write_text(json.dumps({
+                "wiki_title": 12345,
+                "org_name": "Sample Org",
+                "content_language": "English",
+                "repo_name": "sample-wiki",
+            }), encoding="utf-8")
+
+            args = [sys.executable, str(INIT_PY), str(target),
+                    "--answers-file", str(answers_path), "--non-interactive"]
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn("wiki_title", result.stderr)
+            self.assertFalse(target.exists())
+
+
+class AnswersFileNonStringOriginsExits2(unittest.TestCase):
+    """A --answers-file 'origins' value that parses as valid JSON but is
+    not a string (a JSON array, the natural way to express a list of
+    origins in a JSON file) must be refused through the same graceful
+    exit-2 refusal as every other malformed --answers-file shape -- never
+    an unhandled AttributeError traceback from parse_origins() calling
+    .split() on a non-string, and nothing gets written."""
+
+    def test_answers_file_non_string_origins_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            answers_path = Path(tmp) / "answers.json"
+            answers_path.write_text(json.dumps({
+                "wiki_title": "Sample Wiki",
+                "org_name": "Sample Org",
+                "content_language": "English",
+                "repo_name": "sample-wiki",
+                "origins": ["session", "jira"],
+            }), encoding="utf-8")
+
+            args = [sys.executable, str(INIT_PY), str(target),
+                    "--answers-file", str(answers_path), "--non-interactive"]
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn("origins", result.stderr)
+            self.assertFalse(target.exists())
+
+
+# Regression guard (Skinner finding, init.py:264-267 read_answers_file):
+# read_answers_file() caught only `except OSError` around
+# Path(path).read_text(encoding="utf-8"), but that call can also raise
+# UnicodeDecodeError -- a ValueError subclass, not an OSError subclass --
+# so a --answers-file containing bytes that are not valid UTF-8 was NOT
+# converted into the documented AnswersFileError/exit-2 refusal; it
+# crashed with an unhandled traceback and exit code 1.
+class AnswersFileNonUtf8FailsClosed(unittest.TestCase):
+    """A --answers-file whose bytes are not valid UTF-8 at all (as opposed
+    to AnswersFileMalformedJsonExits2's syntactically invalid-but-UTF-8
+    case) raises UnicodeDecodeError, not json.JSONDecodeError or OSError,
+    and must be routed through the same graceful exit-2 refusal -- never
+    an unhandled traceback -- and nothing gets written."""
+
+    def test_answers_file_non_utf8_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            answers_path = Path(tmp) / "answers.json"
+            answers_path.write_bytes(b"\xff\xfe\x80\x81 not valid utf-8 at all")
+
+            args = [sys.executable, str(INIT_PY), str(target),
+                    "--answers-file", str(answers_path), "--non-interactive"]
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn(str(answers_path), result.stderr)
+            self.assertFalse(target.exists())
+
+
+def _seeded_schema(target):
+    """init.py seeds exactly one JSON file into <target>/sources/cards/ --
+    located by glob (never a hardcoded filename literal) so this suite
+    never has to name the schema's on-disk filename, matching the rest of
+    this file's fixture-only sourcing discipline (test_genericity.py's
+    SyntheticFixtureNotOgpCorpus)."""
+    [schema_path] = list((target / "sources/cards").glob("*.json"))
+    return json.loads(schema_path.read_text(encoding="utf-8"))
+
+
+class OriginsFlagSeedsSchemaEnum(unittest.TestCase):
+    def test_origins_flag_seeds_schema_enum(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            result = _run_init(target, extra_args=("--origins", "session,jira,slack"))
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            schema = _seeded_schema(target)
+            self.assertEqual(schema["keys"]["origin"]["enum"], ["session", "jira", "slack"])
+
+
+class OriginsDefaultIsSessionOnly(unittest.TestCase):
+    def test_origins_default_is_session_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            result = _run_init(target)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            schema = _seeded_schema(target)
+            self.assertEqual(schema["keys"]["origin"]["enum"], ["session"])
+
+
 if __name__ == "__main__":
     unittest.main()

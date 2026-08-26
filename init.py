@@ -11,13 +11,13 @@ and its three nested stubs are seeded as ordinary MANAGED, TRACKED files
 path.
 
 Pure core: resolve_target_refusal(), missing_required_vars(),
-parse_origins(), apply_origins(), build_role_map(), commit_subject(),
-render(), summary_text() -- plain data in, plain data/decision out, no
-filesystem/subprocess/clock access. Impure edges: every function below the
-"impure edges" marker (filesystem writes, git/subprocess calls, the clock,
-interactive prompts). main() is the orchestrator that calls the pure
-decisions and the impure edges in the 16-step order plan-v3 section 3.1
-specifies.
+parse_origins(), parse_answers_file(), merge_answers(), apply_origins(),
+build_role_map(), commit_subject(), render(), summary_text() -- plain data
+in, plain data/decision out, no filesystem/subprocess/clock access. Impure
+edges: every function below the "impure edges" marker (filesystem writes,
+git/subprocess calls, the clock, interactive prompts, --answers-file
+reads). main() is the orchestrator that calls the pure decisions and the
+impure edges in the 16-step order plan-v3 section 3.1 specifies.
 
 Python 3 stdlib only.
 """
@@ -133,6 +133,58 @@ def parse_origins(raw):
     return items or ["session"]
 
 
+class AnswersFileError(Exception):
+    """Raised when --answers-file's content cannot be parsed into the shape
+    collect_vars() expects (invalid JSON, a non-object top level, or a
+    required variable whose value is not a JSON string) -- caught by
+    main() and converted into the same clean exit-2 stderr refusal every
+    other invalid-input path in this module uses (resolve_target_refusal(),
+    missing_vars_message()), never an unhandled traceback."""
+
+
+def parse_answers_file(text):
+    """Pure. Parses --answers-file's JSON text (the 4 required variables
+    plus an optional 'origins' comma-separated string, same shape as the
+    individual flags) into a dict; no filesystem access of its own --
+    read_answers_file() below is the impure edge that supplies `text`.
+    Raises AnswersFileError -- deterministically, never an unhandled
+    json.JSONDecodeError/AttributeError -- for malformed JSON, a non-object
+    top level, or a required variable whose value is not a JSON string
+    (the individual --flags are argparse-guaranteed to always be a str;
+    the file path must guarantee the same shape)."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise AnswersFileError(f"is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise AnswersFileError(
+            "must be a JSON object mapping variable names to string "
+            f"values, not {type(data).__name__}")
+    for key in REQUIRED_VARS:
+        if key in data and not isinstance(data[key], str):
+            raise AnswersFileError(
+                f"value for {key!r} must be a JSON string, got "
+                f"{type(data[key]).__name__}")
+    if "origins" in data and not isinstance(data["origins"], str):
+        raise AnswersFileError(
+            "value for 'origins' must be a JSON string, got "
+            f"{type(data['origins']).__name__}")
+    return data
+
+
+def merge_answers(cli_values, cli_origins, file_values):
+    """Pure. Step 2: merges --answers-file's values under individually-
+    passed flags -- an explicit flag always wins over the file, and the
+    file only fills gaps flags left empty. Returns (values, origins_raw),
+    the latter still unparsed and ready for parse_origins()."""
+    values = dict(cli_values)
+    for key in REQUIRED_VARS:
+        if not values.get(key) and file_values.get(key):
+            values[key] = file_values[key]
+    origins_raw = cli_origins if cli_origins else file_values.get("origins")
+    return values, origins_raw
+
+
 def apply_origins(schema, origins):
     """Pure. Step 8: returns a copy of the parsed card-schema.default.json
     dict with 'origin's enum widened to `origins`."""
@@ -202,6 +254,27 @@ def _copy_verbatim(src, dst):
     dst.write_bytes(src.read_bytes())
 
 
+def read_answers_file(path):
+    """Impure edge: reads and JSON-decodes an --answers-file path.
+    parse_answers_file() above does the actual (pure) parsing/validation;
+    this edge folds the filesystem-level failure (missing file, permission
+    denied, bytes that are not valid UTF-8 at all, ...) into the same
+    AnswersFileError channel and prefixes every message with `path` so the
+    caller always knows which file was at fault -- never an unhandled
+    OSError or UnicodeDecodeError traceback. UnicodeDecodeError is a
+    ValueError subclass, not an OSError subclass, so it must be caught
+    alongside OSError explicitly; it is not folded into that clause for
+    free."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AnswersFileError(f"--answers-file {path} could not be read: {exc}") from exc
+    try:
+        return parse_answers_file(text)
+    except AnswersFileError as exc:
+        raise AnswersFileError(f"--answers-file {path} {exc}") from exc
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(prog="init.py")
     parser.add_argument("target")
@@ -209,27 +282,36 @@ def parse_args(argv):
     parser.add_argument("--org-name", dest="org_name")
     parser.add_argument("--content-language", dest="content_language")
     parser.add_argument("--repo-name", dest="repo_name")
-    parser.add_argument("--origins", default="session")
+    parser.add_argument("--origins", default=None)
+    parser.add_argument("--answers-file", dest="answers_file", default=None)
     parser.add_argument("--non-interactive", action="store_true")
     parser.add_argument("--force", action="store_true")
     return parser.parse_args(argv)
 
 
-def collect_vars(args, prompt=input):
+def collect_vars(args, prompt=input, read_answers=read_answers_file):
     """Step 2's collection edge. `prompt` is an injected seam (default
     builtins.input) so the interactive path never has to be exercised to
-    test the rest of this function's behaviour."""
-    values = {
+    test the rest of this function's behaviour. `read_answers` is the
+    matching seam for --answers-file (default read_answers_file) so the
+    merge logic can be tested without a real file on disk. Precedence:
+    an individually-passed flag always wins over the --answers-file value
+    for the same key; the file only fills gaps flags left empty. Returns
+    (values, origins_raw) -- the merged 4 required values and the
+    still-unparsed origins string, ready for parse_origins()."""
+    cli_values = {
         "wiki_title": args.wiki_title,
         "org_name": args.org_name,
         "content_language": args.content_language,
         "repo_name": args.repo_name,
     }
+    file_values = read_answers(args.answers_file) if args.answers_file else {}
+    values, origins_raw = merge_answers(cli_values, args.origins, file_values)
     if not args.non_interactive:
         for key in REQUIRED_VARS:
             while not values[key]:
                 values[key] = prompt(f"{PROMPT_LABELS[key]}: ").strip()
-    return values
+    return values, origins_raw
 
 
 def git_init(target):
@@ -431,12 +513,16 @@ def main(argv):
         print(refusal, file=sys.stderr)
         return 2
 
-    values = collect_vars(args)
+    try:
+        values, origins_raw = collect_vars(args)
+    except AnswersFileError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     missing = missing_required_vars(values)
     if missing:
         print(missing_vars_message(missing), file=sys.stderr)
         return 2
-    origins = parse_origins(args.origins)
+    origins = parse_origins(origins_raw)
 
     target.mkdir(parents=True, exist_ok=True)
 
