@@ -105,6 +105,43 @@ class InitRefusesNonemptyWithoutForce(unittest.TestCase):
             self.assertEqual(list(target.iterdir()), [target / "keep.txt"])
 
 
+class InitRefusesWhenTargetIsAFile(unittest.TestCase):
+    """A target path that already exists as a plain file (not a directory)
+    can never be scaffolded into -- there is no directory to write into,
+    and --force cannot change that. init.py must route this through
+    resolve_target_refusal()'s graceful exit-2 refusal, never crash with an
+    unhandled NotADirectoryError/FileExistsError traceback, for either
+    invocation."""
+
+    def _assert_graceful_refusal(self, result, target, original_bytes):
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("not empty", result.stderr)
+        self.assertIn("--force", result.stderr)
+        self.assertTrue(target.is_file())
+        self.assertEqual(target.read_bytes(), original_bytes)
+
+    def test_init_refuses_when_target_is_a_file_without_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            target.write_text("pre-existing file", encoding="utf-8")
+            original = target.read_bytes()
+
+            result = _run_init(target)
+
+            self._assert_graceful_refusal(result, target, original)
+
+    def test_init_refuses_when_target_is_a_file_with_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            target.write_text("pre-existing file", encoding="utf-8")
+            original = target.read_bytes()
+
+            result = _run_init(target, extra_args=("--force",))
+
+            self._assert_graceful_refusal(result, target, original)
+
+
 class InitFirstCommitGoesThroughRealHooks(unittest.TestCase):
     """Subprocess-level proof that .githooks/* are real, live hooks on the
     freshly-scaffolded repo, not merely files copied to disk: a second,

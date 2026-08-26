@@ -97,10 +97,17 @@ COMMIT_VERIFY_FAILURE_MESSAGE = ("scaffold commit did not land as expected "
 
 # ---- pure core ----
 
-def resolve_target_refusal(target, exists, is_empty, force):
-    """Pure. Step 1: the target directory is non-empty and --force was not
-    passed -> the exact refusal message; otherwise None. Nothing is ever
-    written when this returns non-None."""
+def resolve_target_refusal(target, exists, is_empty, force, is_dir=True):
+    """Pure. Step 1: the exact refusal message, or None when nothing
+    refuses. Two independent conditions refuse: (a) the target exists and
+    occupies the path as something other than a directory (a plain file,
+    for instance) -- there is no directory to scaffold into, and --force
+    cannot change that, since forcing means "write into the non-empty
+    directory anyway", not "delete what's there"; (b) the target is an
+    existing, non-empty directory and --force was not passed. Nothing is
+    ever written when this returns non-None."""
+    if exists and not is_dir:
+        return REFUSAL_MESSAGE.format(path=target)
     if exists and not is_empty and not force:
         return REFUSAL_MESSAGE.format(path=target)
     return None
@@ -416,8 +423,10 @@ def main(argv):
     library_root = Path(__file__).resolve().parent
 
     exists = target.exists()
-    is_empty = not exists or not any(target.iterdir())
-    refusal = resolve_target_refusal(target, exists, is_empty, args.force)
+    target_is_dir = target.is_dir() if exists else True
+    is_empty = not exists or (target_is_dir and not any(target.iterdir()))
+    refusal = resolve_target_refusal(target, exists, is_empty, args.force,
+                                     target_is_dir)
     if refusal:
         print(refusal, file=sys.stderr)
         return 2
