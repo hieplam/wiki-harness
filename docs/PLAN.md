@@ -31,7 +31,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 - [x] T12b — lint.py: links inside code (fenced blocks, inline spans) are not links (A10)
 - [x] T13 — Write init.py full flow (no --ci; CLAUDE.md tracked MANAGED)
 - [x] T14 — init.py --non-interactive/--answers-file/--origins flags
-- [ ] T15 — upgrade --check standalone mode
+- [x] T15 — upgrade --check standalone mode
 
 ## P3 — upgrade
 
