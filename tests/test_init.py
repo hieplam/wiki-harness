@@ -460,6 +460,37 @@ class AnswersFileNonStringOriginsExits2(unittest.TestCase):
             self.assertFalse(target.exists())
 
 
+# Regression guard (Skinner finding, init.py:264-267 read_answers_file):
+# read_answers_file() caught only `except OSError` around
+# Path(path).read_text(encoding="utf-8"), but that call can also raise
+# UnicodeDecodeError -- a ValueError subclass, not an OSError subclass --
+# so a --answers-file containing bytes that are not valid UTF-8 was NOT
+# converted into the documented AnswersFileError/exit-2 refusal; it
+# crashed with an unhandled traceback and exit code 1.
+class AnswersFileNonUtf8FailsClosed(unittest.TestCase):
+    """A --answers-file whose bytes are not valid UTF-8 at all (as opposed
+    to AnswersFileMalformedJsonExits2's syntactically invalid-but-UTF-8
+    case) raises UnicodeDecodeError, not json.JSONDecodeError or OSError,
+    and must be routed through the same graceful exit-2 refusal -- never
+    an unhandled traceback -- and nothing gets written."""
+
+    def test_answers_file_non_utf8_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            answers_path = Path(tmp) / "answers.json"
+            answers_path.write_bytes(b"\xff\xfe\x80\x81 not valid utf-8 at all")
+
+            args = [sys.executable, str(INIT_PY), str(target),
+                    "--answers-file", str(answers_path), "--non-interactive"]
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn(str(answers_path), result.stderr)
+            self.assertFalse(target.exists())
+
+
 def _seeded_schema(target):
     """init.py seeds exactly one JSON file into <target>/sources/cards/ --
     located by glob (never a hardcoded filename literal) so this suite

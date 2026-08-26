@@ -258,12 +258,16 @@ def read_answers_file(path):
     """Impure edge: reads and JSON-decodes an --answers-file path.
     parse_answers_file() above does the actual (pure) parsing/validation;
     this edge folds the filesystem-level failure (missing file, permission
-    denied, ...) into the same AnswersFileError channel and prefixes every
-    message with `path` so the caller always knows which file was at
-    fault -- never an unhandled OSError traceback."""
+    denied, bytes that are not valid UTF-8 at all, ...) into the same
+    AnswersFileError channel and prefixes every message with `path` so the
+    caller always knows which file was at fault -- never an unhandled
+    OSError or UnicodeDecodeError traceback. UnicodeDecodeError is a
+    ValueError subclass, not an OSError subclass, so it must be caught
+    alongside OSError explicitly; it is not folded into that clause for
+    free."""
     try:
         text = Path(path).read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise AnswersFileError(f"--answers-file {path} could not be read: {exc}") from exc
     try:
         return parse_answers_file(text)
