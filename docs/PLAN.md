@@ -24,7 +24,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 
 ## P2 — Templates / init
 
-- [ ] T09 — manifest.py: pure compute_manifest/diff_manifest + source_url + reserved removed role
+- [x] T09 — manifest.py: pure compute_manifest/diff_manifest + source_url + reserved removed role
 - [ ] T10 — Split sources/cards/AGENTS.md into managed mechanism + templates/recipes.md
 - [ ] T11 — Add HARNESS finding to lint.py as an eighth impure edge (no marker branch)
 - [ ] T12 — Author remaining templates (AGENTS.root, README, CLAUDE.root/nested MANAGED, gitignore, etc.)
