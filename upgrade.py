@@ -25,10 +25,16 @@ into the scratch copy (Warchief amendment: step 9 addendum), lint the
 scratch copy (step 10), promote-copy back to the real target with a bare
 loop, excluding the manifest (step 11 -- T21 later wraps this exact loop in
 try/except -> git checkout -- .), and write the new manifest to the real
-target last (step 12). No guards yet: the downgrade guard (T17), the
---adopt-drift role-flip mechanism (T18), and the MAJOR-removal guard (T19)
-all land on top of this pipeline in later tasks; see plan-v3.md's task
-table.
+target last (step 12).
+
+T17 adds the downgrade guard on top of that pipeline: step 2's
+is_downgrade()/format_downgrade_refusal()/format_downgrade_banner() compare
+--to's target version to the manifest's installed harness_version using
+this module's own semver ordering, before any fetch or write -- older
+without --allow-downgrade exits 2; older with the flag prints a loud
+backward-move banner and proceeds. The --adopt-drift role-flip mechanism
+(T18) and the MAJOR-removal guard (T19) still land on top of this pipeline
+in later tasks; see plan-v3.md's task table.
 
 Pure: is_clean_tree(), managed_template_files(), blocking_drifts(), and
 format_drift_abort() take already-fetched data in and return a
@@ -261,6 +267,43 @@ def parse_to_version(to_arg):
         return None
     harness_version = "{}.{}.{}".format(*parsed)
     return harness_version, f"v{harness_version}"
+
+
+def is_downgrade(to_version, installed_version):
+    """Pure. Both args are bare 'X.Y.Z' strings (--to's parsed target, the
+    manifest's recorded harness_version). Reuses parse_semver()/
+    compare_semver() -- no duplicated ordering logic. Returns True iff
+    `to_version` parses as strictly older than `installed_version`; if
+    either fails to parse, no ordering is assertable, so this returns
+    False rather than guessing."""
+    to_parsed = parse_semver(to_version)
+    installed_parsed = parse_semver(installed_version)
+    if to_parsed is None or installed_parsed is None:
+        return False
+    return compare_semver(to_parsed, installed_parsed) < 0
+
+
+def format_downgrade_refusal(to_version, installed_version):
+    """Pure. The exact refusal message T17's brief quotes byte-for-byte;
+    reproduce it verbatim. Both args are bare 'X.Y.Z' strings -- the 'v'
+    prefix is added here."""
+    return (
+        f"`--to v{to_version}` is older than the installed v{installed_version}; "
+        "downgrade is not supported -- pass `--allow-downgrade` if you "
+        "specifically intend this.")
+
+
+def format_downgrade_banner(to_version, installed_version):
+    """Pure. The loud, multi-line banner printed when --allow-downgrade
+    lets a downgrade proceed -- warns unambiguously that content is moving
+    backward before the write pipeline runs."""
+    return (
+        "============================================================\n"
+        f"DOWNGRADE: content is moving BACKWARD from v{installed_version} "
+        f"to v{to_version}.\n"
+        "Managed and template files will be overwritten with the OLDER\n"
+        "release's content. Proceeding because --allow-downgrade was passed.\n"
+        "============================================================")
 
 
 def merge_manifest_files(role_map, actual_hashes, old_files):
@@ -513,24 +556,26 @@ def promote_scratch(scratch, target):
             dst.write_bytes(src.read_bytes())
 
 
-def run_upgrade(target, adopt, adopt_drift_paths, to, library_path):
+def run_upgrade(target, adopt, adopt_drift_paths, to, library_path, allow_downgrade):
     """Impure edge: the orchestrator for every ordered step 3.2 gate this
     task implements. Wires git_status_porcelain() -> is_clean_tree()
     (precondition 1, exit 2) -> read_manifest_for_upgrade() (precondition
     2, exit 1 unless --adopt suppresses it) -> hash_tree()/diff_manifest()
-    -> blocking_drifts()/format_drift_abort() (step 1, exit 1) -> the core
-    apply pipeline (T16B): resolve_library_checkout() (step 6) ->
-    copy_target_to_scratch() (step 8) -> overwrite_scratch() (step 9) ->
-    compute_manifest()/write_manifest() into the scratch (the Warchief
-    amendment's step-9 addendum) -> run_scratch_lint() (step 10, exit 1 on
-    failure, real target untouched) -> promote_scratch() (step 11, bare
-    loop, no rollback yet) -> write_manifest() to the real target LAST
-    (step 12).
+    -> blocking_drifts()/format_drift_abort() (step 1, exit 1) ->
+    is_downgrade() (step 2, T17: exit 2 unless --allow-downgrade suppresses
+    it, else a loud banner) -> the core apply pipeline (T16B):
+    resolve_library_checkout() (step 6) -> copy_target_to_scratch() (step
+    8) -> overwrite_scratch() (step 9) -> compute_manifest()/
+    write_manifest() into the scratch (the Warchief amendment's step-9
+    addendum) -> run_scratch_lint() (step 10, exit 1 on failure, real
+    target untouched) -> promote_scratch() (step 11, bare loop, no
+    rollback yet) -> write_manifest() to the real target LAST (step 12).
 
     `to` is --to's raw value ('vX.Y.Z'); `library_path` is --library-path
-    or None. No downgrade/adopt-drift-role-flip/MAJOR-removal guard and no
-    dry-run/--apply branch here -- those are later tasks' jobs (T17-T20);
-    every caller of this function today always means "write".
+    or None; `allow_downgrade` is --allow-downgrade's flag value. No
+    adopt-drift-role-flip/MAJOR-removal guard and no dry-run/--apply branch
+    here -- those are later tasks' jobs (T18-T20); every caller of this
+    function today always means "write".
 
     When --adopt is passed and the manifest precondition would otherwise
     fail (missing/unparseable/non-object/non-UTF-8), the adoption
@@ -563,6 +608,14 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path):
         return 1
 
     new_harness_version, new_source_ref = parse_to_version(to)
+
+    if is_downgrade(new_harness_version, harness_version):
+        if not allow_downgrade:
+            print(format_downgrade_refusal(new_harness_version, harness_version),
+                  file=sys.stderr)
+            return 2
+        print(format_downgrade_banner(new_harness_version, harness_version),
+              file=sys.stderr)
 
     library_root = resolve_library_checkout(new_harness_version, library_path)
     init_mod = load_init_module(library_root)
@@ -600,6 +653,7 @@ def parse_args(argv):
     parser.add_argument("--adopt", action="store_true")
     parser.add_argument("--adopt-drift", action="append", default=[])
     parser.add_argument("--library-path")
+    parser.add_argument("--allow-downgrade", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -610,7 +664,7 @@ def main(argv):
         # branch, before any of the ordered steps in plan-v3 section 3.2.
         return run_check(Path(args.target))
     return run_upgrade(Path(args.target), args.adopt, args.adopt_drift,
-                       args.to, args.library_path)
+                       args.to, args.library_path, args.allow_downgrade)
 
 
 if __name__ == "__main__":
