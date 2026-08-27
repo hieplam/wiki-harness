@@ -32,9 +32,25 @@ is_downgrade()/format_downgrade_refusal()/format_downgrade_banner() compare
 --to's target version to the manifest's installed harness_version using
 this module's own semver ordering, before any fetch or write -- older
 without --allow-downgrade exits 2; older with the flag prints a loud
-backward-move banner and proceeds. The --adopt-drift role-flip mechanism
-(T18) and the MAJOR-removal guard (T19) still land on top of this pipeline
-in later tasks; see plan-v3.md's task table.
+backward-move banner and proceeds.
+
+T18 adds the --adopt-drift role-flip on top of that pipeline: for every
+path named by --adopt-drift, PLUS every path the OLD manifest already
+recorded as instance-fork, reconcile_forks() (a thin impure edge, step 9's
+sibling) restores the real target's on-disk bytes back over the scratch
+copy's freshly library-overwritten content when the path is present
+(preserving the local edit exactly, called BEFORE step 10's lint so a
+badly-drifted edit is still caught), or deletes it from the scratch when
+the path is absent from the target (called AFTER step 10's lint, right
+before promote, so promote_scratch() never recreates it -- fork-and-never-
+recreate -- without spuriously failing lint over an unrelated, still-
+managed page that structurally links to it, e.g. the library's own root
+AGENTS.md template's link to ./wiki/AGENTS.md). merge_manifest_files()
+flips that path's manifest role to instance-fork PERMANENTLY, keeping the
+OLD manifest's recorded (pre-fork) sha256 rather than the fresh actual
+hash -- so lint.py's check_harness() instance-fork WARN keeps firing on
+every future run, not once. The MAJOR-removal guard (T19) still lands on
+top of this pipeline in a later task; see plan-v3.md's task table.
 
 Pure: is_clean_tree(), managed_template_files(), blocking_drifts(), and
 format_drift_abort() take already-fetched data in and return a
@@ -214,10 +230,10 @@ def blocking_drifts(drifts, adopt_drift_paths):
     """Pure. `drifts` is diff_manifest()'s list[Drift]; `adopt_drift_paths`
     is the set of paths named by --adopt-drift on this invocation. Returns
     the drifts that must abort this upgrade: any status other than "match"
-    whose path was NOT named by --adopt-drift this run. (--adopt-drift
-    itself does not yet flip the path's manifest role to instance-fork --
-    that mechanism is T18; here it only suppresses the abort for this
-    run.)"""
+    whose path was NOT named by --adopt-drift this run. (This function only
+    suppresses the abort for this run -- the actual role-flip to
+    instance-fork happens later in the pipeline, via reconcile_forks()/
+    merge_manifest_files() (T18).)"""
     adopt = set(adopt_drift_paths)
     return [d for d in drifts if d.status != "match" and d.path not in adopt]
 
@@ -306,21 +322,40 @@ def format_downgrade_banner(to_version, installed_version):
         "============================================================")
 
 
-def merge_manifest_files(role_map, actual_hashes, old_files):
+def merge_manifest_files(role_map, actual_hashes, old_files, adopt_drift_paths):
     """Pure. Step 12's manifest "files" input: every managed/template path
     step 9 just overwrote, hashed fresh in the scratch copy (`role_map` is
     the resolved library checkout's own build_role_map() output;
     `actual_hashes` is hash_tree()'s {path: sha256} over those same paths,
     mirroring init.py's own build_role_map()+hash_tree() pairing) -- plus
     every OLD instance-fork path carried over UNCHANGED, keeping its role
-    and its recorded PRE-upgrade hash (no instance-fork paths exist yet at
-    this point in the build -- T18 adds that role -- this still preserves
-    the general shape for when it does, per the Warchief amendment's
-    step-9 addendum)."""
+    and its recorded PRE-upgrade hash, PLUS every path named this run by
+    --adopt-drift (`adopt_drift_paths`) newly flipped to instance-fork the
+    same way: role instance-fork, keeping the OLD manifest's recorded
+    (pre-fork) sha256 rather than the fresh actual hash (T18) -- never the
+    current on-disk hash, so lint.py's check_harness() instance-fork
+    branch (which WARNs only on hash_mismatch) keeps disagreeing with the
+    real bytes on every future run, not just this one, per plan-v3 step
+    3's 'every run, not once'.
+
+    The base dict below is guarded with `if path in actual_hashes` purely
+    defensively, so a `role_map` path that is (for any reason) absent from
+    the freshly-hashed scratch copy is skipped here rather than raising
+    KeyError -- this does NOT rely on run_upgrade()'s missing-fork
+    reconcile_forks() call having run yet: that deletion is deliberately
+    deferred until AFTER step 10's scratch-lint (see reconcile_forks()'s
+    own docstring for why), which is AFTER this function's caller computes
+    `actual_hashes`, so every role_map path -- including a forked-and-
+    absent one -- is still present with fresh library bytes in
+    `actual_hashes` by the time this function actually runs today; the
+    forked-and-absent entry below is still correctly overwritten to
+    instance-fork with the OLD recorded hash by the loop that follows,
+    regardless."""
+    adopt = set(adopt_drift_paths)
     files = {path: {"role": role, "sha256": actual_hashes[path]}
-             for path, role in role_map.items()}
+             for path, role in role_map.items() if path in actual_hashes}
     for path, entry in old_files.items():
-        if entry.get("role") == "instance-fork":
+        if entry.get("role") == "instance-fork" or path in adopt:
             files[path] = {"role": "instance-fork", "sha256": entry["sha256"]}
     return files
 
@@ -521,6 +556,51 @@ def overwrite_scratch(init_mod, library_root, scratch, values):
     return scripts_paths, hooks_paths
 
 
+def reconcile_forks(scratch, target, fork_paths):
+    """Impure edge (T18). `fork_paths` is a subset of the union of
+    --adopt-drift's paths this run and every path the OLD manifest already
+    recorded as instance-fork -- overwrite_scratch() just rewrote every one
+    of them in the scratch copy with the NEW library content, exactly like
+    every other managed/template path, which is wrong for a forked path.
+    For each path in `fork_paths` that exists in the real `target`, its
+    local (forked) bytes are copied back over the scratch copy, so the
+    fork survives untouched and promote_scratch()'s byte-diff copy is a
+    no-op for it; for each path ABSENT from the real `target`, it is
+    deleted from the scratch copy too, so promote_scratch() -- which only
+    ever copies files THAT EXIST in the scratch tree -- can never recreate
+    it (fork-and-never-recreate). A thin I/O-only edge, no decisions beyond
+    "does this path exist on disk": the actual role-flip decision (which
+    paths count as forked, what to record) lives in the pure
+    merge_manifest_files().
+
+    Called TWICE by run_upgrade(), with two disjoint subsets of the full
+    fork-path set, deliberately straddling step 10's scratch-lint gate
+    rather than both running together before it (as a first cut of this
+    function did): restoring a PRESENT fork's local bytes must happen
+    BEFORE lint, so a badly-drifted local edit (e.g. one that introduces
+    its own broken link) is still caught by step 10 exactly like any other
+    scratch content, before it can ever reach the real target -- but
+    deleting an ABSENT fork's path from the scratch must happen AFTER
+    lint, immediately before promote_scratch(). Deleting it earlier would
+    make step 10 lint a scratch tree that is missing a page OTHER,
+    unrelated, still-managed content structurally references (e.g. the
+    library's own root AGENTS.md template unconditionally links to
+    ./wiki/AGENTS.md) -- failing the entire upgrade over a link that was
+    never new information this run introduced; the path's absence is
+    already an established fact about the real target from before this
+    run even started, not a new risk step 10 needs to re-validate."""
+    scratch = Path(scratch)
+    target = Path(target)
+    for path in sorted(fork_paths):
+        target_file = target / path
+        scratch_file = scratch / path
+        if target_file.is_file():
+            scratch_file.parent.mkdir(parents=True, exist_ok=True)
+            scratch_file.write_bytes(target_file.read_bytes())
+        elif scratch_file.is_file():
+            scratch_file.unlink()
+
+
 def run_scratch_lint(scratch):
     """Impure edge (step 10). Runs `python3 <scratch>/scripts/lint.py
     --root <scratch>` and returns (ok, output) -- output is stdout+stderr
@@ -565,17 +645,24 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path, allow_downgr
     is_downgrade() (step 2, T17: exit 2 unless --allow-downgrade suppresses
     it, else a loud banner) -> the core apply pipeline (T16B):
     resolve_library_checkout() (step 6) -> copy_target_to_scratch() (step
-    8) -> overwrite_scratch() (step 9) -> compute_manifest()/
-    write_manifest() into the scratch (the Warchief amendment's step-9
-    addendum) -> run_scratch_lint() (step 10, exit 1 on failure, real
-    target untouched) -> promote_scratch() (step 11, bare loop, no
-    rollback yet) -> write_manifest() to the real target LAST (step 12).
+    8) -> overwrite_scratch() (step 9) -> reconcile_forks() called on the
+    PRESENT-fork subset (T18: restores each one's real local bytes into the
+    scratch copy before anything downstream hashes/lints it) ->
+    compute_manifest()/write_manifest() into the scratch, merge_manifest_
+    files() now also flipping every adopted path to instance-fork (the
+    Warchief amendment's step-9 addendum, extended by T18) ->
+    run_scratch_lint() (step 10, exit 1 on failure, real target untouched)
+    -> reconcile_forks() called AGAIN on the MISSING-fork subset (T18:
+    deletes each one from the scratch copy only now, after lint has
+    already passed, so promote_scratch() never recreates it) ->
+    promote_scratch() (step 11, bare loop, no rollback yet) ->
+    write_manifest() to the real target LAST (step 12).
 
     `to` is --to's raw value ('vX.Y.Z'); `library_path` is --library-path
     or None; `allow_downgrade` is --allow-downgrade's flag value. No
-    adopt-drift-role-flip/MAJOR-removal guard and no dry-run/--apply branch
-    here -- those are later tasks' jobs (T18-T20); every caller of this
-    function today always means "write".
+    MAJOR-removal guard and no dry-run/--apply branch here -- those are
+    later tasks' jobs (T19-T20); every caller of this function today always
+    means "write".
 
     When --adopt is passed and the manifest precondition would otherwise
     fail (missing/unparseable/non-object/non-UTF-8), the adoption
@@ -624,10 +711,18 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path, allow_downgr
     values = manifest.get("vars", {})
     scripts_paths, hooks_paths = overwrite_scratch(
         init_mod, library_root, scratch, values)
+    old_files = manifest.get("files", {})
+    fork_paths = set(adopt_drift_paths) | {
+        path for path, entry in old_files.items()
+        if entry.get("role") == "instance-fork"}
+    present_forks = {p for p in fork_paths if (Path(target) / p).is_file()}
+    missing_forks = fork_paths - present_forks
+    reconcile_forks(scratch, target, present_forks)                   # T18, before lint
     role_map = init_mod.build_role_map(scripts_paths, hooks_paths)
     actual_hashes = hash_tree(scratch, sorted(role_map))
     new_source_commit = init_mod.read_source_commit(library_root)
-    new_files = merge_manifest_files(role_map, actual_hashes, manifest.get("files", {}))
+    new_files = merge_manifest_files(
+        role_map, actual_hashes, old_files, adopt_drift_paths)
     new_manifest = compute_manifest(
         new_files, values, manifest.get("source_url", ""), new_harness_version,
         new_source_ref, new_source_commit,
@@ -639,6 +734,7 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path, allow_downgr
         print(lint_output, file=sys.stderr)
         return 1
 
+    reconcile_forks(scratch, target, missing_forks)                  # T18, after lint
     promote_scratch(scratch, target)                                 # step 11
     write_manifest(Path(target) / MANIFEST_FILENAME, new_manifest)    # step 12
     return 0
