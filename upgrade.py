@@ -13,11 +13,22 @@ This module implements --check (T15) plus step 1 of the ordered upgrade
 flow (T16): the clean-tree precondition, the manifest precondition, and the
 refuse-before-write drift check over every manifest-recorded managed/
 template path (a missing path counts as drift too, with its own distinct
-message). All three gates run before any fetch or write. Everything past
-the gates -- the actual fetch/scratch-copy/write apply pipeline (T16B),
-promote (T21), the downgrade guard (T17), the --adopt-drift role-flip
-mechanism (T18), the MAJOR-removal guard (T19) -- lands in later tasks; see
-plan-v3.md's task table.
+message). All three gates run before any fetch or write.
+
+T16B adds the core --apply write pipeline past those gates: resolve the
+target version (step 6, --library-path or a real fetch/checkout),
+scratch-copy the target tree (step 8), overwrite every managed/template
+path in the scratch copy by reusing the resolved library checkout's own
+init module (step 9 -- the single source of truth for the library->target
+layout mapping, never duplicated here), compute and write the new manifest
+into the scratch copy (Warchief amendment: step 9 addendum), lint the
+scratch copy (step 10), promote-copy back to the real target with a bare
+loop, excluding the manifest (step 11 -- T21 later wraps this exact loop in
+try/except -> git checkout -- .), and write the new manifest to the real
+target last (step 12). No guards yet: the downgrade guard (T17), the
+--adopt-drift role-flip mechanism (T18), and the MAJOR-removal guard (T19)
+all land on top of this pipeline in later tasks; see plan-v3.md's task
+table.
 
 Pure: is_clean_tree(), managed_template_files(), blocking_drifts(), and
 format_drift_abort() take already-fetched data in and return a
@@ -33,15 +44,19 @@ alongside run_check().
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections import namedtuple
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
-from manifest import diff_manifest, hash_tree, read_manifest  # noqa: E402
+from manifest import (  # noqa: E402
+    compute_manifest, diff_manifest, hash_tree, read_manifest, write_manifest)
 
 MANIFEST_FILENAME = ".wiki-harness-manifest.json"
 
@@ -232,6 +247,41 @@ def format_drift_abort(blocking, recorded, actual, harness_version):
     return "\n".join(lines)
 
 
+def parse_to_version(to_arg):
+    """Pure. Step 6/12: parses --to's raw value ('vX.Y.Z' or 'X.Y.Z') into
+    (harness_version, source_ref) -- harness_version is the bare 'X.Y.Z'
+    string the new manifest records, source_ref is always the 'vX.Y.Z' tag
+    form (matching what a real git checkout in init.py's own
+    read_source_ref() would record for a tagged release). Returns None for
+    anything parse_semver() itself would reject; validating/erroring on
+    that here is CLI polish (T24), out of scope for this task -- every
+    fixture in this task's own tests always passes a well-formed --to."""
+    parsed = parse_semver(to_arg)
+    if parsed is None:
+        return None
+    harness_version = "{}.{}.{}".format(*parsed)
+    return harness_version, f"v{harness_version}"
+
+
+def merge_manifest_files(role_map, actual_hashes, old_files):
+    """Pure. Step 12's manifest "files" input: every managed/template path
+    step 9 just overwrote, hashed fresh in the scratch copy (`role_map` is
+    the resolved library checkout's own build_role_map() output;
+    `actual_hashes` is hash_tree()'s {path: sha256} over those same paths,
+    mirroring init.py's own build_role_map()+hash_tree() pairing) -- plus
+    every OLD instance-fork path carried over UNCHANGED, keeping its role
+    and its recorded PRE-upgrade hash (no instance-fork paths exist yet at
+    this point in the build -- T18 adds that role -- this still preserves
+    the general shape for when it does, per the Warchief amendment's
+    step-9 addendum)."""
+    files = {path: {"role": role, "sha256": actual_hashes[path]}
+             for path, role in role_map.items()}
+    for path, entry in old_files.items():
+        if entry.get("role") == "instance-fork":
+            files[path] = {"role": "instance-fork", "sha256": entry["sha256"]}
+    return files
+
+
 # ---- impure edges below this line ----
 
 def classify_manifest(manifest_path):
@@ -360,15 +410,127 @@ def read_manifest_for_upgrade(manifest_path):
     return classification.manifest, None
 
 
-def run_upgrade(target, adopt, adopt_drift_paths):
+def resolve_library_checkout(version, library_path):
+    """Impure edge (step 6). If `library_path` is given, use it directly --
+    the caller supplies a checkout already positioned at the target
+    version; no network is ever touched on this branch. Otherwise, fetch
+    and check out the target tag in this library's own checkout (the
+    directory upgrade.py itself lives in -- exactly like init.py's
+    library_root = Path(__file__).resolve().parent): `git -C <checkout>
+    fetch --tags && git -C <checkout> checkout v<X.Y.Z>` (plan-v3 section
+    3.2 step 6). No test in this task exercises this else-branch -- every
+    fixture drives the pipeline via --library-path against a local fixture
+    library git repo instead."""
+    if library_path is not None:
+        return Path(library_path)
+    checkout = Path(__file__).resolve().parent
+    subprocess.run(["git", "-C", str(checkout), "fetch", "--tags"],
+                   capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(checkout), "checkout", f"v{version}"],
+                   capture_output=True, text=True)
+    return checkout
+
+
+def load_init_module(library_root):
+    """Impure edge. Dynamically imports the resolved library checkout's
+    OWN init.py as a module object -- never this process's already-
+    imported init.py, if any -- so step 9's copy_scripts()/copy_hooks()/
+    render_root_templates()/copy_managed_agents()/seed_claude_stubs()/
+    build_role_map()/read_source_commit() and its MANAGED_STATIC_PATHS/
+    TEMPLATE_STATIC_PATHS/MANAGED_COPY_MAP/CLAUDE_NESTED_PATHS constants
+    are always exactly the TARGET version's, reusing init.py's own
+    library->target layout mapping rather than a second, hand-maintained
+    copy of it here."""
+    spec = importlib.util.spec_from_file_location(
+        "wiki_harness_upgrade_target_init", str(Path(library_root) / "init.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def copy_target_to_scratch(target):
+    """Impure edge (step 8). Copies the target wiki tree -- everything
+    except .git -- into a brand-new tempfile.mkdtemp() scratch dir. Every
+    subsequent write in this run happens here, never the real target,
+    until step 11 promotes. tempfile.mkdtemp() is always a fresh,
+    independent path, so the scratch copy can never land inside the real
+    target's own working tree or its .git."""
+    scratch_root = Path(tempfile.mkdtemp(prefix="wiki-harness-upgrade-"))
+    scratch = scratch_root / "scratch"
+    shutil.copytree(Path(target), scratch, ignore=shutil.ignore_patterns(".git"))
+    return scratch
+
+
+def overwrite_scratch(init_mod, library_root, scratch, values):
+    """Impure edge (step 9). Overwrites every managed/template path in the
+    scratch copy by calling back into the resolved library checkout's own
+    init module -- the single source of truth for the library->target
+    layout mapping -- rather than a second, hand-maintained copy of it
+    here. Returns (scripts_paths, hooks_paths) so the caller can build the
+    exact same role map init.py itself builds (init_mod.build_role_map()).
+    seed_starters()/create_gitkeeps()/git_init() are never called -- those
+    write seeded/instance paths, which an upgrade must never touch."""
+    scripts_paths = init_mod.copy_scripts(library_root, scratch)
+    hooks_paths = init_mod.copy_hooks(library_root, scratch)
+    init_mod.render_root_templates(library_root, scratch, values)
+    init_mod.copy_managed_agents(library_root, scratch)
+    init_mod.seed_claude_stubs(library_root, scratch)
+    return scripts_paths, hooks_paths
+
+
+def run_scratch_lint(scratch):
+    """Impure edge (step 10). Runs `python3 <scratch>/scripts/lint.py
+    --root <scratch>` and returns (ok, output) -- output is stdout+stderr
+    combined, so a caller that aborts on failure can print exactly what
+    lint.py found."""
+    result = subprocess.run(
+        [sys.executable, str(Path(scratch) / "scripts" / "lint.py"),
+         "--root", str(scratch)],
+        capture_output=True, text=True)
+    return result.returncode == 0, result.stdout + result.stderr
+
+
+def promote_scratch(scratch, target):
+    """Impure edge (step 11). A BARE copy loop -- no try/except, T21 adds
+    that later so its own brief's monkeypatch-this-loop framing has
+    something concrete to wrap. Copies every file whose bytes differ
+    between the scratch copy and the real target (or that is absent from
+    the real target) from scratch back over the real target -- EXCLUDING
+    .wiki-harness-manifest.json (the Warchief amendment: the scratch's
+    manifest is never promoted wholesale; step 12 writes the real manifest
+    separately, last)."""
+    scratch = Path(scratch)
+    target = Path(target)
+    for src in sorted(scratch.rglob("*")):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(scratch)
+        if rel.as_posix() == MANIFEST_FILENAME:
+            continue
+        dst = target / rel
+        if not dst.is_file() or dst.read_bytes() != src.read_bytes():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(src.read_bytes())
+
+
+def run_upgrade(target, adopt, adopt_drift_paths, to, library_path):
     """Impure edge: the orchestrator for every ordered step 3.2 gate this
     task implements. Wires git_status_porcelain() -> is_clean_tree()
     (precondition 1, exit 2) -> read_manifest_for_upgrade() (precondition
     2, exit 1 unless --adopt suppresses it) -> hash_tree()/diff_manifest()
-    -> blocking_drifts()/format_drift_abort() (step 1, exit 1) -> the
-    not-yet-implemented apply-pipeline stub (T16B; a distinct exit code,
-    never 0/1/2, so it can never be mistaken for a real upgrade or for
-    either refusal above).
+    -> blocking_drifts()/format_drift_abort() (step 1, exit 1) -> the core
+    apply pipeline (T16B): resolve_library_checkout() (step 6) ->
+    copy_target_to_scratch() (step 8) -> overwrite_scratch() (step 9) ->
+    compute_manifest()/write_manifest() into the scratch (the Warchief
+    amendment's step-9 addendum) -> run_scratch_lint() (step 10, exit 1 on
+    failure, real target untouched) -> promote_scratch() (step 11, bare
+    loop, no rollback yet) -> write_manifest() to the real target LAST
+    (step 12).
+
+    `to` is --to's raw value ('vX.Y.Z'); `library_path` is --library-path
+    or None. No downgrade/adopt-drift-role-flip/MAJOR-removal guard and no
+    dry-run/--apply branch here -- those are later tasks' jobs (T17-T20);
+    every caller of this function today always means "write".
 
     When --adopt is passed and the manifest precondition would otherwise
     fail (missing/unparseable/non-object/non-UTF-8), the adoption
@@ -400,10 +562,33 @@ def run_upgrade(target, adopt, adopt_drift_paths):
               file=sys.stderr)
         return 1
 
-    print("upgrade: all step-1 gates passed; the apply pipeline (fetch, "
-          "scratch-copy, write) is not yet implemented (T16B)",
-          file=sys.stderr)
-    return 3
+    new_harness_version, new_source_ref = parse_to_version(to)
+
+    library_root = resolve_library_checkout(new_harness_version, library_path)
+    init_mod = load_init_module(library_root)
+
+    scratch = copy_target_to_scratch(target)
+    values = manifest.get("vars", {})
+    scripts_paths, hooks_paths = overwrite_scratch(
+        init_mod, library_root, scratch, values)
+    role_map = init_mod.build_role_map(scripts_paths, hooks_paths)
+    actual_hashes = hash_tree(scratch, sorted(role_map))
+    new_source_commit = init_mod.read_source_commit(library_root)
+    new_files = merge_manifest_files(role_map, actual_hashes, manifest.get("files", {}))
+    new_manifest = compute_manifest(
+        new_files, values, manifest.get("source_url", ""), new_harness_version,
+        new_source_ref, new_source_commit,
+        initialised_at=manifest.get("initialised_at", ""))
+    write_manifest(scratch / MANIFEST_FILENAME, new_manifest)         # step 9 addendum
+
+    lint_ok, lint_output = run_scratch_lint(scratch)                  # step 10
+    if not lint_ok:
+        print(lint_output, file=sys.stderr)
+        return 1
+
+    promote_scratch(scratch, target)                                 # step 11
+    write_manifest(Path(target) / MANIFEST_FILENAME, new_manifest)    # step 12
+    return 0
 
 
 def parse_args(argv):
@@ -414,6 +599,7 @@ def parse_args(argv):
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--adopt", action="store_true")
     parser.add_argument("--adopt-drift", action="append", default=[])
+    parser.add_argument("--library-path")
     return parser.parse_args(argv)
 
 
@@ -423,7 +609,8 @@ def main(argv):
         # --check ignores every other flag and runs as an early, standalone
         # branch, before any of the ordered steps in plan-v3 section 3.2.
         return run_check(Path(args.target))
-    return run_upgrade(Path(args.target), args.adopt, args.adopt_drift)
+    return run_upgrade(Path(args.target), args.adopt, args.adopt_drift,
+                       args.to, args.library_path)
 
 
 if __name__ == "__main__":

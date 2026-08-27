@@ -37,7 +37,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 ## P3 — upgrade
 
 - [x] T16 — upgrade.py step 1: refuse-before-write drift check incl. missing-path drift
-- [ ] T16B — Core apply pipeline: fetch target, scratch-copy, overwrite, lint scratch, bare promote-copy, write manifest (steps 5-6,8-9-10-11-12; inserted by verification fix, see Verification dispositions)
+- [x] T16B — Core apply pipeline: fetch target, scratch-copy, overwrite, lint scratch, bare promote-copy, write manifest (steps 5-6,8-9-10-11-12; inserted by verification fix, see Verification dispositions)
 - [ ] T17 — Downgrade guard
 - [ ] T18 — --adopt-drift mechanism, extended for a missing path
 - [ ] T19 — MAJOR-removal guard
