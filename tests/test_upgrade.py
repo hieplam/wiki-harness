@@ -755,5 +755,144 @@ class TestDowngradeGuard(unittest.TestCase):
             self.assertEqual(new_manifest["harness_version"], "1.0.0")
 
 
+class TestAdoptDrift(unittest.TestCase):
+    """T18: --adopt-drift <path> (repeatable) flips a drifted managed/
+    template path's manifest role to instance-fork PERMANENTLY -- both when
+    the path is present-but-edited (its local bytes are preserved exactly)
+    and when it is missing entirely from disk (fork-and-never-recreate)."""
+
+    def test_adopt_drift_flips_role_to_instance_fork(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+
+            agents_path = target / "wiki" / "AGENTS.md"
+            forked_bytes = agents_path.read_bytes() + b"\n<!-- local fork edit -->\n"
+            agents_path.write_bytes(forked_bytes)
+            _git(target, "add", "-A")
+            commit = _git(target, "commit", "--no-verify", "-q", "-m",
+                          "chore: fork wiki/AGENTS.md")
+            self.assertEqual(commit.returncode, 0, commit.stdout + commit.stderr)
+
+            v110 = _release_v1_1(v100, tmp / "lib-v1.1.0")
+
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply",
+                                  "--adopt-drift", "wiki/AGENTS.md",
+                                  "--library-path", str(v110))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            # The local fork edit is preserved byte-for-byte.
+            self.assertEqual(agents_path.read_bytes(), forked_bytes)
+
+            # Every OTHER managed/template path matches an INDEPENDENT
+            # reference init of v1.1.0 exactly -- never hand-duplicated
+            # expected bytes.
+            reference = tmp / "reference"
+            ref_result = _run_init(v110, reference)
+            self.assertEqual(ref_result.returncode, 0,
+                             ref_result.stdout + ref_result.stderr)
+            ref_manifest = json.loads(
+                (reference / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            managed_template_paths = [
+                p for p, entry in ref_manifest["files"].items()
+                if entry["role"] in ("managed", "template")]
+            self.assertIn("wiki/AGENTS.md", managed_template_paths)
+            for path in managed_template_paths:
+                if path == "wiki/AGENTS.md":
+                    continue
+                self.assertEqual(
+                    (target / path).read_bytes(), (reference / path).read_bytes(),
+                    f"{path} does not match v1.1.0 exactly")
+
+            new_manifest = json.loads(
+                (target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            self.assertEqual(new_manifest["harness_version"], "1.1.0")
+            self.assertEqual(
+                new_manifest["files"]["wiki/AGENTS.md"]["role"], "instance-fork")
+
+    def test_adopt_drift_warns_every_run_not_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+
+            agents_path = target / "wiki" / "AGENTS.md"
+            agents_path.write_bytes(
+                agents_path.read_bytes() + b"\n<!-- local fork edit -->\n")
+            _git(target, "add", "-A")
+            commit = _git(target, "commit", "--no-verify", "-q", "-m",
+                          "chore: fork wiki/AGENTS.md")
+            self.assertEqual(commit.returncode, 0, commit.stdout + commit.stderr)
+
+            v110 = _release_v1_1(v100, tmp / "lib-v1.1.0")
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply",
+                                  "--adopt-drift", "wiki/AGENTS.md",
+                                  "--library-path", str(v110))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            # Reproduced byte-for-byte from lint.py's check_harness()
+            # instance-fork branch.
+            expected_line = (
+                "WARN HARNESS wiki/AGENTS.md: forked from wiki-harness at "
+                "v1.1.0; local edits are permanent and will not receive "
+                "future updates.")
+
+            lint1 = subprocess.run(
+                [sys.executable, str(target / "scripts" / "lint.py"),
+                 "--root", str(target)],
+                capture_output=True, text=True)
+            self.assertEqual(lint1.returncode, 0, lint1.stdout + lint1.stderr)
+            self.assertIn(expected_line, lint1.stdout)
+
+            lint2 = subprocess.run(
+                [sys.executable, str(target / "scripts" / "lint.py"),
+                 "--root", str(target)],
+                capture_output=True, text=True)
+            self.assertEqual(lint2.returncode, 0, lint2.stdout + lint2.stderr)
+            self.assertIn(expected_line, lint2.stdout)
+
+    def test_adopt_drift_on_missing_path_never_recreates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+
+            agents_path = target / "wiki" / "AGENTS.md"
+            _git(target, "rm", "-q", "wiki/AGENTS.md")
+            commit = _git(target, "commit", "--no-verify", "-q", "-m",
+                          "chore: remove wiki/AGENTS.md")
+            self.assertEqual(commit.returncode, 0, commit.stdout + commit.stderr)
+            self.assertFalse(agents_path.exists())
+
+            v110 = _release_v1_1(v100, tmp / "lib-v1.1.0")
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply",
+                                  "--adopt-drift", "wiki/AGENTS.md",
+                                  "--library-path", str(v110))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(agents_path.exists())
+
+            manifest = json.loads(
+                (target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            self.assertEqual(
+                manifest["files"]["wiki/AGENTS.md"]["role"], "instance-fork")
+
+            # A SUBSEQUENT upgrade with NO --adopt-drift flag must never
+            # recreate it. is_downgrade() to the same version is False, so
+            # re-running --to v1.1.0 proceeds through the pipeline again.
+            _git(target, "add", "-A")
+            commit2 = _git(target, "commit", "--no-verify", "-q", "-m",
+                           "chore: land the v1.1.0 upgrade")
+            self.assertEqual(commit2.returncode, 0, commit2.stdout + commit2.stderr)
+
+            result2 = _run_upgrade(target, "--to", "v1.1.0", "--apply",
+                                   "--library-path", str(v110))
+            self.assertEqual(result2.returncode, 0, result2.stdout + result2.stderr)
+            self.assertFalse(agents_path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
