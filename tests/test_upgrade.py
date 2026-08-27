@@ -190,6 +190,31 @@ def _release_v1_1_removed_script(v100_root, new_root, removed_script="manifest.p
     return new_root
 
 
+def _release_v1_1_removed_template(v100_root, new_root, removed_template="wiki.AGENTS.md"):
+    """Builds a synthetic v1.1.0 release like _release_v1_1_removed_script(),
+    but deletes a TEMPLATE source (default templates/wiki.AGENTS.md, which
+    copy_managed_agents()'s hardcoded MANAGED_COPY_MAP backs the managed
+    path wiki/AGENTS.md with) instead of a scripts/*.py source -- this
+    exercises the second, HARDCODED-mapping removal path (as opposed to
+    _release_v1_1_removed_script()'s glob-discovered scripts/*.py removal
+    path): a source overwrite_scratch()'s own copy_managed_agents() would
+    otherwise raise an uncaught FileNotFoundError over, and one
+    build_role_map()'s static MANAGED_STATIC_PATHS entry would never
+    detect as missing on its own (it names wiki/AGENTS.md unconditionally,
+    regardless of whether templates/wiki.AGENTS.md still exists)."""
+    shutil.copytree(v100_root, new_root, ignore=shutil.ignore_patterns(".git"))
+    (new_root / "VERSION").write_text("1.1.0\n", encoding="utf-8")
+    (new_root / "templates" / removed_template).unlink()
+    _git(new_root, "init", "-q")
+    _git(new_root, "config", "user.email", "hunter@example.com")
+    _git(new_root, "config", "user.name", "Hunter")
+    _git(new_root, "add", "-A")
+    _git(new_root, "commit", "-q", "-m",
+        f"library v1.1.0 (removed templates/{removed_template})")
+    _git(new_root, "tag", "v1.1.0")
+    return new_root
+
+
 INIT_ANSWERS = {
     "wiki_title": "Test Wiki",
     "org_name": "Test Org",
@@ -945,6 +970,58 @@ class TestMajorRemovalGuard(unittest.TestCase):
                 after, before,
                 "the MAJOR-removal guard must abort before any write to "
                 "the real target -- nothing fetched or written")
+
+    def test_major_removal_guard_fires_on_removed_template(self):
+        """A TEMPLATE source (not a scripts/*.py source) is removed --
+        templates/wiki.AGENTS.md, which copy_managed_agents()'s hardcoded
+        MANAGED_COPY_MAP backs the managed path wiki/AGENTS.md with. This
+        must NOT crash overwrite_scratch() with an uncaught
+        FileNotFoundError (build_role_map() alone could never detect this
+        removal -- its static entries name wiki/AGENTS.md unconditionally)
+        -- the guard must catch it BEFORE any scratch copy, exactly like
+        the removed-script case above."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            v110_removed = _release_v1_1_removed_template(
+                v100, tmp / "lib-v1.1.0-removed-template")
+
+            before = _tree_snapshot(target)
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply",
+                                  "--library-path", str(v110_removed))
+            after = _tree_snapshot(target)
+            combined = result.stdout + result.stderr
+
+            self.assertEqual(result.returncode, 1, combined)
+            self.assertIn("wiki/AGENTS.md", combined)
+            self.assertNotIn("Traceback", combined)
+            self.assertEqual(
+                after, before,
+                "the MAJOR-removal guard must abort before any write to "
+                "the real target, even for a removed TEMPLATE source (not "
+                "just a removed script)")
+
+    def test_major_removal_guard_message_does_not_claim_no_fetch(self):
+        """By the time this guard runs, step 6 has already fetched/checked
+        out the target version -- that fetched checkout is this guard's
+        whole premise. The abort message must never claim nothing was
+        FETCHED (only that nothing was WRITTEN to the real target)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            v110_removed = _release_v1_1_removed_script(
+                v100, tmp / "lib-v1.1.0-removed")
+
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply",
+                                  "--library-path", str(v110_removed))
+            combined = result.stdout + result.stderr
+
+            self.assertEqual(result.returncode, 1, combined)
+            self.assertNotIn("fetched", combined)
 
 
 if __name__ == "__main__":
