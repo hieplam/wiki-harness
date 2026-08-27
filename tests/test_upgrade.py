@@ -570,7 +570,7 @@ class TestApplyPipeline(unittest.TestCase):
                  patch.object(upgrade, "promote_scratch",
                               side_effect=RuntimeError("stop-before-promote")):
                 with self.assertRaises(RuntimeError):
-                    upgrade.run_upgrade(target, False, [], "v1.1.0", str(v110))
+                    upgrade.run_upgrade(target, False, [], "v1.1.0", str(v110), False)
 
             self.assertTrue(captured.get("ok"), captured.get("output"))
             self.assertNotIn("HARNESS", captured.get("output", ""))
@@ -697,11 +697,62 @@ class TestApplyPipeline(unittest.TestCase):
             with patch.object(upgrade, "promote_scratch",
                               side_effect=RuntimeError("promote exploded")):
                 with self.assertRaises(RuntimeError):
-                    upgrade.run_upgrade(target, False, [], "v1.1.0", str(v110))
+                    upgrade.run_upgrade(target, False, [], "v1.1.0", str(v110), False)
 
             after_manifest = (target / MANIFEST_FILENAME).read_bytes()
             self.assertEqual(after_manifest, before_manifest)
             self.assertIn(b'"harness_version": "1.0.0"', after_manifest)
+
+
+class TestDowngradeGuard(unittest.TestCase):
+    """T17: `--to` older than the manifest's current harness_version is
+    refused (exit 2) unless --allow-downgrade is passed -- one guard on top
+    of T16B's already-working apply pipeline, checked before any fetch or
+    write."""
+
+    def test_downgrade_refused_without_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            v110 = _release_v1_1(v100, tmp / "lib-v1.1.0")
+            self.assertEqual(_run_init(v110, target).returncode, 0)
+
+            before = _tree_snapshot(target)
+            result = _run_upgrade(target, "--to", "v1.0.0", "--apply",
+                                  "--library-path", str(v100))
+            after = _tree_snapshot(target)
+
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertEqual(
+                result.stderr.strip(),
+                "`--to v1.0.0` is older than the installed v1.1.0; downgrade "
+                "is not supported -- pass `--allow-downgrade` if you "
+                "specifically intend this.")
+            self.assertEqual(
+                after, before,
+                "a refused downgrade must fetch/write nothing at all")
+
+    def test_downgrade_proceeds_with_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            v110 = _release_v1_1(v100, tmp / "lib-v1.1.0")
+            self.assertEqual(_run_init(v110, target).returncode, 0)
+
+            result = _run_upgrade(target, "--to", "v1.0.0", "--apply",
+                                  "--library-path", str(v100),
+                                  "--allow-downgrade")
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(
+                "DOWNGRADE: content is moving BACKWARD from v1.1.0 to "
+                "v1.0.0.", result.stderr)
+
+            new_manifest = json.loads(
+                (target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            self.assertEqual(new_manifest["harness_version"], "1.0.0")
 
 
 if __name__ == "__main__":
