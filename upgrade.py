@@ -327,19 +327,30 @@ def merge_manifest_files(role_map, actual_hashes, old_files, adopt_drift_paths):
     step 9 just overwrote, hashed fresh in the scratch copy (`role_map` is
     the resolved library checkout's own build_role_map() output;
     `actual_hashes` is hash_tree()'s {path: sha256} over those same paths,
-    mirroring init.py's own build_role_map()+hash_tree() pairing, EXCEPT
-    that a path reconcile_forks() just deleted from the scratch copy --
-    because it is a forked-and-absent path -- is simply not in
-    `actual_hashes` at all, so the base dict below is guarded to skip it
-    rather than KeyError) -- plus every OLD instance-fork path carried over
-    UNCHANGED, keeping its role and its recorded PRE-upgrade hash, PLUS
-    every path named this run by --adopt-drift (`adopt_drift_paths`) newly
-    flipped to instance-fork the same way: role instance-fork, keeping the
-    OLD manifest's recorded (pre-fork) sha256 rather than the fresh actual
-    hash (T18) -- never the current on-disk hash, so lint.py's
-    check_harness() instance-fork branch (which WARNs only on
-    hash_mismatch) keeps disagreeing with the real bytes on every future
-    run, not just this one, per plan-v3 step 3's 'every run, not once'."""
+    mirroring init.py's own build_role_map()+hash_tree() pairing) -- plus
+    every OLD instance-fork path carried over UNCHANGED, keeping its role
+    and its recorded PRE-upgrade hash, PLUS every path named this run by
+    --adopt-drift (`adopt_drift_paths`) newly flipped to instance-fork the
+    same way: role instance-fork, keeping the OLD manifest's recorded
+    (pre-fork) sha256 rather than the fresh actual hash (T18) -- never the
+    current on-disk hash, so lint.py's check_harness() instance-fork
+    branch (which WARNs only on hash_mismatch) keeps disagreeing with the
+    real bytes on every future run, not just this one, per plan-v3 step
+    3's 'every run, not once'.
+
+    The base dict below is guarded with `if path in actual_hashes` purely
+    defensively, so a `role_map` path that is (for any reason) absent from
+    the freshly-hashed scratch copy is skipped here rather than raising
+    KeyError -- this does NOT rely on run_upgrade()'s missing-fork
+    reconcile_forks() call having run yet: that deletion is deliberately
+    deferred until AFTER step 10's scratch-lint (see reconcile_forks()'s
+    own docstring for why), which is AFTER this function's caller computes
+    `actual_hashes`, so every role_map path -- including a forked-and-
+    absent one -- is still present with fresh library bytes in
+    `actual_hashes` by the time this function actually runs today; the
+    forked-and-absent entry below is still correctly overwritten to
+    instance-fork with the OLD recorded hash by the loop that follows,
+    regardless."""
     adopt = set(adopt_drift_paths)
     files = {path: {"role": role, "sha256": actual_hashes[path]}
              for path, role in role_map.items() if path in actual_hashes}
