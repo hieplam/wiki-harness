@@ -3,7 +3,9 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import io
+import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -112,6 +114,89 @@ def _make_wiki(root, harness_version="1.0.0"):
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "init")
     return root
+
+
+def _library_source_files(root):
+    """Copies everything init.py needs to run standalone from `root` --
+    its own init.py plus templates/, scripts/, githooks/ -- verbatim from
+    this repo's real library sources, so a fixture library checkout
+    behaves exactly like a real wiki-harness release (T16B)."""
+    shutil.copy2(ROOT / "init.py", root / "init.py")
+    shutil.copytree(ROOT / "templates", root / "templates")
+    shutil.copytree(ROOT / "scripts", root / "scripts")
+    shutil.copytree(ROOT / "githooks", root / "githooks")
+
+
+def _make_library(root, version):
+    """T16B's fixture: a throwaway, git-backed library checkout at
+    `version`, tagged v<version>. Every apply-pipeline test in this file
+    drives the pipeline via --library-path against a fixture like this one
+    -- never a real network round trip."""
+    root.mkdir(parents=True, exist_ok=True)
+    _library_source_files(root)
+    (root / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "hunter@example.com")
+    _git(root, "config", "user.name", "Hunter")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", f"library v{version}")
+    _git(root, "tag", f"v{version}")
+    return root
+
+
+def _release_v1_1(v100_root, new_root, *, break_lint=False):
+    """Builds a synthetic v1.1.0 release from an existing v1.0.0 fixture
+    library checkout, with one deliberate managed-file change:
+    templates/wiki.AGENTS.md (copy_managed_agents() copies it verbatim to
+    wiki/AGENTS.md). By default the change is a benign comment (a normal,
+    lint-clean release); with `break_lint=True` it is a broken markdown
+    link instead, so the changed file trips a real LINK finding once it
+    lands in the scratch copy -- forcing step 10's scratch lint to fail,
+    for the lint-failure-path tests."""
+    shutil.copytree(v100_root, new_root, ignore=shutil.ignore_patterns(".git"))
+    (new_root / "VERSION").write_text("1.1.0\n", encoding="utf-8")
+    tmpl = new_root / "templates" / "wiki.AGENTS.md"
+    addition = ("\n[broken](does-not-exist.md)\n" if break_lint
+               else "\n<!-- v1.1.0 managed-file change -->\n")
+    tmpl.write_text(tmpl.read_text(encoding="utf-8") + addition, encoding="utf-8")
+    _git(new_root, "init", "-q")
+    _git(new_root, "config", "user.email", "hunter@example.com")
+    _git(new_root, "config", "user.name", "Hunter")
+    _git(new_root, "add", "-A")
+    _git(new_root, "commit", "-q", "-m", "library v1.1.0")
+    _git(new_root, "tag", "v1.1.0")
+    return new_root
+
+
+INIT_ANSWERS = {
+    "wiki_title": "Test Wiki",
+    "org_name": "Test Org",
+    "content_language": "en",
+    "repo_name": "test-repo",
+}
+
+
+def _run_init(library_root, target, answers=INIT_ANSWERS):
+    args = [sys.executable, str(library_root / "init.py"), str(target),
+            "--non-interactive"]
+    for key, value in answers.items():
+        args += [f"--{key.replace('_', '-')}", value]
+    return subprocess.run(args, capture_output=True, text=True)
+
+
+def _edit_seeded_file_and_commit(target):
+    """A legitimate, SEEDED-file-only local edit (VISION.md), committed so
+    the tree is clean before upgrade runs -- upgrade's step-1 drift check
+    only ever looks at MANAGED/TEMPLATE paths, so this edit must survive
+    the apply pipeline byte-for-byte untouched."""
+    (target / "VISION.md").write_text(
+        "# VISION\n\nOwner edit: ship the widget export next quarter.\n",
+        encoding="utf-8")
+    _git(target, "add", "-A")
+    # Subject must match check_commit_msg.py's '<op>(<ref>): <summary>'
+    # convention (the wired-up commit-msg hook enforces this even for a
+    # throwaway fixture edit) -- "chore" with no ref is always accepted.
+    _git(target, "commit", "-q", "-m", "chore: seeded edit")
 
 
 class TestCheck(unittest.TestCase):
@@ -356,11 +441,19 @@ class TestDriftCheck(unittest.TestCase):
 
     def test_clean_upgrade_no_drift(self):
         """A clean fixture, no local edits at all -> every gate passes and
-        step 1 reaches the (not-yet-implemented) apply-pipeline stub: not
-        the dirty-tree exit (2), not the drift-abort exit (1)."""
+        (T16B) the full apply pipeline completes: not the dirty-tree exit
+        (2), not the drift-abort exit (1) -- the pipeline itself is
+        exercised in depth by TestApplyPipeline below; this test only
+        proves step 1's gates never block a genuinely clean, non-drifted
+        tree."""
         with tempfile.TemporaryDirectory() as tmp:
-            target = _make_wiki(Path(tmp) / "target")
-            result = _run_upgrade(target, "--to", "v1.1.0", "--apply")
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            v110 = _release_v1_1(v100, tmp / "lib-v1.1.0")
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply",
+                                  "--library-path", str(v110))
             combined = result.stdout + result.stderr
             self.assertNotIn(
                 "commit or stash local changes before running upgrade",
@@ -436,6 +529,179 @@ class TestDriftCheck(unittest.TestCase):
                 "`git checkout -- .` to discard the partial write and "
                 "restore the pre-upgrade tree.",
                 combined)
+
+
+class TestApplyPipeline(unittest.TestCase):
+    """T16B: the core --apply write pipeline -- resolve the target version
+    (step 6), scratch-copy (step 8), overwrite every managed/template path
+    (step 9), lint the scratch copy (step 10), bare promote-copy (step
+    11), write the manifest last (step 12). No guards (downgrade/
+    adopt-drift/MAJOR-removal) -- every fixture here is a clean,
+    non-drifted, forward upgrade only."""
+
+    def test_scratch_lint_is_harness_clean(self):
+        """Warchief amendment A9: the target's manifest lists >=1 managed
+        file whose bytes change in v1.1.0 -- step 10's scratch lint must
+        exit 0 with NO HARNESS line at all (the scratch already carries the
+        NEW, self-consistent manifest by the time it lints, per A9), and
+        the REAL target's manifest bytes stay unchanged until step 12
+        (verified by monkeypatching promote to raise immediately after a
+        spied-on lint call succeeds)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            _edit_seeded_file_and_commit(target)
+            v110 = _release_v1_1(v100, tmp / "lib-v1.1.0")
+
+            before_manifest = (target / MANIFEST_FILENAME).read_bytes()
+
+            real_lint = upgrade.run_scratch_lint
+            captured = {}
+
+            def spy_lint(scratch):
+                ok, output = real_lint(scratch)
+                captured["ok"] = ok
+                captured["output"] = output
+                return ok, output
+
+            with patch.object(upgrade, "run_scratch_lint", side_effect=spy_lint), \
+                 patch.object(upgrade, "promote_scratch",
+                              side_effect=RuntimeError("stop-before-promote")):
+                with self.assertRaises(RuntimeError):
+                    upgrade.run_upgrade(target, False, [], "v1.1.0", str(v110))
+
+            self.assertTrue(captured.get("ok"), captured.get("output"))
+            self.assertNotIn("HARNESS", captured.get("output", ""))
+
+            after_manifest = (target / MANIFEST_FILENAME).read_bytes()
+            self.assertEqual(after_manifest, before_manifest)
+
+    def test_apply_completes_and_updates_every_managed_template_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            init_result = _run_init(v100, target)
+            self.assertEqual(init_result.returncode, 0,
+                             init_result.stdout + init_result.stderr)
+            _edit_seeded_file_and_commit(target)
+            seeded_content = (target / "VISION.md").read_bytes()
+
+            old_manifest = json.loads(
+                (target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            old_source_url = old_manifest["source_url"]
+
+            v110 = _release_v1_1(v100, tmp / "lib-v1.1.0")
+
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply",
+                                  "--library-path", str(v110))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            # Every SEEDED edit survives byte-for-byte.
+            self.assertEqual((target / "VISION.md").read_bytes(), seeded_content)
+
+            # Every MANAGED/TEMPLATE path (incl. the 4 CLAUDE.md paths) now
+            # matches v1.1.0 exactly -- proven by comparing against an
+            # INDEPENDENT reference init from the SAME v1.1.0 library and
+            # the SAME vars, never hand-duplicated expected bytes.
+            reference = tmp / "reference"
+            ref_result = _run_init(v110, reference)
+            self.assertEqual(ref_result.returncode, 0,
+                             ref_result.stdout + ref_result.stderr)
+            ref_manifest = json.loads(
+                (reference / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            managed_template_paths = [
+                p for p, entry in ref_manifest["files"].items()
+                if entry["role"] in ("managed", "template")]
+            for claude_path in ("CLAUDE.md", "sources/CLAUDE.md",
+                                "sources/cards/CLAUDE.md", "wiki/CLAUDE.md"):
+                self.assertIn(claude_path, managed_template_paths)
+            for path in managed_template_paths:
+                self.assertEqual(
+                    (target / path).read_bytes(), (reference / path).read_bytes(),
+                    f"{path} does not match v1.1.0 exactly")
+
+            # lint.py still exits 0 against the REAL target.
+            lint_result = subprocess.run(
+                [sys.executable, str(target / "scripts" / "lint.py"),
+                 "--root", str(target)],
+                capture_output=True, text=True)
+            self.assertEqual(lint_result.returncode, 0,
+                             lint_result.stdout + lint_result.stderr)
+
+            # The manifest reflects v1.1.0.
+            new_manifest = json.loads(
+                (target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            self.assertEqual(new_manifest["harness_version"], "1.1.0")
+            self.assertEqual(new_manifest["source_ref"], "v1.1.0")
+            self.assertEqual(new_manifest["source_url"], old_source_url)
+            v110_head = _git(v110, "rev-parse", "HEAD").stdout.strip()
+            self.assertEqual(new_manifest["source_commit"], v110_head)
+
+    def test_scratch_copy_used_not_real_target_until_promote(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            _edit_seeded_file_and_commit(target)
+            v110_broken = _release_v1_1(
+                v100, tmp / "lib-v1.1.0-broken", break_lint=True)
+
+            before = _tree_snapshot(target)
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply",
+                                  "--library-path", str(v110_broken))
+            after = _tree_snapshot(target)
+
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertEqual(
+                after, before,
+                "the real target must stay byte-identical until step 11 "
+                "promotes -- step 10's scratch lint failed and must abort "
+                "before any real-target write")
+
+    def test_lint_failure_in_scratch_blocks_promote(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            _edit_seeded_file_and_commit(target)
+            v110_broken = _release_v1_1(
+                v100, tmp / "lib-v1.1.0-broken", break_lint=True)
+
+            before = _tree_snapshot(target)
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply",
+                                  "--library-path", str(v110_broken))
+            after = _tree_snapshot(target)
+            combined = result.stdout + result.stderr
+
+            self.assertEqual(result.returncode, 1, combined)
+            self.assertIn("broken link: does-not-exist.md", combined)
+            self.assertNotIn("Traceback", combined)
+            self.assertEqual(after, before)
+
+    def test_manifest_written_last_after_promote(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            _edit_seeded_file_and_commit(target)
+            v110 = _release_v1_1(v100, tmp / "lib-v1.1.0")
+
+            before_manifest = (target / MANIFEST_FILENAME).read_bytes()
+
+            with patch.object(upgrade, "promote_scratch",
+                              side_effect=RuntimeError("promote exploded")):
+                with self.assertRaises(RuntimeError):
+                    upgrade.run_upgrade(target, False, [], "v1.1.0", str(v110))
+
+            after_manifest = (target / MANIFEST_FILENAME).read_bytes()
+            self.assertEqual(after_manifest, before_manifest)
+            self.assertIn(b'"harness_version": "1.0.0"', after_manifest)
 
 
 if __name__ == "__main__":
