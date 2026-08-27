@@ -49,8 +49,21 @@ AGENTS.md template's link to ./wiki/AGENTS.md). merge_manifest_files()
 flips that path's manifest role to instance-fork PERMANENTLY, keeping the
 OLD manifest's recorded (pre-fork) sha256 rather than the fresh actual
 hash -- so lint.py's check_harness() instance-fork WARN keeps firing on
-every future run, not once. The MAJOR-removal guard (T19) still lands on
-top of this pipeline in a later task; see plan-v3.md's task table.
+every future run, not once.
+
+T19 adds the MAJOR-removal guard on top of that pipeline: right after
+role_map is built (step 9's build_role_map() call -- the same single
+source of truth for "what does the target version provide" step 9
+already uses), removed_managed_paths() checks every OLD-manifest managed/
+template path against that role_map's keys; any OLD path the target
+version's own checkout no longer provides is a MAJOR removal --
+format_removal_abort() prints the exact named-path stderr message and the
+whole run exits 1, BEFORE merge_manifest_files()/compute_manifest()/
+write_manifest() touch the scratch copy's manifest and BEFORE
+run_scratch_lint()/promote_scratch() ever run, so the real target is left
+byte-for-byte untouched. This is a cheap fail-loud guard only -- the full
+removal mechanism, a role: "removed" manifest value actually used, is
+deferred (Not-now item 13).
 
 Pure: is_clean_tree(), managed_template_files(), blocking_drifts(), and
 format_drift_abort() take already-fetched data in and return a
@@ -320,6 +333,43 @@ def format_downgrade_banner(to_version, installed_version):
         "Managed and template files will be overwritten with the OLDER\n"
         "release's content. Proceeding because --allow-downgrade was passed.\n"
         "============================================================")
+
+
+def removed_managed_paths(old_files, provided_paths):
+    """Pure. `old_files` is the OLD manifest's "files" map; `provided_paths`
+    is the set of paths the just-resolved target version's own checkout
+    provides (init.py's own build_role_map() keys -- the single source of
+    truth for "what does this version ship", never duplicated here).
+    Reuses managed_template_files() to select the OLD manifest's
+    managed/template paths only -- instance-fork/any other recorded role is
+    out of scope for this guard, exactly like step 1's drift check. Returns
+    the sorted list of OLD managed/template paths that are NOT among
+    `provided_paths`: a MAJOR removal (step 7) -- the target version no
+    longer ships a source for a path this instance still carries as
+    managed/template."""
+    managed = managed_template_files(old_files)
+    provided = set(provided_paths)
+    return sorted(path for path in managed if path not in provided)
+
+
+def format_removal_abort(removed, harness_version):
+    """Pure. `removed` is removed_managed_paths()'s output; `harness_version`
+    is --to's parsed bare 'X.Y.Z' target version string. Returns the exact
+    multi-line stderr message step 7 prints before aborting: a header
+    naming the target version, stating this is a MAJOR removal and that
+    nothing was fetched or written, then one line per removed path naming
+    it. This is a cheap fail-loud guard only -- the full role: "removed"
+    manifest mechanism is deferred (Not-now item 13); this message names
+    the paths so the operator can decide by hand, it does not recover or
+    reconcile anything itself."""
+    lines = [
+        f"upgrade: refusing to proceed -- v{harness_version} no longer "
+        "provides a source for the following managed/template path(s); "
+        "this is a MAJOR removal and nothing was fetched or written:",
+    ]
+    for path in removed:
+        lines.append(f"  {path}: no longer provided by v{harness_version}.")
+    return "\n".join(lines)
 
 
 def merge_manifest_files(role_map, actual_hashes, old_files, adopt_drift_paths):
@@ -658,11 +708,17 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path, allow_downgr
     promote_scratch() (step 11, bare loop, no rollback yet) ->
     write_manifest() to the real target LAST (step 12).
 
+    Right after role_map is built and BEFORE any of merge_manifest_files()/
+    compute_manifest()/write_manifest()-to-scratch/run_scratch_lint()/
+    promote_scratch() run, removed_managed_paths()/format_removal_abort()
+    (T19, step 7) check every OLD-manifest managed/template path against
+    that same role_map's keys and abort (exit 1, real target untouched) if
+    the target version's own checkout no longer provides one of them.
+
     `to` is --to's raw value ('vX.Y.Z'); `library_path` is --library-path
     or None; `allow_downgrade` is --allow-downgrade's flag value. No
-    MAJOR-removal guard and no dry-run/--apply branch here -- those are
-    later tasks' jobs (T19-T20); every caller of this function today always
-    means "write".
+    dry-run/--apply branch here -- that is a later task's job (T20); every
+    caller of this function today always means "write".
 
     When --adopt is passed and the manifest precondition would otherwise
     fail (missing/unparseable/non-object/non-UTF-8), the adoption
@@ -719,6 +775,10 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path, allow_downgr
     missing_forks = fork_paths - present_forks
     reconcile_forks(scratch, target, present_forks)                   # T18, before lint
     role_map = init_mod.build_role_map(scripts_paths, hooks_paths)
+    removed = removed_managed_paths(old_files, role_map.keys())       # T19, step 7
+    if removed:
+        print(format_removal_abort(removed, new_harness_version), file=sys.stderr)
+        return 1
     actual_hashes = hash_tree(scratch, sorted(role_map))
     new_source_commit = init_mod.read_source_commit(library_root)
     new_files = merge_manifest_files(

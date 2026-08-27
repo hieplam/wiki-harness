@@ -168,6 +168,28 @@ def _release_v1_1(v100_root, new_root, *, break_lint=False):
     return new_root
 
 
+def _release_v1_1_removed_script(v100_root, new_root, removed_script="manifest.py"):
+    """Builds a synthetic v1.1.0 release like _release_v1_1(), but instead
+    of editing a managed template, DELETES one of the library's own
+    scripts/*.py sources entirely (default scripts/manifest.py) -- since
+    copy_scripts() (init.py) discovers scripts/*.py purely by what's
+    physically present on disk under <library>/scripts/, this makes that
+    path drop out of the target version's own build_role_map() altogether,
+    simulating a MAJOR release that no longer ships a source for a path
+    the OLD manifest still records as managed (T19's guard)."""
+    shutil.copytree(v100_root, new_root, ignore=shutil.ignore_patterns(".git"))
+    (new_root / "VERSION").write_text("1.1.0\n", encoding="utf-8")
+    (new_root / "scripts" / removed_script).unlink()
+    _git(new_root, "init", "-q")
+    _git(new_root, "config", "user.email", "hunter@example.com")
+    _git(new_root, "config", "user.name", "Hunter")
+    _git(new_root, "add", "-A")
+    _git(new_root, "commit", "-q", "-m",
+        f"library v1.1.0 (removed scripts/{removed_script})")
+    _git(new_root, "tag", "v1.1.0")
+    return new_root
+
+
 INIT_ANSWERS = {
     "wiki_title": "Test Wiki",
     "org_name": "Test Org",
@@ -892,6 +914,37 @@ class TestAdoptDrift(unittest.TestCase):
                                    "--library-path", str(v110))
             self.assertEqual(result2.returncode, 0, result2.stdout + result2.stderr)
             self.assertFalse(agents_path.exists())
+
+
+class TestMajorRemovalGuard(unittest.TestCase):
+    """T19: for every OLD-manifest managed/template path, if the fetched
+    target version's own checkout no longer provides a source for that path
+    (i.e. it is no longer a key in init.py's own build_role_map()) -> abort,
+    exit 1, name every removed path -- never a crash, never a silent
+    orphan, never a silent delete of anything on the real target."""
+
+    def test_major_removal_guard_fires_loud(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            v110_removed = _release_v1_1_removed_script(
+                v100, tmp / "lib-v1.1.0-removed")
+
+            before = _tree_snapshot(target)
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply",
+                                  "--library-path", str(v110_removed))
+            after = _tree_snapshot(target)
+            combined = result.stdout + result.stderr
+
+            self.assertEqual(result.returncode, 1, combined)
+            self.assertIn("scripts/manifest.py", combined)
+            self.assertNotIn("Traceback", combined)
+            self.assertEqual(
+                after, before,
+                "the MAJOR-removal guard must abort before any write to "
+                "the real target -- nothing fetched or written")
 
 
 if __name__ == "__main__":
