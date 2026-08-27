@@ -40,7 +40,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 - [x] T16B — Core apply pipeline: fetch target, scratch-copy, overwrite, lint scratch, bare promote-copy, write manifest (steps 5-6,8-9-10-11-12; inserted by verification fix, see Verification dispositions)
 - [x] T17 — Downgrade guard
 - [x] T18 — --adopt-drift mechanism, extended for a missing path
-- [ ] T19 — MAJOR-removal guard
+- [x] T19 — MAJOR-removal guard
 - [ ] T20 — --apply vs. dry-run split
 - [ ] T21 — Atomic promote via try/except -> git checkout -- . (no marker, no --resume — A3)
 - [ ] T22 — Idempotency fast path

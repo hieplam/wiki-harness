@@ -49,8 +49,31 @@ AGENTS.md template's link to ./wiki/AGENTS.md). merge_manifest_files()
 flips that path's manifest role to instance-fork PERMANENTLY, keeping the
 OLD manifest's recorded (pre-fork) sha256 rather than the fresh actual
 hash -- so lint.py's check_harness() instance-fork WARN keeps firing on
-every future run, not once. The MAJOR-removal guard (T19) still lands on
-top of this pipeline in a later task; see plan-v3.md's task table.
+every future run, not once.
+
+T19 adds the MAJOR-removal guard on top of that pipeline: right after
+load_init_module() resolves the target version's own init module, BEFORE
+copy_target_to_scratch()/overwrite_scratch() ever touch a scratch copy or
+the real target, provided_source_paths() (an impure edge -- it has to
+stat() the resolved library checkout) computes the set of managed/
+template TARGET paths the target version actually still has a SOURCE for
+on disk, mirroring each of init.py's own copy functions' source-selection
+logic one by one (never build_role_map(), whose static entries name a
+target path regardless of whether its source file still exists, and so
+cannot detect this class of removal at all -- and never a good guard
+location either, since overwrite_scratch() itself would raise an uncaught
+FileNotFoundError on a removed hardcoded-mapping template source, like
+templates/wiki.AGENTS.md, before build_role_map() is even reached).
+removed_managed_paths() (pure) then checks every OLD-manifest managed/
+template path against that provided set; any OLD path the target version
+no longer provides a source for is a MAJOR removal -- format_removal_abort()
+prints the exact named-path stderr message (never claiming nothing was
+fetched -- step 6's resolve_library_checkout() already fetched/checked out
+the target version by the time this guard runs; only the real target's
+own tree is left unchanged) and the whole run exits 1 before any scratch
+copy is even created or anything is written to the real target. This is a
+cheap fail-loud guard only -- the full removal mechanism, a role:
+"removed" manifest value actually used, is deferred (Not-now item 13).
 
 Pure: is_clean_tree(), managed_template_files(), blocking_drifts(), and
 format_drift_abort() take already-fetched data in and return a
@@ -322,6 +345,50 @@ def format_downgrade_banner(to_version, installed_version):
         "============================================================")
 
 
+def removed_managed_paths(old_files, provided_paths):
+    """Pure. `old_files` is the OLD manifest's "files" map; `provided_paths`
+    is the set of managed/template TARGET paths the just-resolved target
+    version's own checkout still has a SOURCE for on disk (the impure edge
+    provided_source_paths() below computes this -- never build_role_map(),
+    whose static entries name a target path regardless of whether its
+    source file still exists, and so cannot detect a removed source at
+    all). Reuses managed_template_files() to select the OLD manifest's
+    managed/template paths only -- instance-fork/any other recorded role is
+    out of scope for this guard, exactly like step 1's drift check. Returns
+    the sorted list of OLD managed/template paths that are NOT among
+    `provided_paths`: a MAJOR removal (step 7) -- the target version no
+    longer ships a source for a path this instance still carries as
+    managed/template."""
+    managed = managed_template_files(old_files)
+    provided = set(provided_paths)
+    return sorted(path for path in managed if path not in provided)
+
+
+def format_removal_abort(removed, harness_version):
+    """Pure. `removed` is removed_managed_paths()'s output; `harness_version`
+    is --to's parsed bare 'X.Y.Z' target version string. Returns the exact
+    multi-line stderr message step 7 prints before aborting: a header
+    naming the target version, stating this is a MAJOR removal and that the
+    target wiki was left unchanged (nothing was written to it -- never
+    claiming nothing was FETCHED: by the time this guard runs, step 6 has
+    already fetched/checked out the target version -- that fetched checkout
+    is this guard's whole premise, so the message must only assert what is
+    actually true about the real target's own tree), then one line per
+    removed path naming it. This is a cheap fail-loud guard only -- the
+    full role: "removed" manifest mechanism is deferred (Not-now item 13);
+    this message names the paths so the operator can decide by hand, it
+    does not recover or reconcile anything itself."""
+    lines = [
+        f"upgrade: refusing to proceed -- v{harness_version} no longer "
+        "provides a source for the following managed/template path(s); "
+        "this is a MAJOR removal and the target wiki was left unchanged "
+        "(nothing was written to it):",
+    ]
+    for path in removed:
+        lines.append(f"  {path}: no longer provided by v{harness_version}.")
+    return "\n".join(lines)
+
+
 def merge_manifest_files(role_map, actual_hashes, old_files, adopt_drift_paths):
     """Pure. Step 12's manifest "files" input: every managed/template path
     step 9 just overwrote, hashed fresh in the scratch copy (`role_map` is
@@ -526,6 +593,60 @@ def load_init_module(library_root):
     return module
 
 
+def provided_source_paths(init_mod, library_root):
+    """Impure edge (T19, step 7 precondition). Computes the set of
+    managed/template TARGET paths the resolved `library_root` checkout
+    actually still has a SOURCE for on disk -- by mirroring each of
+    init.py's own copy functions' source-selection logic one at a time,
+    never build_role_map() (whose static MANAGED_STATIC_PATHS/
+    TEMPLATE_STATIC_PATHS entries name a target path unconditionally,
+    regardless of whether the source file backing it still exists, so it
+    cannot detect a removed source at all). Called BEFORE
+    copy_target_to_scratch()/overwrite_scratch() run, so a missing source
+    is caught here -- cheaply, no scratch copy even created -- rather than
+    overwrite_scratch() raising an uncaught FileNotFoundError mid-copy for
+    a hardcoded-mapping template source like templates/wiki.AGENTS.md."""
+    library_root = Path(library_root)
+    templates_dir = library_root / "templates"
+    provided = set()
+
+    # mirrors copy_scripts(): scripts/<name> for every scripts/*.py source
+    # actually present on disk (glob-discovered, same as copy_scripts()).
+    for src in (library_root / "scripts").glob("*.py"):
+        provided.add(f"scripts/{src.name}")
+
+    # mirrors copy_hooks(): .githooks/<name> for every source file present.
+    hooks_dir = library_root / "githooks"
+    if hooks_dir.is_dir():
+        for src in hooks_dir.iterdir():
+            if src.is_file():
+                provided.add(f".githooks/{src.name}")
+
+    # mirrors copy_managed_agents(): out_rel iff its MANAGED_COPY_MAP
+    # template source file still exists.
+    for tmpl_name, out_rel in init_mod.MANAGED_COPY_MAP:
+        if (templates_dir / tmpl_name).is_file():
+            provided.add(out_rel)
+
+    # mirrors render_root_templates()'s own hardcoded root template source
+    # names (AGENTS.root.md.tmpl -> AGENTS.md, README.md.tmpl -> README.md).
+    if (templates_dir / "AGENTS.root.md.tmpl").is_file():
+        provided.add("AGENTS.md")
+    if (templates_dir / "README.md.tmpl").is_file():
+        provided.add("README.md")
+
+    # mirrors seed_claude_stubs()'s own hardcoded template source names
+    # (CLAUDE.root.tmpl -> CLAUDE.md, CLAUDE.nested.tmpl -> every one of
+    # init_mod.CLAUDE_NESTED_PATHS).
+    if (templates_dir / "CLAUDE.root.tmpl").is_file():
+        provided.add("CLAUDE.md")
+    if (templates_dir / "CLAUDE.nested.tmpl").is_file():
+        for rel in init_mod.CLAUDE_NESTED_PATHS:
+            provided.add(rel)
+
+    return provided
+
+
 def copy_target_to_scratch(target):
     """Impure edge (step 8). Copies the target wiki tree -- everything
     except .git -- into a brand-new tempfile.mkdtemp() scratch dir. Every
@@ -658,11 +779,24 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path, allow_downgr
     promote_scratch() (step 11, bare loop, no rollback yet) ->
     write_manifest() to the real target LAST (step 12).
 
+    Right after load_init_module() resolves the target version's own init
+    module and BEFORE copy_target_to_scratch()/overwrite_scratch() ever run
+    (T19, step 7): provided_source_paths() computes the set of managed/
+    template target paths the target version's checkout still has a SOURCE
+    for on disk, removed_managed_paths() checks every OLD-manifest managed/
+    template path against that set, and format_removal_abort() prints the
+    named-path stderr message and aborts (exit 1, real target untouched, no
+    scratch copy even created) if the target version no longer provides one
+    of them -- deliberately BEFORE any scratch copy exists, since
+    overwrite_scratch() itself would otherwise raise an uncaught
+    FileNotFoundError mid-copy for a removed hardcoded-mapping template
+    source (e.g. templates/wiki.AGENTS.md), which build_role_map()'s static
+    entries can never catch (they name a target path unconditionally).
+
     `to` is --to's raw value ('vX.Y.Z'); `library_path` is --library-path
     or None; `allow_downgrade` is --allow-downgrade's flag value. No
-    MAJOR-removal guard and no dry-run/--apply branch here -- those are
-    later tasks' jobs (T19-T20); every caller of this function today always
-    means "write".
+    dry-run/--apply branch here -- that is a later task's job (T20); every
+    caller of this function today always means "write".
 
     When --adopt is passed and the manifest precondition would otherwise
     fail (missing/unparseable/non-object/non-UTF-8), the adoption
@@ -707,11 +841,17 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path, allow_downgr
     library_root = resolve_library_checkout(new_harness_version, library_path)
     init_mod = load_init_module(library_root)
 
+    old_files = manifest.get("files", {})
+    provided = provided_source_paths(init_mod, library_root)          # T19, step 7
+    removed = removed_managed_paths(old_files, provided)
+    if removed:
+        print(format_removal_abort(removed, new_harness_version), file=sys.stderr)
+        return 1
+
     scratch = copy_target_to_scratch(target)
     values = manifest.get("vars", {})
     scripts_paths, hooks_paths = overwrite_scratch(
         init_mod, library_root, scratch, values)
-    old_files = manifest.get("files", {})
     fork_paths = set(adopt_drift_paths) | {
         path for path, entry in old_files.items()
         if entry.get("role") == "instance-fork"}
