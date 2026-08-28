@@ -42,7 +42,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 - [x] T18 — --adopt-drift mechanism, extended for a missing path
 - [x] T19 — MAJOR-removal guard
 - [x] T20 — --apply vs. dry-run split
-- [ ] T21 — Atomic promote via try/except -> git checkout -- . (no marker, no --resume — A3)
+- [x] T21 — Atomic promote via try/except -> git checkout -- . (no marker, no --resume — A3)
 - [ ] T22 — Idempotency fast path
 - [ ] T23 — --commit + auto git checkout -- . on failed post-write self-check
 - [ ] T24 — CLI polish: finalize argparse + exact message strings (no --resume, no --ci)

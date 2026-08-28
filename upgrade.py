@@ -22,10 +22,9 @@ path in the scratch copy by reusing the resolved library checkout's own
 init module (step 9 -- the single source of truth for the library->target
 layout mapping, never duplicated here), compute and write the new manifest
 into the scratch copy (Warchief amendment: step 9 addendum), lint the
-scratch copy (step 10), promote-copy back to the real target with a bare
-loop, excluding the manifest (step 11 -- T21 later wraps this exact loop in
-try/except -> git checkout -- .), and write the new manifest to the real
-target last (step 12).
+scratch copy (step 10), promote-copy back to the real target, excluding the
+manifest (step 11), and write the new manifest to the real target last
+(step 12).
 
 T17 adds the downgrade guard on top of that pipeline: step 2's
 is_downgrade()/format_downgrade_refusal()/format_downgrade_banner() compare
@@ -99,6 +98,22 @@ main() wires this to a new argparse --report flag: --apply routes to the
 write tail, and both no flags at all and --report route to the identical
 read-only report tail -- --report exists only to let an operator say so
 explicitly; it changes nothing about the resulting behaviour.
+
+T21 wraps promote_scratch()'s step-11 copy loop in a SINGLE try/except (v3
+amendment A3: no marker file, no --resume, no --ci flag). On any caught
+Exception, git_checkout_dot() (a thin impure edge) runs `git checkout --
+.` in the real target, reverting every partial write this run made, and
+promote_scratch() returns the pure format_promote_rollback() message
+instead of letting the exception propagate; run_upgrade() prints that
+message to stderr and exits 1 before ever reaching step 12's
+write_manifest() call, so the real target's manifest still records its
+pre-upgrade harness_version. On success promote_scratch() returns None and
+run_upgrade() proceeds to step 12 unchanged. Catches Exception, never
+BaseException, so KeyboardInterrupt/SystemExit still propagate. An
+uncatchable kill (SIGKILL/power loss) can never reach this except clause
+at all -- T16's pre-existing clean-tree precondition is the ENTIRE
+recovery story for that case, catching the resulting dirty tree on the
+NEXT invocation instead.
 
 Pure: is_clean_tree(), managed_template_files(), blocking_drifts(), and
 format_drift_abort() take already-fetched data in and return a
@@ -781,27 +796,69 @@ def run_scratch_lint(scratch):
     return result.returncode == 0, result.stdout + result.stderr
 
 
+def format_promote_rollback(error):
+    """Pure. `error` is the exception promote_scratch()'s except clause
+    caught (any Exception, printed via str()). Returns the exact stderr
+    message run_upgrade() prints before exiting 1 -- byte-for-byte the T21
+    brief's verbatim contract."""
+    return ("promote failed and was rolled back via `git checkout --`: "
+            f"{error}; nothing changed.")
+
+
+def git_checkout_dot(target):
+    """Impure edge (T21). Runs `git checkout -- .` in `target` -- the
+    entire rollback mechanism promote_scratch()'s except clause invokes on
+    any caught exception, discarding every partial write this run made and
+    restoring the pre-upgrade tree, mirroring the module's other thin
+    `git -C <dir> ...` edges (git_status_porcelain(),
+    resolve_library_checkout())."""
+    subprocess.run(["git", "-C", str(target), "checkout", "--", "."],
+                   capture_output=True, text=True)
+
+
 def promote_scratch(scratch, target):
-    """Impure edge (step 11). A BARE copy loop -- no try/except, T21 adds
-    that later so its own brief's monkeypatch-this-loop framing has
-    something concrete to wrap. Copies every file whose bytes differ
-    between the scratch copy and the real target (or that is absent from
-    the real target) from scratch back over the real target -- EXCLUDING
+    """Impure edge (step 11). Copies every file whose bytes differ between
+    the scratch copy and the real target (or that is absent from the real
+    target) from scratch back over the real target -- EXCLUDING
     .wiki-harness-manifest.json (the Warchief amendment: the scratch's
     manifest is never promoted wholesale; step 12 writes the real manifest
-    separately, last)."""
+    separately, last).
+
+    T21: the whole loop is wrapped in a SINGLE try/except. On ANY caught
+    exception -- this real target is a real git work tree by the time this
+    runs (T16's clean-tree precondition already proved that, step 1) -- the
+    partial writes already made this run are reverted via
+    git_checkout_dot() (a real `git checkout -- .`, restoring the
+    pre-upgrade tree exactly), and the formatted rollback message
+    (format_promote_rollback()) is returned to the caller instead of
+    letting the exception propagate, so run_upgrade() can print it to
+    stderr and exit 1 before ever reaching step 12's write_manifest() call.
+    Returns None on success (nothing to report; run_upgrade() proceeds to
+    step 12 unchanged). Catches Exception, never BaseException, so
+    KeyboardInterrupt/SystemExit still propagate uninterrupted.
+
+    An uncatchable kill (SIGKILL/power loss) can never reach this except
+    clause at all -- there is no marker file and no --resume here (v3
+    amendment A3): T16's pre-existing clean-tree precondition is the ENTIRE
+    recovery story for that case, catching the resulting dirty tree on the
+    NEXT invocation instead."""
     scratch = Path(scratch)
     target = Path(target)
-    for src in sorted(scratch.rglob("*")):
-        if not src.is_file():
-            continue
-        rel = src.relative_to(scratch)
-        if rel.as_posix() == MANIFEST_FILENAME:
-            continue
-        dst = target / rel
-        if not dst.is_file() or dst.read_bytes() != src.read_bytes():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(src.read_bytes())
+    try:
+        for src in sorted(scratch.rglob("*")):
+            if not src.is_file():
+                continue
+            rel = src.relative_to(scratch)
+            if rel.as_posix() == MANIFEST_FILENAME:
+                continue
+            dst = target / rel
+            if not dst.is_file() or dst.read_bytes() != src.read_bytes():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(src.read_bytes())
+    except Exception as exc:
+        git_checkout_dot(target)
+        return format_promote_rollback(exc)
+    return None
 
 
 def pending_changes(scratch, target):
@@ -850,10 +907,13 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path,
     -> reconcile_forks() called AGAIN on the MISSING-fork subset (T18:
     deletes each one from the scratch copy only now, after lint has
     already passed, so promote_scratch() never recreates it) -> THEN (T20)
-    the `apply` branch: when True, promote_scratch() (step 11, bare loop,
-    no rollback yet) -> write_manifest() to the real target LAST (step 12);
-    when False, pending_changes()/format_pending_report() instead compute
-    and print the same set of changes promote_scratch() would have made,
+    the `apply` branch: when True, promote_scratch() (step 11, T21: wraps
+    its own copy loop in try/except -> git checkout -- . on failure) ->
+    write_manifest() to the real target LAST (step 12), skipped when
+    promote_scratch() signals a rollback (returns a non-None message
+    instead of None); when False, pending_changes()/format_pending_report()
+    instead compute and print the same set of changes promote_scratch()
+    would have made,
     without ever calling promote_scratch() or write_manifest() against the
     real target. Every step before this final branch -- including the
     scratch copy, its own manifest, and the scratch lint -- is identical
@@ -963,7 +1023,10 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path,
         print(format_pending_report(changed, new_harness_version))
         return 0
 
-    promote_scratch(scratch, target)                                 # step 11
+    rollback_message = promote_scratch(scratch, target)               # step 11
+    if rollback_message is not None:                                 # T21
+        print(rollback_message, file=sys.stderr)
+        return 1
     write_manifest(Path(target) / MANIFEST_FILENAME, new_manifest)    # step 12
     return 0
 

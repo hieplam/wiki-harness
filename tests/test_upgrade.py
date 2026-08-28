@@ -215,6 +215,38 @@ def _release_v1_1_removed_template(v100_root, new_root, removed_template="wiki.A
     return new_root
 
 
+def _release_v1_1_many_changes(v100_root, new_root):
+    """Builds a synthetic v1.1.0 release like _release_v1_1(), but instead
+    of touching a single managed template, appends a benign, lint-clean
+    HTML comment to FIVE managed/template TEMPLATE SOURCES that each map to
+    a distinct managed/template TARGET path (per MANAGED_COPY_MAP/
+    render_root_templates()'s own hardcoded source names) -- so a real
+    apply of this release actually copies 5+ files in promote_scratch()'s
+    loop (T21's test needs several files written before its simulated
+    mid-loop failure, unlike _release_v1_1()'s single-file change)."""
+    shutil.copytree(v100_root, new_root, ignore=shutil.ignore_patterns(".git"))
+    (new_root / "VERSION").write_text("1.1.0\n", encoding="utf-8")
+    changed_sources = (
+        "sources.AGENTS.md",           # -> sources/AGENTS.md
+        "wiki.AGENTS.md",               # -> wiki/AGENTS.md
+        "sources.cards.AGENTS.md",      # -> sources/cards/AGENTS.md
+        "README.md.tmpl",               # -> README.md
+        "AGENTS.root.md.tmpl",          # -> AGENTS.md
+    )
+    for name in changed_sources:
+        tmpl = new_root / "templates" / name
+        tmpl.write_text(
+            tmpl.read_text(encoding="utf-8") + "\n<!-- v1.1.0 change -->\n",
+            encoding="utf-8")
+    _git(new_root, "init", "-q")
+    _git(new_root, "config", "user.email", "hunter@example.com")
+    _git(new_root, "config", "user.name", "Hunter")
+    _git(new_root, "add", "-A")
+    _git(new_root, "commit", "-q", "-m", "library v1.1.0 (many changes)")
+    _git(new_root, "tag", "v1.1.0")
+    return new_root
+
+
 INIT_ANSWERS = {
     "wiki_title": "Test Wiki",
     "org_name": "Test Org",
@@ -1108,6 +1140,155 @@ class TestDryRunSplit(unittest.TestCase):
                 exit_code = upgrade.main(argv + ["--apply"])
             self.assertEqual(exit_code, 0)
             spy.assert_called_once()
+
+
+class TestAtomicPromote(unittest.TestCase):
+    """T21: promote_scratch()'s existing bare copy loop (T16B) is wrapped
+    in a SINGLE try/except -- any exception mid-loop triggers `git checkout
+    -- .` in the real target (reverting every partial write this run made)
+    and the whole pipeline exits 1 with the verbatim rollback message,
+    rather than propagating a traceback or leaving the real target
+    half-written. An uncatchable kill (SIGKILL/power loss) is NOT covered
+    by this try/except at all -- T16's pre-existing clean-tree precondition
+    is the entire recovery story for that case, catching the resulting
+    dirty tree on the NEXT invocation."""
+
+    def test_promote_exception_triggers_full_rollback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            _edit_seeded_file_and_commit(target)
+            seeded_content = (target / "VISION.md").read_bytes()
+            v110 = _release_v1_1_many_changes(v100, tmp / "lib-v1.1.0-many")
+
+            # Confirm this release genuinely changes >=5 managed/template
+            # paths -- so promote_scratch()'s loop actually copies several
+            # files before our simulated mid-loop failure below.
+            probe_scratch = upgrade.copy_target_to_scratch(target)
+            probe_init_mod = upgrade.load_init_module(v110)
+            old_manifest = json.loads(
+                (target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            upgrade.overwrite_scratch(
+                probe_init_mod, v110, probe_scratch, old_manifest["vars"])
+            pending = upgrade.pending_changes(probe_scratch, target)
+            self.assertGreaterEqual(
+                len(pending), 5,
+                f"fixture must change >=5 managed/template paths, got {pending}")
+            shutil.rmtree(probe_scratch.parent)
+
+            before_manifest = (target / MANIFEST_FILENAME).read_bytes()
+
+            # Simulate promote_scratch() dying partway through its loop:
+            # let the first N real writes into the target land, then raise
+            # on the next one. `git checkout -- .` (the except handler)
+            # uses subprocess, never Path.write_bytes, so the revert below
+            # still works even while this patch is active.
+            real_write_bytes = Path.write_bytes
+            target_str = str(target)
+            call_count = {"n": 0}
+            raise_after = 2
+
+            def counting_write_bytes(self_path, data):
+                if str(self_path).startswith(target_str):
+                    call_count["n"] += 1
+                    if call_count["n"] > raise_after:
+                        raise RuntimeError("simulated promote failure")
+                return real_write_bytes(self_path, data)
+
+            stderr = io.StringIO()
+            with patch.object(Path, "write_bytes", counting_write_bytes), \
+                 contextlib.redirect_stderr(stderr):
+                exit_code = upgrade.run_upgrade(
+                    target, False, [], "v1.1.0", str(v110), False)
+
+            # Proves the raise actually happened mid-loop, not before the
+            # loop started or after it already finished.
+            self.assertGreater(call_count["n"], raise_after)
+
+            self.assertEqual(exit_code, 1)
+
+            status = _git(target, "status", "--porcelain").stdout
+            self.assertEqual(
+                status.strip(), "",
+                f"git checkout -- . must fully revert every partial write; "
+                f"status was: {status!r}")
+
+            # Every SEEDED edit is untouched (git checkout -- . reverts
+            # only tracked-and-modified content, which is exactly this).
+            self.assertEqual((target / "VISION.md").read_bytes(), seeded_content)
+
+            after_manifest = (target / MANIFEST_FILENAME).read_bytes()
+            self.assertEqual(after_manifest, before_manifest)
+            self.assertIn(b'"harness_version": "1.0.0"', after_manifest)
+
+            err = stderr.getvalue()
+            self.assertIn(
+                "promote failed and was rolled back via `git checkout --`:",
+                err)
+            self.assertIn("; nothing changed.", err)
+            self.assertIn("simulated promote failure", err)
+            self.assertNotIn("Traceback", err)
+
+    def test_uncatchable_kill_caught_by_clean_tree_precondition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            _edit_seeded_file_and_commit(target)
+            v110 = _release_v1_1_many_changes(v100, tmp / "lib-v1.1.0-many")
+
+            # Simulate an UNCATCHABLE kill (SIGKILL/power loss): write N of
+            # M managed files DIRECTLY into the target, bypassing upgrade
+            # entirely and never committing -- leaving a dirty, partially-
+            # promoted tree, exactly what a real kill mid-promote would
+            # leave behind.
+            killed_paths = ("wiki/AGENTS.md", "sources/AGENTS.md")
+            pre_kill = {p: (target / p).read_bytes() for p in killed_paths}
+
+            probe_scratch = upgrade.copy_target_to_scratch(target)
+            probe_init_mod = upgrade.load_init_module(v110)
+            old_manifest = json.loads(
+                (target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            upgrade.overwrite_scratch(
+                probe_init_mod, v110, probe_scratch, old_manifest["vars"])
+            for p in killed_paths:
+                (target / p).write_bytes((probe_scratch / p).read_bytes())
+            shutil.rmtree(probe_scratch.parent)
+
+            # A plain (no --apply) upgrade refuses at the EXISTING
+            # clean-tree precondition -- T16's clean-tree gate is the
+            # entire recovery story for an uncatchable kill; there is no
+            # marker file and nothing special happens here.
+            result = _run_upgrade(target, "--to", "v1.1.0",
+                                  "--library-path", str(v110))
+            combined = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 2, combined)
+            self.assertIn(upgrade.DIRTY_TREE_MESSAGE, combined)
+            self.assertIn(
+                "run `git checkout -- .` to discard the partial write",
+                combined)
+            self.assertNotIn("Traceback", combined)
+
+            # The operator follows the message's own named remedy, by hand.
+            checkout_result = _git(target, "checkout", "--", ".")
+            self.assertEqual(checkout_result.returncode, 0, checkout_result.stderr)
+            status = _git(target, "status", "--porcelain").stdout
+            self.assertEqual(status.strip(), "", status)
+            for p, before_bytes in pre_kill.items():
+                self.assertEqual((target / p).read_bytes(), before_bytes)
+
+            # A fresh --apply now completes normally.
+            apply_result = _run_upgrade(target, "--to", "v1.1.0", "--apply",
+                                        "--library-path", str(v110))
+            self.assertEqual(
+                apply_result.returncode, 0,
+                apply_result.stdout + apply_result.stderr)
+            manifest = json.loads(
+                (target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["harness_version"], "1.1.0")
 
 
 if __name__ == "__main__":
