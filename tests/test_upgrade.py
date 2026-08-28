@@ -1291,5 +1291,71 @@ class TestAtomicPromote(unittest.TestCase):
             self.assertEqual(manifest["harness_version"], "1.1.0")
 
 
+class TestIdempotencyFastPath(unittest.TestCase):
+    """T22: re-running upgrade --to <the currently-installed version> on a
+    wiki whose managed/template content already matches that version's
+    canonical hashes byte-for-byte must print "already at vX.Y.Z", exit 0,
+    and write NOTHING to the real target -- not even the scratch-computed
+    manifest -- since promote_scratch()/write_manifest() must never even be
+    reached."""
+
+    def test_already_current_is_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            # init already commits the scaffold, so the tree is clean here.
+            status = _git(target, "status", "--porcelain").stdout
+            self.assertEqual(status.strip(), "", status)
+
+            before = _tree_snapshot(target)
+            result = _run_upgrade(target, "--to", "v1.0.0", "--apply",
+                                  "--library-path", str(v100))
+            after = _tree_snapshot(target)
+
+            self.assertEqual(
+                result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("already at v1.0.0", result.stdout)
+            self.assertEqual(
+                after, before,
+                "an already-current upgrade must write NOTHING to the "
+                "real target")
+
+    def test_already_current_never_reaches_promote_or_write_manifest(self):
+        """In-process spy proof, mirroring
+        test_apply_flag_routes_to_existing_pipeline: the fast path must
+        return before promote_scratch() is EVER called (it is only reached
+        past the `apply` branch, which the fast path returns before) --
+        and write_manifest() must never be called against the REAL
+        target's own manifest path, even with --apply. write_manifest() IS
+        still called once against the SCRATCH copy's manifest path -- the
+        pre-existing, unconditional step-9-addendum write that is part of
+        the shared spine EVERY run performs before this fast path's check
+        point (right after reconcile_forks()'s missing-fork call); that
+        scratch write is not a write to the real target."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+
+            with patch.object(upgrade, "promote_scratch",
+                              wraps=upgrade.promote_scratch) as promote_spy, \
+                 patch.object(upgrade, "write_manifest",
+                              wraps=upgrade.write_manifest) as write_spy:
+                exit_code = upgrade.run_upgrade(
+                    target, False, [], "v1.0.0", str(v100), False, apply=True)
+
+            self.assertEqual(exit_code, 0)
+            promote_spy.assert_not_called()
+            real_target_manifest = target / MANIFEST_FILENAME
+            write_calls = [call.args[0] for call in write_spy.call_args_list]
+            self.assertNotIn(
+                real_target_manifest, write_calls,
+                "write_manifest() must never be called against the real "
+                f"target's manifest path; calls were: {write_calls}")
+
+
 if __name__ == "__main__":
     unittest.main()
