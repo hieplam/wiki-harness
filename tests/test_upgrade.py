@@ -1523,5 +1523,74 @@ class TestCommitFlag(unittest.TestCase):
                 "apply wrote, not just restore already-tracked paths")
 
 
+class TestCliPolish(unittest.TestCase):
+    """T24: finalize upgrade.py's full argparse surface -- every flag
+    plan-v3 section 3.2 documents must parse via the module's real
+    parse_args() entry point, and every v3-removed flag (--resume,
+    --force-clear-marker (A3), --ci (A4), --fix, --force) must be rejected
+    by argparse as unrecognized (SystemExit(2)), never silently accepted."""
+
+    def test_full_argparse_surface_matches_spec(self):
+        args = upgrade.parse_args([
+            "target",
+            "--to", "v1.2.3",
+            "--library-path", "/some/library",
+            "--apply",
+            "--report",
+            "--adopt-drift", "wiki/AGENTS.md",
+            "--adopt-drift", "wiki/README.md",
+            "--allow-downgrade",
+            "--commit",
+            "--adopt",
+            "--wiki-title", "My Wiki",
+            "--org-name", "My Org",
+            "--content-language", "en",
+            "--repo-name", "my-repo",
+            "--check",
+        ])
+        self.assertEqual(args.target, "target")
+        self.assertEqual(args.to, "v1.2.3")
+        self.assertEqual(args.library_path, "/some/library")
+        self.assertTrue(args.apply)
+        self.assertTrue(args.report)
+        self.assertEqual(args.adopt_drift, ["wiki/AGENTS.md", "wiki/README.md"])
+        self.assertTrue(args.allow_downgrade)
+        self.assertTrue(args.commit)
+        self.assertTrue(args.adopt)
+        self.assertEqual(args.wiki_title, "My Wiki")
+        self.assertEqual(args.org_name, "My Org")
+        self.assertEqual(args.content_language, "en")
+        self.assertEqual(args.repo_name, "my-repo")
+        self.assertTrue(args.check)
+
+        # --adopt-drift is repeatable and defaults to an empty list when
+        # never passed at all (run_upgrade()'s callers rely on this).
+        bare = upgrade.parse_args(["target"])
+        self.assertEqual(bare.adopt_drift, [])
+
+        # v3 removals (A3, A4): each must be rejected as unrecognized.
+        for removed_flag in (
+                "--resume", "--force-clear-marker", "--ci", "--fix", "--force"):
+            with self.subTest(flag=removed_flag), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    upgrade.parse_args(["target", removed_flag])
+                self.assertEqual(ctx.exception.code, 2)
+
+    def test_every_message_string_matches_spec_verbatim(self):
+        self.assertEqual(
+            upgrade.DIRTY_TREE_MESSAGE,
+            "commit or stash local changes before running upgrade -- if "
+            "this follows an interrupted `upgrade --apply`, run `git "
+            "checkout -- .` to discard the partial write and restore the "
+            "pre-upgrade tree.")
+
+        self.assertEqual(
+            upgrade.format_downgrade_refusal("1.2.3", "1.5.0"),
+            "`--to v1.2.3` is older than the installed v1.5.0; downgrade "
+            "is not supported -- pass `--allow-downgrade` if you "
+            "specifically intend this.")
+
+
 if __name__ == "__main__":
     unittest.main()
