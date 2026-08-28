@@ -1024,5 +1024,91 @@ class TestMajorRemovalGuard(unittest.TestCase):
             self.assertNotIn("fetched", combined)
 
 
+class TestDryRunSplit(unittest.TestCase):
+    """T20: no flags / --report is UNCONDITIONALLY non-mutating, and
+    computes+prints the same pending-change report the --apply path would
+    act on; only --apply reaches the write pipeline T16B already built and
+    proved. This closes v2's own "single biggest self-contradiction" -- a
+    bare upgrade invocation (the ordinary, most common case) must NEVER
+    write to the real target, full stop, even when there's a legitimate
+    pending change to report."""
+
+    def test_no_flags_writes_nothing_even_with_pending_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            _edit_seeded_file_and_commit(target)
+            # A genuine pending managed-file change at the target version:
+            # templates/wiki.AGENTS.md -> wiki/AGENTS.md (_release_v1_1's
+            # own deliberate change).
+            v110 = _release_v1_1(v100, tmp / "lib-v1.1.0")
+
+            before = _tree_snapshot(target)
+            result = _run_upgrade(target, "--to", "v1.1.0",
+                                  "--library-path", str(v110))
+            after = _tree_snapshot(target)
+            combined = result.stdout + result.stderr
+
+            self.assertEqual(result.returncode, 0, combined)
+            self.assertIn("wiki/AGENTS.md", combined)
+            self.assertEqual(
+                after, before,
+                "a bare `upgrade --to ...` with no flags must NEVER write "
+                "to the real target, even when there is a legitimate "
+                "pending change to report")
+
+    def test_report_flag_identical_to_no_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            _edit_seeded_file_and_commit(target)
+            v110 = _release_v1_1(v100, tmp / "lib-v1.1.0")
+
+            before = _tree_snapshot(target)
+            no_flags_result = _run_upgrade(target, "--to", "v1.1.0",
+                                           "--library-path", str(v110))
+            after_no_flags = _tree_snapshot(target)
+            report_result = _run_upgrade(target, "--to", "v1.1.0",
+                                         "--library-path", str(v110), "--report")
+            after_report = _tree_snapshot(target)
+
+            self.assertEqual(report_result.returncode, no_flags_result.returncode)
+            self.assertEqual(report_result.stdout, no_flags_result.stdout)
+            self.assertEqual(after_no_flags, before)
+            self.assertEqual(after_report, before)
+
+    def test_apply_flag_routes_to_existing_pipeline(self):
+        """Spies on promote_scratch -- the write path calls it, the
+        dry-run path must not -- in-process, since monkeypatching cannot
+        reach a subprocess. Does NOT re-verify on-disk writes; that
+        full-pipeline proof already exists in T16B's own
+        test_apply_completes_and_updates_every_managed_template_path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            _edit_seeded_file_and_commit(target)
+            v110 = _release_v1_1(v100, tmp / "lib-v1.1.0")
+
+            argv = [str(target), "--to", "v1.1.0", "--library-path", str(v110)]
+
+            with patch.object(upgrade, "promote_scratch",
+                              wraps=upgrade.promote_scratch) as spy:
+                exit_code = upgrade.main(argv)
+            self.assertEqual(exit_code, 0)
+            spy.assert_not_called()
+
+            with patch.object(upgrade, "promote_scratch",
+                              wraps=upgrade.promote_scratch) as spy:
+                exit_code = upgrade.main(argv + ["--apply"])
+            self.assertEqual(exit_code, 0)
+            spy.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

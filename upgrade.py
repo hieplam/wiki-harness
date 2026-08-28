@@ -75,6 +75,31 @@ copy is even created or anything is written to the real target. This is a
 cheap fail-loud guard only -- the full removal mechanism, a role:
 "removed" manifest value actually used, is deferred (Not-now item 13).
 
+T20 adds the --apply vs. dry-run split on top of that pipeline: run_upgrade()
+now takes an `apply` parameter (defaulting to True, so every existing direct
+call -- and every caller before this task -- keeps its unconditional write
+behaviour unchanged). Every step through the missing-fork reconcile_forks()
+call (resolve, the MAJOR-removal guard, the scratch copy, overwrite,
+present-fork reconcile, compute+write the new manifest INTO THE SCRATCH copy
+only, run_scratch_lint(), missing-fork reconcile) stays identical and fully
+shared between both paths -- none of it writes to the real target; the
+scratch is a disposable tempfile.mkdtemp() tree and lint only reads. Only
+after that shared spine does run_upgrade() branch: when `apply` is True, the
+unchanged T16B/T18 tail runs -- promote_scratch() (step 11) then
+write_manifest() to the real target (step 12). When `apply` is False, the
+new impure edge pending_changes() (read-only: compares scratch bytes against
+the real target's own bytes, mirroring promote_scratch()'s own diff logic
+without ever writing) computes exactly the paths promote_scratch() WOULD
+copy, the new pure format_pending_report() turns that list into the plain
+stdout report, and run_upgrade() returns 0 WITHOUT ever calling
+promote_scratch() or write_manifest() against the real target -- closing v2's
+own "single biggest self-contradiction": a bare `upgrade --to ...` (no
+flags), the single most common invocation, must never silently write.
+main() wires this to a new argparse --report flag: --apply routes to the
+write tail, and both no flags at all and --report route to the identical
+read-only report tail -- --report exists only to let an operator say so
+explicitly; it changes nothing about the resulting behaviour.
+
 Pure: is_clean_tree(), managed_template_files(), blocking_drifts(), and
 format_drift_abort() take already-fetched data in and return a
 predicate/dict/list/string out -- none of them run git, touch the clock, or
@@ -386,6 +411,28 @@ def format_removal_abort(removed, harness_version):
     ]
     for path in removed:
         lines.append(f"  {path}: no longer provided by v{harness_version}.")
+    return "\n".join(lines)
+
+
+def format_pending_report(paths, harness_version):
+    """Pure. `paths` is pending_changes()'s output (a sorted list of
+    relative path strings promote_scratch() would copy over the real
+    target); `harness_version` is --to's parsed bare 'X.Y.Z' target
+    version string. Returns the plain, honest dry-run report run_upgrade()
+    prints to stdout when `apply` is False -- one line naming this is a
+    dry run with nothing written, one line per pending path (or an
+    explicit "nothing to do" line when `paths` is empty), and a closing
+    reminder that --apply is required to actually write anything."""
+    lines = [
+        f"upgrade: dry run against v{harness_version} -- no files written.",
+    ]
+    if paths:
+        lines.append("The following managed/template path(s) would change:")
+        for path in paths:
+            lines.append(f"  {path}")
+    else:
+        lines.append("No managed/template paths would change.")
+    lines.append("Pass --apply to write these changes.")
     return "\n".join(lines)
 
 
@@ -757,7 +804,34 @@ def promote_scratch(scratch, target):
             dst.write_bytes(src.read_bytes())
 
 
-def run_upgrade(target, adopt, adopt_drift_paths, to, library_path, allow_downgrade):
+def pending_changes(scratch, target):
+    """Impure edge (T20). Read-only with respect to the real `target` --
+    mirrors promote_scratch()'s own diff logic exactly, but only READS
+    both trees, never writes either: computes the sorted list of relative
+    paths under `scratch` whose bytes differ from the real `target` (or
+    that are absent from it), EXCLUDING .wiki-harness-manifest.json (same
+    exclusion promote_scratch() applies -- the dry-run report never claims
+    the manifest bookkeeping file itself as a "pending change"; nothing an
+    operator asked about). This is exactly the file set promote_scratch()
+    WOULD copy if `apply` were True -- the dry-run report and the real
+    write path can never silently diverge on what counts as "pending"."""
+    scratch = Path(scratch)
+    target = Path(target)
+    changed = []
+    for src in sorted(scratch.rglob("*")):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(scratch)
+        if rel.as_posix() == MANIFEST_FILENAME:
+            continue
+        dst = target / rel
+        if not dst.is_file() or dst.read_bytes() != src.read_bytes():
+            changed.append(rel.as_posix())
+    return changed
+
+
+def run_upgrade(target, adopt, adopt_drift_paths, to, library_path,
+                allow_downgrade, apply=True):
     """Impure edge: the orchestrator for every ordered step 3.2 gate this
     task implements. Wires git_status_porcelain() -> is_clean_tree()
     (precondition 1, exit 2) -> read_manifest_for_upgrade() (precondition
@@ -775,9 +849,16 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path, allow_downgr
     run_scratch_lint() (step 10, exit 1 on failure, real target untouched)
     -> reconcile_forks() called AGAIN on the MISSING-fork subset (T18:
     deletes each one from the scratch copy only now, after lint has
-    already passed, so promote_scratch() never recreates it) ->
-    promote_scratch() (step 11, bare loop, no rollback yet) ->
-    write_manifest() to the real target LAST (step 12).
+    already passed, so promote_scratch() never recreates it) -> THEN (T20)
+    the `apply` branch: when True, promote_scratch() (step 11, bare loop,
+    no rollback yet) -> write_manifest() to the real target LAST (step 12);
+    when False, pending_changes()/format_pending_report() instead compute
+    and print the same set of changes promote_scratch() would have made,
+    without ever calling promote_scratch() or write_manifest() against the
+    real target. Every step before this final branch -- including the
+    scratch copy, its own manifest, and the scratch lint -- is identical
+    and fully shared between both paths; none of it writes to the real
+    target either way.
 
     Right after load_init_module() resolves the target version's own init
     module and BEFORE copy_target_to_scratch()/overwrite_scratch() ever run
@@ -794,9 +875,10 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path, allow_downgr
     entries can never catch (they name a target path unconditionally).
 
     `to` is --to's raw value ('vX.Y.Z'); `library_path` is --library-path
-    or None; `allow_downgrade` is --allow-downgrade's flag value. No
-    dry-run/--apply branch here -- that is a later task's job (T20); every
-    caller of this function today always means "write".
+    or None; `allow_downgrade` is --allow-downgrade's flag value; `apply`
+    (T20) is --apply's flag value, defaulting to True so every direct call
+    that predates this parameter -- including the ones in this module's own
+    test suite -- keeps meaning "write" unchanged.
 
     When --adopt is passed and the manifest precondition would otherwise
     fail (missing/unparseable/non-object/non-UTF-8), the adoption
@@ -875,6 +957,12 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path, allow_downgr
         return 1
 
     reconcile_forks(scratch, target, missing_forks)                  # T18, after lint
+
+    if not apply:                                                    # T20
+        changed = pending_changes(scratch, target)
+        print(format_pending_report(changed, new_harness_version))
+        return 0
+
     promote_scratch(scratch, target)                                 # step 11
     write_manifest(Path(target) / MANIFEST_FILENAME, new_manifest)    # step 12
     return 0
@@ -886,6 +974,7 @@ def parse_args(argv):
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--to")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--report", action="store_true")
     parser.add_argument("--adopt", action="store_true")
     parser.add_argument("--adopt-drift", action="append", default=[])
     parser.add_argument("--library-path")
@@ -900,7 +989,8 @@ def main(argv):
         # branch, before any of the ordered steps in plan-v3 section 3.2.
         return run_check(Path(args.target))
     return run_upgrade(Path(args.target), args.adopt, args.adopt_drift,
-                       args.to, args.library_path, args.allow_downgrade)
+                       args.to, args.library_path, args.allow_downgrade,
+                       args.apply)
 
 
 if __name__ == "__main__":
