@@ -46,7 +46,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 - [x] T22 — Idempotency fast path
 - [x] T23 — --commit + auto git checkout -- . on failed post-write self-check
 - [x] T24 — CLI polish: finalize argparse + exact message strings (no --resume, no --ci)
-- [ ] T25 — Write docs/compatibility-policy.md (no CI-is-sole-backstop framing — A4)
+- [x] T25 — Write docs/compatibility-policy.md (no CI-is-sole-backstop framing — A4)
 
 ## P4 — Migrate ogp-wiki
 
