@@ -270,17 +270,36 @@ def _release_v1_1_bad_hook(v100_root, new_root):
     work tree with core.hooksPath already set to .githooks by init) does
     the divergence become observable: a real `git commit` in the target
     now gets rejected by a hook that step 10's lint could never have
-    caught, since it never runs through the hook subprocess path at all."""
+    caught, since it never runs through the hook subprocess path at all.
+
+    ALSO adds a brand-new scripts/newthing.py source alongside the existing
+    scripts/*.py sources. copy_scripts() (init.py) discovers scripts/*.py
+    purely by glob, so this becomes a NEW managed target path
+    (scripts/newthing.py) that promote_scratch() writes to the real target
+    as a previously-untracked file -- exercising the rollback's untracked-
+    new-file case: a plain `git reset` (unstage) + `git checkout -- .`
+    (restore tracked paths only) can never remove a file git never tracked
+    in the first place, so a rollback that omits `git clean -fd` would
+    leave this file behind and the tree dirty. Lint-clean, valid Python, so
+    the divergence this fixture exercises comes only from the bad hook,
+    never from step 10's scratch lint."""
     shutil.copytree(v100_root, new_root, ignore=shutil.ignore_patterns(".git"))
     (new_root / "VERSION").write_text("1.1.0\n", encoding="utf-8")
     (new_root / "githooks" / "pre-commit").write_text(
         "#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (new_root / "scripts" / "newthing.py").write_text(
+        '#!/usr/bin/env python3\n'
+        '"""A brand-new managed script shipped starting in v1.1.0 (test '
+        'fixture only)."""\n'
+        'from __future__ import annotations\n',
+        encoding="utf-8")
     _git(new_root, "init", "-q")
     _git(new_root, "config", "user.email", "hunter@example.com")
     _git(new_root, "config", "user.name", "Hunter")
     _git(new_root, "add", "-A")
     _git(new_root, "commit", "-q", "-m",
-        "library v1.1.0 (pre-commit hook diverges from scripts/lint.py)")
+        "library v1.1.0 (pre-commit hook diverges from scripts/lint.py; "
+        "adds scripts/newthing.py)")
     _git(new_root, "tag", "v1.1.0")
     return new_root
 
@@ -1492,6 +1511,16 @@ class TestCommitFlag(unittest.TestCase):
             self.assertEqual(
                 after, before,
                 "the tree must be fully restored to its pre-upgrade state")
+
+            # A brand-new managed path the target release introduced
+            # (scripts/newthing.py, written by promote_scratch() as a
+            # previously-untracked file) must not survive the rollback --
+            # `git reset` + `git checkout -- .` alone only restore paths
+            # git already TRACKS and can never remove one it never tracked.
+            self.assertFalse(
+                (target / "scripts" / "newthing.py").exists(),
+                "rollback must remove a new untracked file the aborted "
+                "apply wrote, not just restore already-tracked paths")
 
 
 if __name__ == "__main__":

@@ -143,9 +143,18 @@ undoing git_add_all()'s staging) followed by the existing git_checkout_dot()
 (T21) fully restores the pre-upgrade tree -- `git checkout -- .` alone
 reads from the INDEX, so without first resetting it back to HEAD it would
 just copy the still-staged NEW content right back onto the working tree,
-a no-op rollback -- and run_upgrade() prints the pure
-format_commit_rejected_rollback() message and exits 1. `commit` defaults
-to False so every existing direct call keeps its unchanged behaviour.
+a no-op rollback -- then git_clean_untracked() (`git clean -fd`) removes
+any untracked file/dir the aborted apply left behind: git_reset_index()
+and git_checkout_dot() together only restore paths git already TRACKS, so
+a NEW managed path the target release introduces (e.g. a brand-new
+scripts/*.py source promote_scratch() wrote as a previously-untracked
+file) survives both and would otherwise leave a dirty tree -- safe
+because step 1's clean-tree precondition already proved the tree was
+fully clean before this run's apply began, so any untracked file present
+at rollback time can only be this run's own write -- and run_upgrade()
+prints the pure format_commit_rejected_rollback() message and exits 1.
+`commit` defaults to False so every existing direct call keeps its
+unchanged behaviour.
 
 Pure: is_clean_tree(), managed_template_files(), blocking_drifts(), and
 format_drift_abort() take already-fetched data in and return a
@@ -891,6 +900,21 @@ def git_reset_index(target):
                    capture_output=True, text=True)
 
 
+def git_clean_untracked(target):
+    """Impure edge (T23). Runs `git clean -fd` in `target` -- removes every
+    untracked file and directory the aborted apply left behind. Needed in
+    the rollback AFTER git_reset_index() + git_checkout_dot(): those two
+    only restore paths git already TRACKS, so a NEW managed path the target
+    release introduced (e.g. a brand-new scripts/*.py the new library
+    ships) that promote_scratch() wrote as a previously-untracked file
+    survives both and leaves a dirty tree. Safe because step 1's
+    clean-tree precondition proved the working tree was fully clean before
+    the apply began: any untracked file present now can only be the
+    aborted apply's own write."""
+    subprocess.run(["git", "-C", str(target), "clean", "-fd"],
+                   capture_output=True, text=True)
+
+
 def git_add_all(target):
     """Impure edge (T23, step 13). Runs `git add -A` in `target` -- stages
     every promoted change (step 11's promote_scratch() writes and step
@@ -1146,6 +1170,7 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path,
         if not commit_ok:
             git_reset_index(target)
             git_checkout_dot(target)
+            git_clean_untracked(target)
             print(format_commit_rejected_rollback(commit_output), file=sys.stderr)
             return 1
     return 0
