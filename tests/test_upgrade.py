@@ -255,6 +255,36 @@ INIT_ANSWERS = {
 }
 
 
+def _release_v1_1_bad_hook(v100_root, new_root):
+    """Builds a synthetic v1.1.0 release like _release_v1_1(), but engineers
+    a lint-vs-hook DIVERGENCE (T23's defense-in-depth case) instead of a
+    managed-template content change: this release's own
+    githooks/pre-commit is replaced with a hook that unconditionally exits
+    non-zero, while scripts/lint.py -- the exact program step 10's scratch
+    lint runs -- is left byte-for-byte unmodified and still exits 0. The
+    scratch copy step 10 lints is never a git work tree at all (it is a
+    bare tempfile.mkdtemp() tree with no .git), so lint.py's own
+    hooks_finding() check is skipped there regardless -- step 10 stays
+    green. Only once copy_hooks() promotes this broken pre-commit verbatim
+    into the REAL target's own .githooks/pre-commit (which IS a live git
+    work tree with core.hooksPath already set to .githooks by init) does
+    the divergence become observable: a real `git commit` in the target
+    now gets rejected by a hook that step 10's lint could never have
+    caught, since it never runs through the hook subprocess path at all."""
+    shutil.copytree(v100_root, new_root, ignore=shutil.ignore_patterns(".git"))
+    (new_root / "VERSION").write_text("1.1.0\n", encoding="utf-8")
+    (new_root / "githooks" / "pre-commit").write_text(
+        "#!/bin/sh\nexit 1\n", encoding="utf-8")
+    _git(new_root, "init", "-q")
+    _git(new_root, "config", "user.email", "hunter@example.com")
+    _git(new_root, "config", "user.name", "Hunter")
+    _git(new_root, "add", "-A")
+    _git(new_root, "commit", "-q", "-m",
+        "library v1.1.0 (pre-commit hook diverges from scripts/lint.py)")
+    _git(new_root, "tag", "v1.1.0")
+    return new_root
+
+
 def _run_init(library_root, target, answers=INIT_ANSWERS):
     args = [sys.executable, str(library_root / "init.py"), str(target),
             "--non-interactive"]
@@ -1355,6 +1385,113 @@ class TestIdempotencyFastPath(unittest.TestCase):
                 real_target_manifest, write_calls,
                 "write_manifest() must never be called against the real "
                 f"target's manifest path; calls were: {write_calls}")
+
+
+class TestCommitFlag(unittest.TestCase):
+    """T23: --commit stages and commits the promoted changes through a
+    real `git commit` subprocess, exercising the target's real
+    .githooks/* hooks (already wired up by init.py's core.hooksPath). If
+    that real commit is rejected by a hook (a defense-in-depth case that
+    should not happen, since step 10 already lint-checked the scratch
+    copy, but covers a hook/lint divergence bug), the pipeline
+    automatically restores the pre-upgrade tree via `git checkout -- .`
+    and exits 1 -- never leaving a dirty, half-applied, or half-staged
+    tree as the outcome of a failed self-check."""
+
+    def test_commit_flag_commits_through_real_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            _edit_seeded_file_and_commit(target)
+            seeded_content = (target / "VISION.md").read_bytes()
+            head_before = _git(target, "rev-parse", "HEAD").stdout.strip()
+
+            hooks_path = _git(target, "config", "--get", "core.hooksPath").stdout.strip()
+            self.assertEqual(hooks_path, ".githooks")
+
+            v110 = _release_v1_1(v100, tmp / "lib-v1.1.0")
+
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply", "--commit",
+                                  "--library-path", str(v110))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(
+                "chore: upgrade wiki-harness v1.0.0 -> v1.1.0", result.stdout)
+
+            # Exactly ONE new commit landed on top of the pre-upgrade HEAD.
+            head_after = _git(target, "rev-parse", "HEAD").stdout.strip()
+            self.assertNotEqual(head_after, head_before)
+            parent = _git(target, "rev-parse", "HEAD^").stdout.strip()
+            self.assertEqual(parent, head_before)
+
+            subject = _git(target, "log", "-1", "--format=%s").stdout.strip()
+            self.assertEqual(
+                subject, "chore: upgrade wiki-harness v1.0.0 -> v1.1.0")
+
+            # The working tree is clean (the commit captured every change)
+            # and it now matches v1.1.0 -- which only happens if the real
+            # .githooks/pre-commit hook (running scripts/lint.py against
+            # the real target) actually ran and passed, since --commit
+            # never passes --no-verify.
+            status = _git(target, "status", "--porcelain").stdout
+            self.assertEqual(status.strip(), "", status)
+            self.assertIn(
+                "<!-- v1.1.0 managed-file change -->",
+                (target / "wiki" / "AGENTS.md").read_text(encoding="utf-8"))
+            self.assertEqual((target / "VISION.md").read_bytes(), seeded_content)
+
+            manifest = json.loads(
+                (target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["harness_version"], "1.1.0")
+
+    def test_failed_post_write_selfcheck_auto_rolls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            _edit_seeded_file_and_commit(target)
+            head_before = _git(target, "rev-parse", "HEAD").stdout.strip()
+            # .git/ internal plumbing (index, ORIG_HEAD, logs/...) is
+            # expected to churn as part of `git add`/`git reset`/
+            # `git checkout` -- even a fully correct rollback leaves those
+            # touched. What must be byte-identical is the WORKING TREE:
+            # every managed/template file, the manifest, and the seeded
+            # edit.
+            before = {p: h for p, h in _tree_snapshot(target).items()
+                      if not p.startswith(".git/")}
+
+            v110_bad_hook = _release_v1_1_bad_hook(v100, tmp / "lib-v1.1.0-badhook")
+
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply", "--commit",
+                                  "--library-path", str(v110_bad_hook))
+            combined = result.stdout + result.stderr
+
+            self.assertEqual(result.returncode, 1, combined)
+            self.assertNotIn("Traceback", combined)
+
+            # No new commit was created.
+            head_after = _git(target, "rev-parse", "HEAD").stdout.strip()
+            self.assertEqual(head_after, head_before)
+
+            # The working tree is fully clean again ...
+            status = _git(target, "status", "--porcelain").stdout
+            self.assertEqual(
+                status.strip(), "",
+                f"auto-rollback must leave a fully clean tree; status was: {status!r}")
+
+            # ... and every managed/template file AND the manifest are
+            # byte-identical to their pre-upgrade state -- proves the
+            # rollback did more than `git checkout -- .` alone would have
+            # (the index was staged via `git add -A` first, so a bare
+            # `git checkout -- .` would just copy the staged NEW content
+            # right back).
+            after = {p: h for p, h in _tree_snapshot(target).items()
+                     if not p.startswith(".git/")}
+            self.assertEqual(
+                after, before,
+                "the tree must be fully restored to its pre-upgrade state")
 
 
 if __name__ == "__main__":

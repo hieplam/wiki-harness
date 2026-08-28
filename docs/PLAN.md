@@ -44,7 +44,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 - [x] T20 — --apply vs. dry-run split
 - [x] T21 — Atomic promote via try/except -> git checkout -- . (no marker, no --resume — A3)
 - [x] T22 — Idempotency fast path
-- [ ] T23 — --commit + auto git checkout -- . on failed post-write self-check
+- [x] T23 — --commit + auto git checkout -- . on failed post-write self-check
 - [ ] T24 — CLI polish: finalize argparse + exact message strings (no --resume, no --ci)
 - [ ] T25 — Write docs/compatibility-policy.md (no CI-is-sole-backstop framing — A4)
 

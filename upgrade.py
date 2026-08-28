@@ -128,6 +128,25 @@ write_manifest() against the real target is ever reached on either the
 empty dry-run report. The already-computed `changed` is reused (never
 recomputed) by the dry-run branch below it.
 
+T23 adds --commit (step 13) on top of the `apply` tail only, right after
+step 12's write_manifest() succeeds: run_upgrade() prints the pure
+format_commit_subject() suggested commit line unconditionally on that
+success path, then, only when `commit` is True, stages every promoted
+change via the thin impure edge git_add_all() and commits it via the thin
+impure edge git_commit() -- a real subprocess `git commit`, so the
+target's real .githooks/pre-commit and .githooks/commit-msg hooks fire
+exactly as they would for a human commit. If that real commit is rejected
+(a hook/lint divergence bug -- step 10 already lint-checked the scratch
+copy with the very scripts/lint.py the pre-commit hook itself runs, so
+this should not happen), git_reset_index() (a mixed reset back to HEAD,
+undoing git_add_all()'s staging) followed by the existing git_checkout_dot()
+(T21) fully restores the pre-upgrade tree -- `git checkout -- .` alone
+reads from the INDEX, so without first resetting it back to HEAD it would
+just copy the still-staged NEW content right back onto the working tree,
+a no-op rollback -- and run_upgrade() prints the pure
+format_commit_rejected_rollback() message and exits 1. `commit` defaults
+to False so every existing direct call keeps its unchanged behaviour.
+
 Pure: is_clean_tree(), managed_template_files(), blocking_drifts(), and
 format_drift_abort() take already-fetched data in and return a
 predicate/dict/list/string out -- none of them run git, touch the clock, or
@@ -825,6 +844,28 @@ def format_promote_rollback(error):
             f"{error}; nothing changed.")
 
 
+def format_commit_subject(old_version, new_version):
+    """Pure (T23, step 13). Both args are bare 'X.Y.Z' strings (the
+    manifest's pre-upgrade harness_version, --to's parsed target version).
+    Returns the exact suggested-commit-line subject T23's brief quotes
+    byte-for-byte -- reproduce it verbatim, including the ' -> ' single
+    spaces and both 'v' prefixes."""
+    return f"chore: upgrade wiki-harness v{old_version} -> v{new_version}"
+
+
+def format_commit_rejected_rollback(hook_output):
+    """Pure. `hook_output` is git_commit()'s captured combined stdout+
+    stderr when the real `git commit` in the target was rejected by a
+    hook -- step 13's defense-in-depth case: step 10 already lint-checked
+    the scratch copy with the exact same scripts/lint.py the real
+    .githooks/pre-commit hook itself runs, so a real rejection here means
+    the hook and that lint run have diverged. Returns the exact stderr
+    message run_upgrade() prints before exiting 1, mirroring
+    format_promote_rollback()'s wording for the analogous T21 rollback."""
+    return ("commit rejected by a git hook and was rolled back via `git "
+            f"checkout --`: {hook_output.strip()}; nothing changed.")
+
+
 def git_checkout_dot(target):
     """Impure edge (T21). Runs `git checkout -- .` in `target` -- the
     entire rollback mechanism promote_scratch()'s except clause invokes on
@@ -834,6 +875,43 @@ def git_checkout_dot(target):
     resolve_library_checkout())."""
     subprocess.run(["git", "-C", str(target), "checkout", "--", "."],
                    capture_output=True, text=True)
+
+
+def git_reset_index(target):
+    """Impure edge (T23). Runs a plain `git reset -q` (a mixed reset back
+    to HEAD) in `target` -- resets the index only, leaving the working
+    tree's own on-disk bytes untouched. Needed BEFORE git_checkout_dot()
+    when a commit was rejected after `git_add_all()` already staged the
+    promoted changes: `git checkout -- .` alone reads from the INDEX, so
+    with the promoted content still staged it would copy that same staged
+    content right back onto the working tree, a no-op rollback. Resetting
+    the index back to HEAD first makes the following `git checkout -- .`
+    genuinely restore the pre-upgrade tree."""
+    subprocess.run(["git", "-C", str(target), "reset", "-q"],
+                   capture_output=True, text=True)
+
+
+def git_add_all(target):
+    """Impure edge (T23, step 13). Runs `git add -A` in `target` -- stages
+    every promoted change (step 11's promote_scratch() writes and step
+    12's write_manifest() write) ahead of git_commit()'s real `git commit`
+    subprocess call."""
+    subprocess.run(["git", "-C", str(target), "add", "-A"],
+                   capture_output=True, text=True)
+
+
+def git_commit(target, subject):
+    """Impure edge (T23, step 13). Runs a real `git commit -m <subject>`
+    subprocess in `target` -- a real git work tree with core.hooksPath
+    already set to `.githooks` by init.py, so the real
+    .githooks/pre-commit and .githooks/commit-msg hooks fire exactly as
+    they would for a human-authored commit (never --no-verify). Returns
+    (ok, output) -- output is stdout+stderr combined, so a caller that
+    rolls back on rejection can report exactly what the hook printed."""
+    result = subprocess.run(
+        ["git", "-C", str(target), "commit", "-m", subject],
+        capture_output=True, text=True)
+    return result.returncode == 0, result.stdout + result.stderr
 
 
 def promote_scratch(scratch, target):
@@ -908,7 +986,7 @@ def pending_changes(scratch, target):
 
 
 def run_upgrade(target, adopt, adopt_drift_paths, to, library_path,
-                allow_downgrade, apply=True):
+                allow_downgrade, apply=True, commit=False):
     """Impure edge: the orchestrator for every ordered step 3.2 gate this
     task implements. Wires git_status_porcelain() -> is_clean_tree()
     (precondition 1, exit 2) -> read_manifest_for_upgrade() (precondition
@@ -1059,6 +1137,17 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path,
         print(rollback_message, file=sys.stderr)
         return 1
     write_manifest(Path(target) / MANIFEST_FILENAME, new_manifest)    # step 12
+
+    subject = format_commit_subject(harness_version, new_harness_version)  # T23, step 13
+    print(f"upgrade: suggested commit message: {subject}")
+    if commit:
+        git_add_all(target)
+        commit_ok, commit_output = git_commit(target, subject)
+        if not commit_ok:
+            git_reset_index(target)
+            git_checkout_dot(target)
+            print(format_commit_rejected_rollback(commit_output), file=sys.stderr)
+            return 1
     return 0
 
 
@@ -1073,6 +1162,7 @@ def parse_args(argv):
     parser.add_argument("--adopt-drift", action="append", default=[])
     parser.add_argument("--library-path")
     parser.add_argument("--allow-downgrade", action="store_true")
+    parser.add_argument("--commit", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -1084,7 +1174,7 @@ def main(argv):
         return run_check(Path(args.target))
     return run_upgrade(Path(args.target), args.adopt, args.adopt_drift,
                        args.to, args.library_path, args.allow_downgrade,
-                       args.apply)
+                       args.apply, args.commit)
 
 
 if __name__ == "__main__":
