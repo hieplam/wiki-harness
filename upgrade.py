@@ -115,6 +115,19 @@ at all -- T16's pre-existing clean-tree precondition is the ENTIRE
 recovery story for that case, catching the resulting dirty tree on the
 NEXT invocation instead.
 
+T22 adds the idempotency fast path on top of that pipeline: right after
+step 10's scratch-lint and BOTH reconcile_forks() calls (T18) -- so
+`changed` reflects the fully-reconciled scratch copy, the same tree
+promote_scratch() would diff against -- run_upgrade() computes
+pending_changes(scratch, target) ONCE and, when that list is empty AND the
+OLD manifest's recorded harness_version already equals --to's parsed
+target version, prints the pure format_already_current() message and
+returns 0 BEFORE the `apply` branch, so neither promote_scratch() nor
+write_manifest() against the real target is ever reached on either the
+--apply or the dry-run path -- true 0-writes idempotency, not merely an
+empty dry-run report. The already-computed `changed` is reused (never
+recomputed) by the dry-run branch below it.
+
 Pure: is_clean_tree(), managed_template_files(), blocking_drifts(), and
 format_drift_abort() take already-fetched data in and return a
 predicate/dict/list/string out -- none of them run git, touch the clock, or
@@ -427,6 +440,13 @@ def format_removal_abort(removed, harness_version):
     for path in removed:
         lines.append(f"  {path}: no longer provided by v{harness_version}.")
     return "\n".join(lines)
+
+
+def format_already_current(harness_version):
+    """Pure. Step 4's exact stdout message: the target wiki already
+    carries v<harness_version>'s content and records that version, so
+    the idempotency fast path prints this and exits 0, writing nothing."""
+    return f"already at v{harness_version}"
 
 
 def format_pending_report(paths, harness_version):
@@ -906,8 +926,15 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path,
     run_scratch_lint() (step 10, exit 1 on failure, real target untouched)
     -> reconcile_forks() called AGAIN on the MISSING-fork subset (T18:
     deletes each one from the scratch copy only now, after lint has
-    already passed, so promote_scratch() never recreates it) -> THEN (T20)
-    the `apply` branch: when True, promote_scratch() (step 11, T21: wraps
+    already passed, so promote_scratch() never recreates it) -> (T22) the
+    idempotency fast path: pending_changes(scratch, target) is computed
+    ONCE right here; when it is empty AND the OLD manifest's
+    harness_version already equals --to's parsed target, format_already_
+    current() is printed and this function returns 0 immediately, reaching
+    neither promote_scratch() nor write_manifest() on either the --apply
+    or the dry-run path -> THEN (T20) the `apply` branch, reusing that
+    same already-computed pending_changes() result: when True,
+    promote_scratch() (step 11, T21: wraps
     its own copy loop in try/except -> git checkout -- . on failure) ->
     write_manifest() to the real target LAST (step 12), skipped when
     promote_scratch() signals a rollback (returns a non-None message
@@ -1018,8 +1045,12 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path,
 
     reconcile_forks(scratch, target, missing_forks)                  # T18, after lint
 
+    changed = pending_changes(scratch, target)
+    if harness_version == new_harness_version and not changed:      # T22, step 4
+        print(format_already_current(new_harness_version))
+        return 0
+
     if not apply:                                                    # T20
-        changed = pending_changes(scratch, target)
         print(format_pending_report(changed, new_harness_version))
         return 0
 
