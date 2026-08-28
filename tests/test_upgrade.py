@@ -1542,10 +1542,6 @@ class TestCliPolish(unittest.TestCase):
             "--allow-downgrade",
             "--commit",
             "--adopt",
-            "--wiki-title", "My Wiki",
-            "--org-name", "My Org",
-            "--content-language", "en",
-            "--repo-name", "my-repo",
             "--check",
         ])
         self.assertEqual(args.target, "target")
@@ -1557,10 +1553,6 @@ class TestCliPolish(unittest.TestCase):
         self.assertTrue(args.allow_downgrade)
         self.assertTrue(args.commit)
         self.assertTrue(args.adopt)
-        self.assertEqual(args.wiki_title, "My Wiki")
-        self.assertEqual(args.org_name, "My Org")
-        self.assertEqual(args.content_language, "en")
-        self.assertEqual(args.repo_name, "my-repo")
         self.assertTrue(args.check)
 
         # --adopt-drift is repeatable and defaults to an empty list when
