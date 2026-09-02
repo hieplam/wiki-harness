@@ -35,7 +35,7 @@ the release type or the Compatibility field is non-conformant with
   into a consumer wiki) and `upgrade.py` (pulling a newer release into an
   already-adopted wiki), the vendored `scripts/lint.py`,
   `scripts/card_frontmatter_lint.py`, `scripts/check_commit_msg.py`, and
-  `scripts/manifest.py`, plus the `.githooks/` commit-message hook and the
+  `scripts/manifest.py`, plus the `githooks/` hook scripts (commit-message and pre-commit) and the
   wiki `templates/`.
 
 ### Compatibility
@@ -44,13 +44,13 @@ of the library for a consumer to `upgrade` from — the notes below state the
 baseline contract now in force, against which every future release's
 Compatibility field will be measured (`docs/compatibility-policy.md` §2).
 
-- **Finding codes.** Running the harness lint (`scripts/lint.py`'s `run()`)
-  emits these codes (severities `ERROR`/`WARN`; see `Finding(severity, code,
-  path, msg)`) — from `scripts/lint.py` directly: `LINK`, `ORPHAN`, `CITE`,
-  `UNFILED`, `FM`, `INDEX`, `RAW`, `ENCODING`, `HOOKS`, `HARNESS`; and from
-  the card linter it delegates to via `check_cards()`
-  (`scripts/card_frontmatter_lint.py`): `CARD_SCHEMA`, `CARD_FM`, `CARD_KEY`,
-  `CARD_REF`, `CARD_VALUE`. The code is the authoritative source of this set.
+- **Finding codes.** The harness lint emits these codes (severities
+  `ERROR`/`WARN`): `LINK`, `ORPHAN`, `CITE`, `UNFILED`, `FM`, `INDEX`,
+  `RAW`, `ENCODING`, `HOOKS`, `HARNESS`, `CARD_SCHEMA`, `CARD_FM`,
+  `CARD_KEY`, `CARD_REF`, `CARD_VALUE`. They are defined as
+  `Finding(severity, code, path, msg)` in `scripts/lint.py` and
+  `scripts/card_frontmatter_lint.py`, which together are the authoritative
+  source of this set.
 - **MANAGED/TEMPLATE paths.** As shipped, `init`/`--adopt` record the
   vendored `scripts/*.py` (including `scripts/manifest.py`) and the
   `.githooks/*` hook scripts as `managed`, plus
