@@ -1,9 +1,11 @@
 """End-to-end tests for init.py's full 16-step flow (plan-v3 section 3.1,
 T13): no --ci flag anywhere, CLAUDE.md (root) and its 3 nested stubs seeded
-as ordinary MANAGED, TRACKED files. Every test here drives init.py as a
+as ordinary MANAGED, TRACKED files. Most tests here drive init.py as a
 real subprocess against a throwaway temp directory -- never against
-wiki-harness's own checkout -- and inspects the resulting on-disk wiki
-instance and its git history.
+wiki-harness's own checkout -- and inspect the resulting on-disk wiki
+instance and its git history; the T31A regression guards below instead
+drive init.py's main() entry point in-process, or pin the subprocess seam
+directly, to reproduce/pin a relative-target defect at the unit level.
 """
 from __future__ import annotations
 
