@@ -44,10 +44,13 @@ of the library for a consumer to `upgrade` from — the notes below state the
 baseline contract now in force, against which every future release's
 Compatibility field will be measured (`docs/compatibility-policy.md` §2).
 
-- **Finding codes.** `lint.py` emits the following codes today: `LINK`,
-  `ORPHAN`, `CARD_SCHEMA`, `CITE`, `UNFILED`, `FM`, `INDEX`, `RAW`,
-  `ENCODING`, `HOOKS`, and `HARNESS` (severities `ERROR`/`WARN`; see
-  `Finding(severity, code, path, msg)` in `scripts/lint.py`).
+- **Finding codes.** Running the harness lint (`scripts/lint.py`'s `run()`)
+  emits these codes (severities `ERROR`/`WARN`; see `Finding(severity, code,
+  path, msg)`) — from `scripts/lint.py` directly: `LINK`, `ORPHAN`, `CITE`,
+  `UNFILED`, `FM`, `INDEX`, `RAW`, `ENCODING`, `HOOKS`, `HARNESS`; and from
+  the card linter it delegates to via `check_cards()`
+  (`scripts/card_frontmatter_lint.py`): `CARD_SCHEMA`, `CARD_FM`, `CARD_KEY`,
+  `CARD_REF`, `CARD_VALUE`. The code is the authoritative source of this set.
 - **MANAGED/TEMPLATE paths.** As shipped, `init`/`--adopt` record the
   vendored `scripts/*.py` (including `scripts/manifest.py`) and the
   `.githooks/*` hook scripts as `managed`, plus
