@@ -59,5 +59,6 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 
 ## P5 — Second-wiki smoke
 
+- [ ] T31A — init.py: absolute hook paths in dry_run_hooks; cut v1.0.1 (INSERTED 2026-09-02 by ruling R4 — T31's smoke run found the defect)
 - [ ] T31 — init a throwaway synthetic ai-wiki fixture; run full E2E incl. customized id.pattern
 - [ ] T32 — OPTIONAL, owner-timed: real kept ai-wiki repo (NOT part of DONE, D8)
