@@ -469,7 +469,7 @@ def dry_run_hooks(target, subject):
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(subject + "\n")
         commit_msg_result = subprocess.run(
-            [str(target / ".githooks" / "commit-msg"), msg_path],
+            [str((target / ".githooks" / "commit-msg").resolve()), msg_path],
             cwd=target, capture_output=True, text=True, env=env)
     finally:
         os.unlink(msg_path)
@@ -477,7 +477,7 @@ def dry_run_hooks(target, subject):
         return False
 
     pre_commit_result = subprocess.run(
-        [str(target / ".githooks" / "pre-commit")],
+        [str((target / ".githooks" / "pre-commit").resolve())],
         cwd=target, capture_output=True, text=True, env=env)
     return pre_commit_result.returncode == 0
 

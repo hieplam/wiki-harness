@@ -14,12 +14,16 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 INIT_PY = ROOT / "init.py"
 
 sys.path.insert(0, str(ROOT / "scripts"))
 from manifest import hash_tree  # noqa: E402
+
+sys.path.insert(0, str(ROOT))
+import init as init_module  # noqa: E402
 
 VARS_ARGS = (
     "--wiki-title", "Sample Wiki",
@@ -521,6 +525,94 @@ class OriginsDefaultIsSessionOnly(unittest.TestCase):
 
             schema = _seeded_schema(target)
             self.assertEqual(schema["keys"]["origin"]["enum"], ["session"])
+
+
+# Regression guard (T31A, init.py:471-481 dry_run_hooks): step 13 exec'd
+# both git hooks with a target-RELATIVE program path while also passing
+# cwd=target, so a relative --target argument doubled the target name and
+# crashed with FileNotFoundError -- the most natural invocation shape a
+# user would type (`cd /tmp && python3 init.py my-wiki ...`) was broken by
+# accident of how the caller happened to spell the path.
+class InitRelativeTargetSucceeds(unittest.TestCase):
+    """Drives init.py's own main() entry point in-process with a bare
+    relative target name, from a controlled working directory (a
+    TemporaryDirectory chdir'd into, with the previous cwd restored in
+    `finally` regardless of outcome) -- exactly the invocation shape the
+    doubled-path bug broke."""
+
+    def test_init_relative_target_succeeds(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                os.chdir(tmp)
+                exit_code = init_module.main(
+                    ["relative-wiki", *VARS_ARGS, "--non-interactive"])
+            finally:
+                os.chdir(original_cwd)
+
+            self.assertEqual(exit_code, 0)
+            scaffold = Path(tmp) / "relative-wiki"
+            self.assertTrue((scaffold / ".git").is_dir())
+            self.assertTrue((scaffold / ".githooks" / "commit-msg").is_file())
+
+
+class DryRunHooksExecsAbsoluteProgramPaths(unittest.TestCase):
+    """Pins dry_run_hooks' subprocess seam directly: the argument vector's
+    program path (argv[0]) for BOTH the commit-msg call and the pre-commit
+    call must always be an absolute path pointing at the real hook file,
+    regardless of whether the caller spelled `target` as a relative or an
+    absolute path -- so the fix is pinned at the unit level and cannot
+    silently regress if step 13 is refactored."""
+
+    def _dry_run_hooks_argv0s(self, target):
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        git_ok = subprocess.CompletedProcess([], 0)
+        with mock.patch.object(init_module, "_git", return_value=git_ok), \
+             mock.patch.object(init_module.subprocess, "run", side_effect=fake_run):
+            result = init_module.dry_run_hooks(target, "chore: test subject")
+
+        self.assertTrue(result)
+        self.assertEqual(len(calls), 2)
+        commit_msg_argv, pre_commit_argv = calls
+        return Path(commit_msg_argv[0]), Path(pre_commit_argv[0])
+
+    def test_absolute_program_path_for_relative_target(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                os.chdir(tmp)
+                relative_target = Path("wiki-instance")
+                commit_msg_path, pre_commit_path = self._dry_run_hooks_argv0s(
+                    relative_target)
+                expected_root = (Path(tmp) / "wiki-instance").resolve()
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertTrue(commit_msg_path.is_absolute(), commit_msg_path)
+        self.assertEqual(commit_msg_path.resolve(),
+                         expected_root / ".githooks" / "commit-msg")
+        self.assertTrue(pre_commit_path.is_absolute(), pre_commit_path)
+        self.assertEqual(pre_commit_path.resolve(),
+                         expected_root / ".githooks" / "pre-commit")
+
+    def test_absolute_program_path_for_absolute_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            absolute_target = Path(tmp) / "wiki-instance"
+            commit_msg_path, pre_commit_path = self._dry_run_hooks_argv0s(
+                absolute_target)
+            expected_root = absolute_target.resolve()
+
+        self.assertTrue(commit_msg_path.is_absolute(), commit_msg_path)
+        self.assertEqual(commit_msg_path.resolve(),
+                         expected_root / ".githooks" / "commit-msg")
+        self.assertTrue(pre_commit_path.is_absolute(), pre_commit_path)
+        self.assertEqual(pre_commit_path.resolve(),
+                         expected_root / ".githooks" / "pre-commit")
 
 
 if __name__ == "__main__":

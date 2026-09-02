@@ -26,6 +26,29 @@ the release type or the Compatibility field is non-conformant with
 `docs/compatibility-policy.md` §8.
 ```
 
+## [1.0.1] — 2026-09-02
+
+**Release type:** PATCH
+
+### Fixed
+- `init.py`'s `dry_run_hooks` (step 13) exec'd both git hooks with a
+  target-relative program path while also passing `cwd=target`. When
+  `target` was a relative path (the most natural invocation shape, e.g.
+  `cd /tmp && python3 init.py my-wiki ...`), the child process resolved the
+  program path relative to its own `cwd` — which was that same relative
+  target — doubling the target name and crashing with an unhandled
+  `FileNotFoundError`. Both hook program paths are now resolved to
+  absolute before being exec'd; `cwd=target` is unchanged. A target passed
+  as an absolute path was never affected and remains byte-identical.
+
+### Compatibility
+This is a defect fix only: no finding code added, no managed/template path
+added or removed, no manifest-schema change, and no documented CLI flag,
+exit code, or message string changed — a crash is not a documented exit
+code, so making a previously-crashing invocation succeed does not breach
+the "CLI surface fixed" row (`docs/compatibility-policy.md` §2). A
+consumer running `upgrade` into this release needs to take no action.
+
 ## [1.0.0] — 2026-09-02
 
 **Release type:** MAJOR (initial release)
