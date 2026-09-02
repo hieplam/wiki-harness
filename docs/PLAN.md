@@ -47,6 +47,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 - [x] T23 — --commit + auto git checkout -- . on failed post-write self-check
 - [x] T24 — CLI polish: finalize argparse + exact message strings (no --resume, no --ci)
 - [x] T25 — Write docs/compatibility-policy.md (no CI-is-sole-backstop framing — A4)
+- [x] C3-3 — C3 governance: eval drift 0; lifecycle facts reconciled with shipped upgrade.py/init.py
 
 ## P4 — Migrate ogp-wiki
 
