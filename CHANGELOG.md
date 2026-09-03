@@ -26,6 +26,81 @@ the release type or the Compatibility field is non-conformant with
 `docs/compatibility-policy.md` §8.
 ```
 
+## [1.1.0] — 2026-09-04
+
+**Release type:** MINOR
+
+Closes `HARDENING-BACKLOG.md` §A (A1–A9) — nine defects both extraction
+campaigns found and deliberately left, because the extraction's premise was
+byte-identical behaviour with `ogp-wiki`. That migration completed on
+2026-09-03, so the freeze is over.
+
+### Fixed
+- **A1 — the RAW check read the wrong tree.** `git_changes()` ran
+  `git diff HEAD` (worktree vs HEAD) where the commit that lands is the
+  INDEX. Wrong in both directions: a staged tamper of a `sources/raw/` file
+  whose worktree copy was then restored passed the check entirely, and an
+  unstaged edit to a raw file blocked an otherwise unrelated commit. Now
+  `git diff --cached`. This is the fix with a security shape — the RAW check
+  exists to stop source tampering, and the staged path is the one that
+  commits.
+- **A2 — citations prefix-matched.** The scan pattern was the schema's
+  `id.pattern` with its anchors stripped, i.e. a substring search, so
+  `src-2026-08-06-001` matched inside `src-2026-08-06-0011` and any page
+  mentioning the longer id silently counted as citing the shorter one. The
+  body is now wrapped in zero-width id-character lookarounds. (`\b` cannot
+  express this: a card id ends in a digit and the next character is also a
+  digit, so no word boundary exists there.)
+- **A3 — `list: true` keys skipped every value rule.** `_check_value()`
+  returned `[]` for any list, so `enum`, `pattern`, `path`, `card_ref` and
+  `matches_filename` declared on a list-valued key were never enforced. Each
+  item is now checked as the scalar it is.
+- **A4 — protocol-relative links were treated as repo paths.** `resolve()`
+  read `//host/path` as a repo-relative path and produced a nonsense target;
+  it is now reported as external.
+- **A6 — rules files were matched by basename anywhere in the tree.** A
+  genuine page such as `wiki/recipes.md` was silently skipped by every page
+  check. A rules file now only counts as one at a container root it can
+  actually govern, per filename.
+- **A7 — the card-lint CLI read the schema without the fail-closed guard**
+  the library path uses, so a malformed `card-schema.json` raised a
+  traceback out of the hook instead of a finding.
+- **A8 — `^` inside a character class was read as an anchor**, so the valid
+  pattern `^src-[^/]+$` was rejected by the id.pattern contract check.
+- **A9 — `--root` was parsed by hand** via `argv.index()`, so `lint.py
+  --root` with no value raised `IndexError` — a traceback out of a git hook
+  rather than a usage message. Now `argparse`.
+
+### Changed
+- **A5 — every `subprocess.run` in `scripts/` now passes `timeout=`**
+  (`SUBPROCESS_TIMEOUT = 30`). An unbounded git call inside a pre-commit
+  hook is an unbounded hang, which to the user is indistinguishable from a
+  broken hook.
+
+### Compatibility
+**No new finding code, no MANAGED/TEMPLATE path added or removed, no
+manifest-schema change, no flag removed or repurposed, no existing message
+string changed.** `lint.py` gains a proper `--help`/usage surface via
+argparse; `--root` keeps its meaning and default.
+
+This is MINOR rather than PATCH because three fixes can make a check fire on
+content that previously passed **silently** — exactly what §2's MINOR row
+permits and its PATCH row forbids:
+
+- A2 may surface `UNFILED`/`CITE` findings on a card whose only "citation"
+  was a prefix match inside a longer id;
+- A3 may surface `CARD_VALUE`/`CARD_REF` findings on list-valued keys whose
+  rules were never enforced before;
+- A6 may surface page findings on a page whose basename collides with a
+  rules file (`wiki/recipes.md`).
+
+**Measured against the real `ogp-wiki` tree before release: no change at
+all.** `lint.py` 0 errors / 0 warnings before and after; every card's
+`card_frontmatter_lint.py` output byte-identical; every line of the
+commit-message corpus keeping its verdict. A1 changes *which* tree is
+inspected, so a wiki that relied on the old worktree behaviour — staging a
+raw-file change and expecting it to pass — will now correctly be blocked.
+
 ## [1.0.2] — 2026-09-03
 
 **Release type:** PATCH

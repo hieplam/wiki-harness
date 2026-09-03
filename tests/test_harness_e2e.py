@@ -85,10 +85,15 @@ class GitChangesRawEndToEnd(unittest.TestCase):
             _git(root, "add", "-A")
             _git(root, "commit", "-q", "-m", "initial (status A, allowed)")
 
-            # Modify the raw file after the commit, uncommitted -- the
+            # Modify the raw file after the commit and STAGE it -- the
             # change git_changes()'s real subprocess call must surface.
+            # Staging is what makes this the change under judgement:
+            # git_changes() reads the index (`diff --cached`), because the
+            # index is what a commit lands (backlog A1). An unstaged edit
+            # is deliberately invisible here.
             (root / "sources/raw/reading.xml").write_text(
                 "<reading>2</reading>", encoding="utf-8")
+            _git(root, "add", "sources/raw/reading.xml")
 
             scanned_files, enc = scan(root)
             self.assertEqual(enc, [])

@@ -38,6 +38,11 @@ RULE_KEYS = {"required", "enum", "pattern", "list", "path", "card_ref",
 # by keeping two literals in sync by hand.
 RULES_FILES = {"AGENTS.md", "recipes.md", "CLAUDE.md"}
 
+# The characters that may appear INSIDE a card id token. Used to build the
+# citation scan's lookarounds (A2) -- a match is only a citation when it is
+# not glued to more id-shaped text on either side.
+ID_TOKEN_CHARS = r"A-Za-z0-9_-"
+
 # Fallback only -- used when the schema is missing or malformed (that case
 # already produces a CARD_SCHEMA finding) or when a schema load_schema()
 # accepts as valid simply does not declare an id.pattern rule (load_schema()
@@ -74,6 +79,16 @@ def parse_frontmatter(text):
 
 
 def resolve(from_path, target):
+    """Pure. Resolve a link `target` written on page `from_path` to a
+    repo-relative path.
+
+    A protocol-relative URL (`//host/path`) is NOT a repo path -- a browser
+    reads it as "same scheme, that host". Treating its leading empty
+    segments as directories produced a nonsense repo target and a bogus
+    broken-link finding (backlog A4); it is reported as external instead,
+    which no caller resolves against the tree."""
+    if target.startswith("//"):
+        return f"<external>{target}"
     parts = list(PurePosixPath(from_path).parent.parts)
     for part in PurePosixPath(target).parts:
         if part == "..":
@@ -175,9 +190,14 @@ def _violates_id_pattern_contract(pattern):
     """True when `pattern` (already known to be a non-empty string that
     re.compile()s) does not satisfy load_schema()'s narrow id.pattern
     contract -- see that function's docstring for why the contract is this
-    narrow. A simple text scan, not a regex-semantics parse: it does not
-    distinguish an anchor character inside a character class from one
-    outside it, which can only make the check MORE strict, never less."""
+    narrow. A simple text scan, not a full regex-semantics parse, with
+    one exception it must make: a '^' or '$' inside a CHARACTER CLASS is an
+    ordinary literal (or a class negation), not an anchor, so the scan
+    skips over `[...]` spans. Without that, the perfectly valid pattern
+    `^src-[^/]+$` was rejected -- the '^' negating the class was read as a
+    stray inner anchor (backlog A8). Outside a class the scan stays
+    deliberately blunt: it does not evaluate alternation or groups, which
+    can only make the check MORE strict, never less."""
     if not pattern.startswith("^") or not pattern.endswith("$"):
         return True
     body = pattern[:-1]
@@ -195,6 +215,20 @@ def _violates_id_pattern_contract(pattern):
         if ch == "\\":
             i += 2
             continue
+        if ch == "[":
+            # Skip the whole character class: inside it '^' and '$' are
+            # literals, and a leading '^' is class negation (A8).
+            i += 1
+            if i < len(inner) and inner[i] == "^":
+                i += 1
+            if i < len(inner) and inner[i] == "]":
+                i += 1          # a ']' first in a class is a literal
+            while i < len(inner) and inner[i] != "]":
+                i += 2 if inner[i] == "\\" else 1
+            if i >= len(inner):
+                return True     # unterminated class -- not contract-shaped
+            i += 1
+            continue
         if ch in "^$":
             return True
         i += 1
@@ -211,8 +245,18 @@ def card_id_scan_pattern(schema_id_pattern):
     string transform, not a second declaration of card-id shape -- lint.py
     uses this to find card ids embedded anywhere in wiki prose, while
     check_commit_msg.py's validate() matches the anchored id.pattern
-    itself, whole-value, unchanged."""
-    return schema_id_pattern[1:-1]
+    itself, whole-value, unchanged.
+
+    The stripped body is wrapped in id-character lookarounds so a card id
+    is only found as a WHOLE token: without them `src-2026-08-06-001`
+    matched inside `src-2026-08-06-0011`, and every page mentioning the
+    longer id silently counted as citing the shorter one (backlog A2).
+    `\\b` cannot do this job -- a card id ends in a digit and the character
+    that would follow it is also a digit, so no word boundary exists there.
+    The lookarounds are zero-width, so the pattern still finds an id
+    anywhere in prose: in parentheses, inside a markdown link, or followed
+    by a full stop."""
+    return f"(?<![{ID_TOKEN_CHARS}]){schema_id_pattern[1:-1]}(?![{ID_TOKEN_CHARS}])"
 
 
 def card_id_pattern_from_schema(schema):
@@ -270,7 +314,21 @@ def _check_value(path, key, value, rules, exists):
         if not rules.get("list"):
             return [Finding("ERROR", "CARD_VALUE", path,
                             f"'{key}' must be a single value, not a list")]
-        return []
+        # Every remaining rule (enum, pattern, matches_filename, path,
+        # card_ref) is a per-VALUE rule, so a list is checked item by item.
+        # Returning [] here meant a `list: true` key never enforced any of
+        # them (backlog A3). `item_rules` drops 'list' so the recursion
+        # treats each item as the scalar it is.
+        item_rules = {k: v for k, v in rules.items() if k != "list"}
+        findings = []
+        for item in value:
+            if isinstance(item, list):
+                findings.append(Finding("ERROR", "CARD_VALUE", path,
+                                        f"'{key}' must not nest a list "
+                                        f"inside a list"))
+                continue
+            findings += _check_value(path, key, item, item_rules, exists)
+        return findings
     findings = []
     if "enum" in rules and value not in rules["enum"]:
         findings.append(Finding("ERROR", "CARD_VALUE", path,
