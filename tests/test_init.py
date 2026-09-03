@@ -619,3 +619,32 @@ class DryRunHooksExecsAbsoluteProgramPaths(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SummaryNamesTheRunningVersion(unittest.TestCase):
+    """v1.0.2 regression guard. `summary_text`'s bypass warning used to
+    embed the literal string "wiki-harness v1.0.0", so every wiki
+    scaffolded from a later release was told the wrong version -- inside
+    the one message that warns about a security limitation. The version
+    must come from the library's own VERSION file, the way
+    commit_subject(version) already takes it."""
+
+    def test_summary_names_the_version_it_is_given(self):
+        text = init_module.summary_text(Path("/tmp/some-wiki"), "abc123def456", "9.9.9")
+        self.assertIn("wiki-harness v9.9.9", text)
+
+    def test_summary_never_hardcodes_a_version(self):
+        """Any literal release number left in the module's own source is
+        the defect restated -- the summary must interpolate, never quote."""
+        text = init_module.summary_text(Path("/tmp/some-wiki"), "abc123def456", "9.9.9")
+        self.assertNotIn("v1.0.0", text)
+        self.assertNotIn("v1.0.1", text)
+
+    def test_scaffold_summary_reports_the_library_version(self):
+        """End to end: the summary a real scaffold prints names whatever
+        VERSION currently holds."""
+        expected = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        with tempfile.TemporaryDirectory() as tmp:
+            result = _run_init(Path(tmp) / "version-summary-wiki")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"wiki-harness v{expected}", result.stdout)
