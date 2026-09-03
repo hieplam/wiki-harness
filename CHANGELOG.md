@@ -26,6 +26,40 @@ the release type or the Compatibility field is non-conformant with
 `docs/compatibility-policy.md` §8.
 ```
 
+## [1.0.2] — 2026-09-03
+
+**Release type:** PATCH
+
+### Fixed
+- `init.py`'s step-16 scaffold summary named a hardcoded release instead of
+  the running one. `BYPASS_WARNING` was a module constant embedding the
+  literal `wiki-harness v1.0.0`, so every wiki scaffolded from a later
+  release was told it came from v1.0.0 — inside the one message that warns
+  that commits authored through the GitHub API or a cloud coding agent
+  structurally bypass every local hook. A wiki initialised from v1.0.1 was
+  therefore given a false statement about which release shipped no
+  mitigation for that class of commit. The constant is now the template
+  `BYPASS_WARNING_TEMPLATE`, `bypass_warning(version)` interpolates it, and
+  `summary_text()` takes `version` the way `commit_subject(version)`
+  already did. `read_version()` remains the sole impure edge supplying it,
+  so the value always comes from the library's own `VERSION` file.
+
+### Compatibility
+No finding code added or changed, no MANAGED/TEMPLATE path added or
+removed, no manifest-schema change, no flag or exit code changed.
+
+One message string does change, which deserves stating plainly against
+`docs/compatibility-policy.md` §2's PATCH row ("no existing message string
+changes"): the summary's final line now reads `wiki-harness v<running
+version>` where it previously read `wiki-harness v1.0.0` regardless of the
+running version. This is judged a defect fix rather than a contract break,
+because the constant never expressed a contract — it expressed a bug. The
+line's *documented* meaning has always been "name the release that ships no
+mitigation"; before this fix it named the wrong one from v1.0.1 onward. A
+consumer script grepping the literal `v1.0.0` in this line was matching the
+defect, not an interface. Consumers who parse the summary should match
+`wiki-harness v` and read the version that follows.
+
 ## [1.0.1] — 2026-09-02
 
 **Release type:** PATCH

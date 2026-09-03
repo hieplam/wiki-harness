@@ -81,10 +81,10 @@ TEMPLATE_STATIC_PATHS = ("AGENTS.md", "README.md")
 GIT_IDENTITY_NAME = "wiki-harness init"
 GIT_IDENTITY_EMAIL = "init@wiki-harness.invalid"
 
-BYPASS_WARNING = (
+BYPASS_WARNING_TEMPLATE = (
     "Note: commits authored via the GitHub API or a cloud coding agent "
     "structurally bypass every local hook this scaffold just wired up; "
-    "wiki-harness v1.0.0 ships no mitigation for that class of commit at all."
+    "wiki-harness v{version} ships no mitigation for that class of commit at all."
 )
 
 HOOKS_PATH_FAILURE_MESSAGE = "failed to configure core.hooksPath for {target}"
@@ -221,16 +221,27 @@ def commit_subject(version):
     return f"chore: scaffold from wiki-harness v{version}"
 
 
-def summary_text(target, commit_hash):
+def bypass_warning(version):
+    """Pure. Step 16's mandatory reminder that API/cloud-agent commits
+    bypass every local hook, naming the release that ships no mitigation.
+    `version` is the library's own VERSION, supplied by the caller --
+    never a literal, so a wiki scaffolded from a later release is not
+    told it came from an earlier one."""
+    return BYPASS_WARNING_TEMPLATE.format(version=version)
+
+
+def summary_text(target, commit_hash, version):
     """Pure. Step 16's summary, including the mandatory reminder that
-    API/cloud-agent commits bypass every local hook and that v1.0.0 ships
-    no mitigation for that class of commit -- no '--ci' suggestion,
-    because there is no --ci."""
+    API/cloud-agent commits bypass every local hook and that this release
+    ships no mitigation for that class of commit -- no '--ci' suggestion,
+    because there is no --ci. Takes `version` the same way
+    commit_subject() does; read_version() is the impure edge that supplies
+    it."""
     short = commit_hash[:12] if commit_hash else commit_hash
     return (
         f"Scaffolded {target} -- lint clean, .githooks wired, first commit {short}.\n"
         "Next: start ingesting -- see AGENTS.md's Workflow: Ingest.\n"
-        f"{BYPASS_WARNING}"
+        f"{bypass_warning(version)}"
     )
 
 
@@ -562,7 +573,7 @@ def main(argv):
         print(COMMIT_VERIFY_FAILURE_MESSAGE.format(target=target), file=sys.stderr)
         return 1
 
-    print(summary_text(target, commit_hash))                        # step 16
+    print(summary_text(target, commit_hash, version))               # step 16
     return 0
 
 
