@@ -53,7 +53,7 @@ Each task's hunter ticks its own box in the SAME commit as the code (tribe crash
 
 - [x] T26 — Cut wiki-harness v1.0.0: tag, changelog, full suite green
 - [x] T27 — Run --adopt migration on a disposable ogp-wiki clone (explicit flags, no back-parser)
-- [ ] T28 — Delete tests/ entirely from the ogp-wiki clone (A6)
+- [x] T28 — Delete tests/ entirely from the ogp-wiki clone (A6)
 - [ ] T29 — Run the baseline oracle against the migrated clone; diff vs before/ per the 3 named deltas
 - [ ] T30 — PR review + merge migration to the real ogp-wiki repo
 
