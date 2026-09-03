@@ -302,3 +302,41 @@ ratified, expected causes.
 ## Next
 
 Card T30 will take this migration to PR review and merge it into the real `ogp-wiki` repository.
+
+## T30 — merged to the live repository
+
+The migration branch `migrate/wiki-harness-v1.0.0` was opened as
+[hieplam/ogp-wiki#5](https://github.com/hieplam/ogp-wiki/pull/5) and **merged by the owner on
+2026-09-03** as `01301db`. This was the only task in the plan that wrote to the live repository,
+and the owner read the diff before merging, as the plan required from the outset.
+
+### Acceptance criterion 6, verified against the real merged repository
+
+A fresh `git clone git@github.com:hieplam/ogp-wiki.git`, with no manual Python invocation beyond
+what `AGENTS.md` documents:
+
+```
+$ git ls-files | grep CLAUDE.md
+CLAUDE.md
+sources/CLAUDE.md
+sources/cards/CLAUDE.md
+wiki/CLAUDE.md
+
+$ ls -d tests
+ls: tests: No such file or directory
+
+$ git config core.hooksPath .githooks
+$ git commit --allow-empty -m "chore: verify clone"
+lint: 0 error(s), 0 warning(s)
+[master 89b56d5] chore: verify clone
+
+$ python3 /path/to/wiki-harness/upgrade.py . --check
+v1.0.1 available -- run `upgrade --to v1.0.1 --apply`
+```
+
+All four `CLAUDE.md` files are present and tracked; `tests/` is gone; the real hooks fire and pass;
+and the upgrade path is live — the migrated wiki can already see the next release. The manifest
+records `wiki-harness 1.0.0`, 15 managed files.
+
+**The extraction is complete.** `ogp-wiki` is a harness consumer, and a second wiki can be created
+from the same library with one command.
