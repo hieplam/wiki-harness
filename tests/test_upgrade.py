@@ -1523,6 +1523,256 @@ class TestCommitFlag(unittest.TestCase):
                 "apply wrote, not just restore already-tracked paths")
 
 
+PRE_ADOPT_AGENTS_MD = """# Rules for `sources/cards/`
+
+A **card** is the envelope for exactly one source: where it came from, how much to trust it,
+and the atomic claims extracted from it. Cards are mutable — claims and topics may improve.
+
+## Trust and contradiction
+
+| trust | meaning |
+|---|---|
+| `verified-in-code` | Confirmed against source code or observed system behaviour |
+| `stated` | Asserted by a person or document, unverified |
+| `hearsay` | Second-hand |
+| `legacy-import` | Migrated from the pre-harness wiki; trust not yet re-assessed |
+
+Contradictions resolve by higher trust first, then newer date.
+
+### Per-origin recipes — what to extract
+
+| origin | extract |
+|---|---|
+| `session` | Verified findings, decisions made, gotchas discovered |
+| `transcript` | Speakers/personas, decisions + owners, commitments |
+| `jira` | Problem → root cause → fix → affected services |
+| `slack` | The question + the tribal answer |
+| `confluence` / `research` | Concepts, definitions, procedures |
+| `legacy-export` | Whatever the old export tool happened to dump |
+
+All recipes emit the SAME contract: a card with claims, filed into wiki pages. A recipe must
+never invent its own wiki-page shape.
+"""
+
+ADOPT_ANSWERS = {
+    "wiki_title": "Existing Wiki",
+    "org_name": "Existing Org",
+    "content_language": "en",
+    "repo_name": "existing-repo",
+}
+
+# The library's own self-contained synthetic fixture wiki -- real wiki
+# pages, cards, and a card-schema.json, never anything sourced from the
+# real, on-disk ogp-wiki corpus (test_genericity.py's
+# SyntheticFixtureNotOgpCorpus guards this for every test file that reads
+# a card schema).
+SAMPLE_WIKI_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample-wiki"
+
+
+def _make_pre_adopt_target(target_root):
+    """T27's fixture: a real, git-backed wiki instance that predates
+    wiki-harness entirely -- real content (copied verbatim from the
+    library's own tests/fixtures/sample-wiki/: index.md, a wiki page, a
+    card, a real card-schema.json), plus VISION.md and DISTINCTIVE
+    wiki-specific trust/per-origin prose in sources/cards/AGENTS.md -- but
+    NO .wiki-harness-manifest.json at all -- --adopt's whole premise. The
+    trust/per-origin rows in PRE_ADOPT_AGENTS_MD never appear in the
+    library's own templates/sources.cards.AGENTS.md (which already carries
+    the post-split '[recipes](./recipes.md)' pointer, not an inline
+    table), so a test asserting recipes.md's content came from THIS text
+    actually proves something, rather than merely matching what the
+    library would have written anyway."""
+    shutil.copytree(SAMPLE_WIKI_FIXTURE, target_root)
+    (target_root / "sources" / "raw").mkdir(parents=True, exist_ok=True)
+    (target_root / "sources" / "raw" / ".gitkeep").write_bytes(b"")
+    (target_root / "sources" / "cards" / "AGENTS.md").write_text(
+        PRE_ADOPT_AGENTS_MD, encoding="utf-8")
+    (target_root / "VISION.md").write_text(
+        "# VISION\n\nPre-existing wiki content, predating wiki-harness.\n",
+        encoding="utf-8")
+    (target_root / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
+    _git(target_root, "init", "-q")
+    _git(target_root, "config", "user.email", "hunter@example.com")
+    _git(target_root, "config", "user.name", "Hunter")
+    _git(target_root, "add", "-A")
+    _git(target_root, "commit", "-q", "-m", "chore: pre-harness wiki content")
+    return target_root
+
+
+class TestBuildRecipesMd(unittest.TestCase):
+    """T27: build_recipes_md() -- the pure extraction/assembly core behind
+    --adopt's recipes.md seed."""
+
+    def test_extracts_wiki_real_prose_verbatim(self):
+        result = upgrade.build_recipes_md(PRE_ADOPT_AGENTS_MD)
+        self.assertIn("# Card recipes", result)
+        self.assertIn("## Trust meanings", result)
+        self.assertIn(
+            "| `legacy-import` | Migrated from the pre-harness wiki; "
+            "trust not yet re-assessed |", result)
+        self.assertIn("## Per-origin recipes — what to extract", result)
+        self.assertIn(
+            "| `legacy-export` | Whatever the old export tool happened "
+            "to dump |", result)
+        self.assertIn(
+            "All recipes emit the SAME contract: a card with claims, "
+            "filed into wiki pages. A recipe must\nnever invent its own "
+            "wiki-page shape.", result)
+        # Never the generic library template -- this wiki's OWN rows
+        # (never present in templates/recipes.md) must survive verbatim.
+        library_template = (ROOT / "templates" / "recipes.md").read_text(
+            encoding="utf-8")
+        self.assertNotEqual(result, library_template)
+
+    def test_raises_when_trust_section_missing(self):
+        text = "# Rules\n\nNo trust section here at all.\n"
+        with self.assertRaises(ValueError) as ctx:
+            upgrade.build_recipes_md(text)
+        self.assertIn("Trust and contradiction", str(ctx.exception))
+
+    def test_raises_when_per_origin_section_missing(self):
+        text = (
+            "# Rules\n\n## Trust and contradiction\n\n"
+            "| trust | meaning |\n|---|---|\n| `stated` | x |\n")
+        with self.assertRaises(ValueError) as ctx:
+            upgrade.build_recipes_md(text)
+        self.assertIn("Per-origin recipes", str(ctx.exception))
+
+
+class TestAdopt(unittest.TestCase):
+    """T27: --adopt's real, no-pre-existing-manifest bootstrap."""
+
+    def test_adopt_bootstraps_fresh_target_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = _make_pre_adopt_target(tmp / "target")
+
+            index_before = (target / "index.md").read_bytes()
+            vision_before = (target / "VISION.md").read_bytes()
+            schema_before = (target / "sources" / "cards" / "card-schema.json").read_bytes()
+            wiki_page_before = (target / "wiki" / "widget-assembly.md").read_bytes()
+            card_before = (target / "sources" / "cards" / "src-2024-01-15-001.md").read_bytes()
+
+            result = _run_upgrade(
+                target, "--to", "v1.0.0", "--adopt",
+                "--library-path", str(v100),
+                "--wiki-title", ADOPT_ANSWERS["wiki_title"],
+                "--org-name", ADOPT_ANSWERS["org_name"],
+                "--content-language", ADOPT_ANSWERS["content_language"],
+                "--repo-name", ADOPT_ANSWERS["repo_name"])
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            # Content -- wiki/*.md, sources/cards/*.md, index.md, VISION.md,
+            # card-schema.json -- is byte-for-byte untouched.
+            self.assertEqual((target / "index.md").read_bytes(), index_before)
+            self.assertEqual((target / "VISION.md").read_bytes(), vision_before)
+            self.assertEqual(
+                (target / "sources" / "cards" / "card-schema.json").read_bytes(),
+                schema_before)
+            self.assertEqual(
+                (target / "wiki" / "widget-assembly.md").read_bytes(), wiki_page_before)
+            self.assertEqual(
+                (target / "sources" / "cards" / "src-2024-01-15-001.md").read_bytes(),
+                card_before)
+
+            # The 4 CLAUDE.md paths (root + 3 nested) are seeded, matching
+            # an INDEPENDENT reference init from the SAME library + vars --
+            # never hand-duplicated expected bytes.
+            reference = tmp / "reference"
+            ref_result = _run_init(v100, reference, answers=ADOPT_ANSWERS)
+            self.assertEqual(ref_result.returncode, 0,
+                             ref_result.stdout + ref_result.stderr)
+            ref_manifest = json.loads(
+                (reference / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            managed_template_paths = [
+                p for p, entry in ref_manifest["files"].items()
+                if entry["role"] in ("managed", "template")]
+            for claude_path in ("CLAUDE.md", "sources/CLAUDE.md",
+                                "sources/cards/CLAUDE.md", "wiki/CLAUDE.md"):
+                self.assertIn(claude_path, managed_template_paths)
+            for path in managed_template_paths:
+                self.assertEqual(
+                    (target / path).read_bytes(), (reference / path).read_bytes(),
+                    f"{path} does not match a reference init exactly")
+
+            # recipes.md was seeded from the WIKI'S OWN real prose (never
+            # the library's generic template), and is NOT part of the
+            # manifest's managed/template set.
+            expected_recipes = upgrade.build_recipes_md(PRE_ADOPT_AGENTS_MD)
+            self.assertEqual(
+                (target / "sources" / "cards" / "recipes.md").read_text(encoding="utf-8"),
+                expected_recipes)
+
+            # The manifest is present, records exactly the 4 vars, and is
+            # self-consistent (proven, as a side effect, by lint.py exiting
+            # 0 with no HARNESS finding below).
+            manifest = json.loads((target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["harness_version"], "1.0.0")
+            self.assertEqual(manifest["vars"], ADOPT_ANSWERS)
+            self.assertNotIn("sources/cards/recipes.md", manifest["files"])
+
+            # core.hooksPath is configured on the real target.
+            hooks_path = _git(target, "config", "--get", "core.hooksPath").stdout.strip()
+            self.assertEqual(hooks_path, ".githooks")
+
+            # lint.py exits 0 against the REAL target -- proves, as a side
+            # effect, the manifest is self-consistent and none of the 4
+            # seeded CLAUDE.md paths produces a finding.
+            lint_result = subprocess.run(
+                [sys.executable, str(target / "scripts" / "lint.py"),
+                 "--root", str(target)],
+                capture_output=True, text=True)
+            self.assertEqual(lint_result.returncode, 0,
+                             lint_result.stdout + lint_result.stderr)
+
+            # The migration commit -- a separate, explicit, hand-run step
+            # of the overall migration procedure (adopt itself never
+            # commits, per plan-v3): required before the idempotency
+            # re-run below, since upgrade's ordinary clean-tree
+            # precondition (unaffected by T27 for every OTHER path) still
+            # applies once a manifest exists.
+            _git(target, "add", "-A")
+            commit_result = _git(target, "commit", "-q", "-m",
+                                 "chore: adopt wiki-harness v1.0.0")
+            self.assertEqual(commit_result.returncode, 0, commit_result.stderr)
+
+            # EXPLICIT POST-CONDITION: a second `upgrade --to v1.0.0` run
+            # (no --adopt) writes ZERO files and prints "already at
+            # v1.0.0".
+            before_snapshot = _tree_snapshot(target)
+            second = _run_upgrade(target, "--to", "v1.0.0",
+                                  "--library-path", str(v100))
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertEqual(second.stdout.strip(), "already at v1.0.0")
+            after_snapshot = _tree_snapshot(target)
+            self.assertEqual(
+                after_snapshot, before_snapshot,
+                "the idempotency re-run must write zero files")
+
+    def test_adopt_missing_required_var_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = _make_pre_adopt_target(tmp / "target")
+
+            before_snapshot = _tree_snapshot(target)
+            result = _run_upgrade(
+                target, "--to", "v1.0.0", "--adopt",
+                "--library-path", str(v100),
+                "--wiki-title", ADOPT_ANSWERS["wiki_title"],
+                "--content-language", ADOPT_ANSWERS["content_language"],
+                "--repo-name", ADOPT_ANSWERS["repo_name"])
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn(
+                "missing required value(s) for --non-interactive mode: "
+                "--org-name", result.stdout + result.stderr)
+            self.assertNotIn("Traceback", result.stdout + result.stderr)
+            # Nothing was written -- the real target is untouched.
+            self.assertEqual(_tree_snapshot(target), before_snapshot)
+            self.assertFalse((target / MANIFEST_FILENAME).exists())
+
+
 class TestCliPolish(unittest.TestCase):
     """T24: finalize upgrade.py's full argparse surface -- every flag
     plan-v3 section 3.2 documents must parse via the module's real

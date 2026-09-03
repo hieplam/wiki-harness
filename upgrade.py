@@ -156,6 +156,28 @@ prints the pure format_commit_rejected_rollback() message and exits 1.
 `commit` defaults to False so every existing direct call keeps its
 unchanged behaviour.
 
+T27 replaces the no-manifest --adopt stub with the real adoption bootstrap:
+run_adopt() -- called straight out of run_upgrade() when --adopt is passed
+AND the target carries no pre-existing, valid manifest, entirely BEFORE
+the clean-tree precondition (a legitimate pre-adopt local edit, e.g. the
+migration's own required .gitignore hand-edit removing its CLAUDE.md
+line, must never block the bootstrap the way it would block every other,
+manifest-presupposing gate in this module) -- reuses the resolved target
+library's own init module's step 6/7/9 copy/render edges
+(overwrite_scratch(), the SAME edge the --apply pipeline (T16B) calls),
+never a bespoke verbatim-cut routine, and never init.seed_starters()
+(which would clobber the wiki's own content with library-generic starter
+bytes). build_recipes_md() (pure) derives sources/cards/recipes.md's
+content from the wiki's OWN, real, current sources/cards/AGENTS.md prose
+-- read straight off the real target before overwrite_scratch() replaces
+it with the canonical library template -- never from the library's
+generic starter content (A2): it extracts the '## Trust and
+contradiction' section's table and the '### Per-origin recipes' section's
+table plus its trailing paragraph, verbatim, and assembles them into
+recipes.md's own section structure. run_adopt() never git-commits -- the
+migration commit is a separate, explicit, hand-run step of the overall
+migration procedure, not something --adopt does on its own.
+
 Pure: is_clean_tree(), managed_template_files(), blocking_drifts(), and
 format_drift_abort() take already-fetched data in and return a
 predicate/dict/list/string out -- none of them run git, touch the clock, or
@@ -178,6 +200,7 @@ import subprocess
 import sys
 import tempfile
 from collections import namedtuple
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
@@ -535,6 +558,123 @@ def merge_manifest_files(role_map, actual_hashes, old_files, adopt_drift_paths):
         if entry.get("role") == "instance-fork" or path in adopt:
             files[path] = {"role": "instance-fork", "sha256": entry["sha256"]}
     return files
+
+
+RECIPES_TRUST_HEADING = "## Trust and contradiction"
+RECIPES_PER_ORIGIN_HEADING = "### Per-origin recipes — what to extract"
+
+
+def _find_heading_line(lines, heading):
+    """Pure (T27). Returns the index of the first line in `lines` whose
+    stripped text equals `heading` exactly, or None if no such line
+    exists."""
+    for i, line in enumerate(lines):
+        if line.strip() == heading:
+            return i
+    return None
+
+
+def _markdown_table_after(lines, heading_index):
+    """Pure (T27). Starting just after `lines[heading_index]` (a section
+    heading), skips any blank lines and then collects the contiguous run
+    of markdown-table lines (lines whose stripped text starts with '|')
+    that follows. Returns (table_lines, index_just_past_the_table) -- an
+    empty `table_lines` (index left at `heading_index + 1`) when no '|'
+    line is found before a non-blank, non-'|' line."""
+    i = heading_index + 1
+    n = len(lines)
+    while i < n and lines[i].strip() == "":
+        i += 1
+    table_lines = []
+    while i < n and lines[i].strip().startswith("|"):
+        table_lines.append(lines[i])
+        i += 1
+    return table_lines, i
+
+
+def _paragraph_after(lines, start_index):
+    """Pure (T27). Starting at `start_index`, skips any blank lines then
+    collects the following contiguous run of non-blank lines as one
+    paragraph, joined with '\\n'. Returns "" when `start_index` is already
+    at EOF or no further non-blank line follows."""
+    i = start_index
+    n = len(lines)
+    while i < n and lines[i].strip() == "":
+        i += 1
+    paragraph_lines = []
+    while i < n and lines[i].strip() != "":
+        paragraph_lines.append(lines[i])
+        i += 1
+    return "\n".join(paragraph_lines)
+
+
+def build_recipes_md(agents_md_text):
+    """Pure (T27). Derives sources/cards/recipes.md's content from the
+    WIKI'S OWN, real, current sources/cards/AGENTS.md prose
+    (`agents_md_text` -- the caller reads this straight off the real
+    target BEFORE overwrite_scratch() replaces it with the canonical
+    library template) -- never from the library's generic starter content
+    (A2: plan-v3's split of sources/cards/AGENTS.md's trust-meanings table
+    and per-origin recipes into recipes.md moves the table verbatim; it is
+    never folded into card-schema.json). Extracts the '## Trust and
+    contradiction' section's '| trust | meaning |' table verbatim, and the
+    '### Per-origin recipes -- what to extract' section's table plus its
+    trailing "All recipes emit the SAME contract..." paragraph verbatim,
+    then assembles them into recipes.md's own section structure (matching
+    templates/recipes.md's shape): '# Card recipes' / '## Trust meanings'
+    / '## Per-origin recipes -- what to extract'.
+
+    Raises ValueError, naming exactly what could not be found, when either
+    section's heading or table is missing, or when the per-origin
+    section's trailing paragraph is missing -- silently seeding an empty
+    or templated recipes.md would make the wiki's real, lived trust/
+    recipes guidance unrecoverable; the caller (run_adopt()) converts this
+    into a clean stderr message and a non-zero exit instead of letting an
+    uncaught exception escape."""
+    lines = agents_md_text.split("\n")
+
+    trust_index = _find_heading_line(lines, RECIPES_TRUST_HEADING)
+    if trust_index is None:
+        raise ValueError(
+            f"{RECIPES_TRUST_HEADING!r} section not found in "
+            "sources/cards/AGENTS.md")
+    trust_table, _ = _markdown_table_after(lines, trust_index)
+    if not trust_table:
+        raise ValueError(
+            f"no trust-meanings table found under {RECIPES_TRUST_HEADING!r} "
+            "in sources/cards/AGENTS.md")
+
+    origin_index = _find_heading_line(lines, RECIPES_PER_ORIGIN_HEADING)
+    if origin_index is None:
+        raise ValueError(
+            f"{RECIPES_PER_ORIGIN_HEADING!r} section not found in "
+            "sources/cards/AGENTS.md")
+    origin_table, after_table_index = _markdown_table_after(lines, origin_index)
+    if not origin_table:
+        raise ValueError(
+            "no per-origin recipes table found under "
+            f"{RECIPES_PER_ORIGIN_HEADING!r} in sources/cards/AGENTS.md")
+    paragraph = _paragraph_after(lines, after_table_index)
+    if not paragraph:
+        raise ValueError(
+            "no trailing paragraph found after "
+            f"{RECIPES_PER_ORIGIN_HEADING!r}'s table in "
+            "sources/cards/AGENTS.md")
+
+    parts = [
+        "# Card recipes",
+        "",
+        "## Trust meanings",
+        "",
+        "\n".join(trust_table),
+        "",
+        "## Per-origin recipes — what to extract",
+        "",
+        "\n".join(origin_table),
+        "",
+        paragraph,
+    ]
+    return "\n".join(parts) + "\n"
 
 
 # ---- impure edges below this line ----
@@ -1009,8 +1149,106 @@ def pending_changes(scratch, target):
     return changed
 
 
+def run_adopt(target, to, library_path, values):
+    """Impure edge (T27): the --adopt bootstrap for a target with NO
+    pre-existing, valid manifest -- run_upgrade()'s every OTHER gate (the
+    drift check, the downgrade guard, the MAJOR-removal guard) presupposes
+    a manifest to read and compare against, so none of them run on this
+    path; this is the one path that creates that manifest in the first
+    place. Called by run_upgrade() BEFORE the clean-tree precondition too
+    (see run_upgrade()'s own docstring) -- a legitimate pre-adopt local
+    edit must never block the bootstrap.
+
+    Reuses init.py's own step 6/7/9 copy/render machinery via the resolved
+    target library checkout's own init module (overwrite_scratch(), the
+    exact same edge the --apply pipeline (T16B) calls) -- never a bespoke
+    verbatim-cut routine -- and never init.seed_starters() (which would
+    clobber the wiki's own content -- VISION.md, index.md, .gitignore,
+    card-schema.json -- with library-generic starter bytes; adopt must
+    PRESERVE existing content, never scaffold a brand-new wiki over it).
+    Never git-commits anything -- the migration commit is a separate,
+    explicit, hand-run step of the overall migration procedure, not
+    something this function does on its own.
+
+    Order: (1) resolve the target library checkout and load its own init
+    module -- reused for every var-collection/copy/render/manifest
+    primitive below; (2) the missing-required-var check (exit 2,
+    byte-for-byte init's own missing_vars_message()); (3) read the
+    target's OWN, pre-adopt sources/cards/AGENTS.md prose straight off the
+    real target, BEFORE anything downstream ever touches it, and derive
+    recipes.md's content from it (build_recipes_md()) -- exit 1 with a
+    clean stderr message (never a traceback) if the expected sections
+    cannot be found; (4) scratch-copy the target (step 8); (5) overwrite
+    the scratch's managed/template paths via init's own copy/render edges
+    (steps 6/7/9); (6) seed the derived recipes.md into the scratch (a
+    SEEDED path, deliberately outside build_role_map()'s managed/template
+    set); (7) compute and write the manifest into the scratch -- vars is
+    exactly the 4 flags, source_url/source_commit read via init's own
+    read_source_url()/read_source_commit(); (8) lint the scratch (step
+    10) -- abort with the lint output on failure, the real target left
+    completely untouched; (9) promote the scratch over the real target
+    (step 11, T21's try/except rollback still applies, reused unchanged
+    via promote_scratch()); (10) write the real manifest (step 12); (11)
+    set core.hooksPath on the real target via init's own
+    set_hooks_path(), closing the real, demonstrated ogp-wiki gap."""
+    target = Path(target)
+    new_harness_version, new_source_ref = parse_to_version(to)
+    library_root = resolve_library_checkout(new_harness_version, library_path)
+    init_mod = load_init_module(library_root)
+
+    missing = init_mod.missing_required_vars(values)
+    if missing:
+        print(init_mod.missing_vars_message(missing), file=sys.stderr)
+        return 2
+
+    agents_md_path = target / "sources" / "cards" / "AGENTS.md"
+    original_agents_md = (agents_md_path.read_text(encoding="utf-8")
+                          if agents_md_path.is_file() else "")
+    try:
+        recipes_md_text = build_recipes_md(original_agents_md)
+    except ValueError as exc:
+        print(f"upgrade --adopt: {exc}", file=sys.stderr)
+        return 1
+
+    scratch = copy_target_to_scratch(target)                          # step 8
+    scripts_paths, hooks_paths = overwrite_scratch(                   # steps 6/7/9
+        init_mod, library_root, scratch, values)
+
+    recipes_path = scratch / "sources" / "cards" / "recipes.md"
+    recipes_path.parent.mkdir(parents=True, exist_ok=True)
+    recipes_path.write_text(recipes_md_text, encoding="utf-8")
+
+    role_map = init_mod.build_role_map(scripts_paths, hooks_paths)
+    actual_hashes = hash_tree(scratch, sorted(role_map))
+    files = {path: {"role": role, "sha256": actual_hashes[path]}
+             for path, role in role_map.items() if path in actual_hashes}
+    new_manifest = compute_manifest(
+        files, values, init_mod.read_source_url(library_root),
+        new_harness_version, new_source_ref,
+        init_mod.read_source_commit(library_root),
+        initialised_at=date.today().isoformat())
+    write_manifest(scratch / MANIFEST_FILENAME, new_manifest)         # step 9 addendum
+
+    lint_ok, lint_output = run_scratch_lint(scratch)                  # step 10
+    if not lint_ok:
+        print(lint_output, file=sys.stderr)
+        return 1
+
+    rollback_message = promote_scratch(scratch, target)               # step 11
+    if rollback_message is not None:
+        print(rollback_message, file=sys.stderr)
+        return 1
+    write_manifest(target / MANIFEST_FILENAME, new_manifest)          # step 12
+
+    if not init_mod.set_hooks_path(target):
+        print(init_mod.HOOKS_PATH_FAILURE_MESSAGE.format(target=target),
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def run_upgrade(target, adopt, adopt_drift_paths, to, library_path,
-                allow_downgrade, apply=True, commit=False):
+                allow_downgrade, apply=True, commit=False, adopt_vars=None):
     """Impure edge: the orchestrator for every ordered step 3.2 gate this
     task implements. Wires git_status_porcelain() -> is_clean_tree()
     (precondition 1, exit 2) -> read_manifest_for_upgrade() (precondition
@@ -1069,25 +1307,40 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path,
     that predates this parameter -- including the ones in this module's own
     test suite -- keeps meaning "write" unchanged.
 
-    When --adopt is passed and the manifest precondition would otherwise
-    fail (missing/unparseable/non-object/non-UTF-8), the adoption
-    mechanism itself is out of scope for this task (T16 brief, "explicitly
-    OUT of scope") -- this is reported as not-yet-implemented too, rather
-    than either crashing or silently fabricating a manifest."""
+    When --adopt is passed AND the manifest precondition would otherwise
+    fail (missing/unparseable/non-object/non-UTF-8) (T27): run_adopt()
+    takes over entirely, BEFORE the clean-tree precondition below even
+    runs -- adopt's whole premise is bootstrapping a target that has never
+    gone through this module's ordered flow before, so a legitimate
+    pre-adopt local edit (e.g. the migration procedure's own required
+    .gitignore hand-edit, removing its CLAUDE.md line so the 4 seeded
+    CLAUDE.md files can be tracked) must never trip the same dirty-tree
+    refusal a mid-flow upgrade would correctly be blocked by. `adopt_vars`
+    (T27) is the 4 required-var dict --wiki-title/--org-name/
+    --content-language/--repo-name collect on the CLI, identical shape to
+    init's own collect_vars(), threaded straight through to run_adopt()
+    unchanged; None (every pre-T27 direct call) is normalized to {} here,
+    which only matters on the --adopt branch."""
+    manifest_path = Path(target) / MANIFEST_FILENAME
+    if adopt:
+        # Peek at the manifest before the clean-tree gate below -- ONLY
+        # to decide whether this run is the no-manifest bootstrap. When a
+        # valid manifest already exists, this changes nothing: execution
+        # falls through to the unchanged clean-tree-then-manifest-read
+        # flow below, exactly as before T27.
+        peek_manifest, peek_error = read_manifest_for_upgrade(manifest_path)
+        if peek_error is not None:
+            return run_adopt(target, to, library_path, adopt_vars or {})
+
     porcelain = git_status_porcelain(target)
     if not is_clean_tree(porcelain):
         print(DIRTY_TREE_MESSAGE, file=sys.stderr)
         return 2
 
-    manifest_path = Path(target) / MANIFEST_FILENAME
     manifest, error = read_manifest_for_upgrade(manifest_path)
     if error is not None:
-        if not adopt:
-            print(error, file=sys.stderr)
-            return 1
-        print("upgrade: --adopt without an existing, valid manifest is "
-              "not yet implemented", file=sys.stderr)
-        return 3
+        print(error, file=sys.stderr)
+        return 1
 
     harness_version = manifest.get("harness_version", "")
     recorded = managed_template_files(manifest.get("files", {}))
@@ -1188,6 +1441,13 @@ def parse_args(argv):
     parser.add_argument("--library-path")
     parser.add_argument("--allow-downgrade", action="store_true")
     parser.add_argument("--commit", action="store_true")
+    # T27: --adopt's 4 required template variables, identical contract to
+    # init.py's own --wiki-title/--org-name/--content-language/--repo-name
+    # (init.py:281-284) -- explicit flags only, no back-parser (A5).
+    parser.add_argument("--wiki-title", dest="wiki_title")
+    parser.add_argument("--org-name", dest="org_name")
+    parser.add_argument("--content-language", dest="content_language")
+    parser.add_argument("--repo-name", dest="repo_name")
     return parser.parse_args(argv)
 
 
@@ -1197,9 +1457,15 @@ def main(argv):
         # --check ignores every other flag and runs as an early, standalone
         # branch, before any of the ordered steps in plan-v3 section 3.2.
         return run_check(Path(args.target))
+    adopt_vars = {
+        "wiki_title": args.wiki_title,
+        "org_name": args.org_name,
+        "content_language": args.content_language,
+        "repo_name": args.repo_name,
+    }
     return run_upgrade(Path(args.target), args.adopt, args.adopt_drift,
                        args.to, args.library_path, args.allow_downgrade,
-                       args.apply, args.commit)
+                       args.apply, args.commit, adopt_vars)
 
 
 if __name__ == "__main__":
