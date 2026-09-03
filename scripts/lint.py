@@ -8,6 +8,7 @@ Python 3 stdlib only.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import subprocess
@@ -151,15 +152,51 @@ def extract_links(text):
 
 PAGE_REQUIRED = ("title", "topics")
 
+# Every subprocess this linter spawns is bounded. An unbounded git call is
+# an unbounded hang inside a pre-commit hook, which to the user is
+# indistinguishable from a broken one (backlog A5;
+# ~/.claude/rules/fail-closed-edges.md obligation 3).
+SUBPROCESS_TIMEOUT = 30
+
+
+# Which containers each rules document may govern. A rules file governs the
+# directory it sits in, so it is only a rules file THERE -- and the set is
+# per-filename, because the harness only ever vendors recipes.md into
+# sources/cards/ (see init.py's step 8).
+RULES_CONTAINERS = {
+    "AGENTS.md": ("", "wiki/", "sources/", "sources/cards/"),
+    "CLAUDE.md": ("", "wiki/", "sources/", "sources/cards/"),
+    "recipes.md": ("sources/cards/",),
+}
+
+
+def is_rules_file(path):
+    """Pure. True when `path` is one of the harness's own rules documents
+    AT a container root -- not merely a wiki page that happens to share its
+    basename.
+
+    Matching by basename anywhere in the tree meant a genuine page such as
+    `wiki/recipes.md` was silently skipped by every page check (backlog
+    A6). Scope is what makes a rules file a rules file: `sources/cards/
+    recipes.md` governs the cards directory; `wiki/recipes.md` is a page
+    about recipes."""
+    posix = PurePosixPath(path)
+    containers = RULES_CONTAINERS.get(posix.name)
+    if containers is None:
+        return False
+    parent = str(posix.parent)
+    prefix = "" if parent == "." else parent + "/"
+    return prefix in containers
+
 
 def _wiki_pages(files):
     return [p for p in files if p.startswith("wiki/") and p.endswith(".md")
-            and PurePosixPath(p).name not in RULES_FILES]
+            and not is_rules_file(p)]
 
 
 def _cards(files):
     return [p for p in files if p.startswith("sources/cards/") and p.endswith(".md")
-            and PurePosixPath(p).name not in RULES_FILES]
+            and not is_rules_file(p)]
 
 
 def check_broken_links(files):
@@ -414,9 +451,16 @@ def scan(root):
 
 
 def git_changes(root):
+    """Impure edge. The change set the pre-commit hook must judge.
+
+    `--cached` (index vs HEAD), NOT `diff HEAD` (worktree vs HEAD): the
+    commit that lands is the INDEX. Reading the worktree was wrong in both
+    directions (backlog A1) -- a staged tamper whose worktree copy was
+    restored slipped through the RAW check entirely, and an unstaged edit
+    to a raw file blocked an otherwise unrelated commit."""
     result = subprocess.run(
-        ["git", "-C", str(root), "diff", "HEAD", "--name-status"],
-        capture_output=True, text=True)
+        ["git", "-C", str(root), "diff", "--cached", "--name-status"],
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT)
     if result.returncode != 0:
         return []
     return parse_name_status(result.stdout)
@@ -428,12 +472,12 @@ def hooks_finding(root):
     skip this check entirely."""
     is_worktree = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
-        capture_output=True, text=True)
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT)
     if is_worktree.returncode != 0:
         return []
     hooks_path = subprocess.run(
         ["git", "-C", str(root), "config", "--get", "core.hooksPath"],
-        capture_output=True, text=True)
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT)
     if hooks_path.stdout.strip() != ".githooks":
         return [Finding("ERROR", "HOOKS", ".githooks",
                         "commit hook not active - run: git config core.hooksPath .githooks")]
@@ -530,8 +574,17 @@ def read_harness_manifest(root):
 
 
 def main(argv):
-    root = Path(argv[argv.index("--root") + 1]) if "--root" in argv \
-        else Path(__file__).resolve().parent.parent
+    # argparse, not a hand-rolled argv.index(): `lint.py --root` with no
+    # value raised IndexError -- a traceback out of a git hook rather than
+    # a usage message (backlog A9).
+    parser = argparse.ArgumentParser(
+        prog="lint.py",
+        description="Mechanical lint for a wiki-harness wiki.")
+    parser.add_argument(
+        "--root", type=Path, default=Path(__file__).resolve().parent.parent,
+        help="wiki root to lint (default: the repository this script sits in)")
+    args = parser.parse_args(argv)
+    root = args.root
     files, enc = scan(root)
     findings = run(files, git_changes(root)) + enc
     findings += hooks_finding(root)

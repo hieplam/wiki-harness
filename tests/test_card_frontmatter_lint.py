@@ -18,19 +18,25 @@ FIXTURE_SCHEMA = (FIXTURE / SCHEMA_PATH).read_text(encoding="utf-8")
 
 class CardIdScanPattern(unittest.TestCase):
     """card_id_scan_pattern() is a pure string transform, not a second
-    declaration of card-id shape: it derives lint.py's unanchored
-    citation-scan regex from card-schema.json's own id.pattern by
-    stripping the required leading '^' and trailing '$'. It is trivial
-    (pattern[1:-1]) because load_schema()'s id.pattern contract (see
-    IdPatternAnchorContract above) guarantees any pattern reaching it is
-    exactly one leading '^' and one trailing unescaped '$' around a
-    non-empty, anchor-free body -- there is no other shape left to guess
-    at."""
+    declaration of card-id shape: it derives lint.py's citation-scan regex
+    from card-schema.json's own id.pattern by stripping the required
+    leading '^' and trailing '$', then wrapping the body in zero-width
+    id-character lookarounds. The strip is trivial because load_schema()'s
+    id.pattern contract (see IdPatternAnchorContract above) guarantees any
+    pattern reaching it is exactly one leading '^' and one trailing
+    unescaped '$' around a non-empty, anchor-free body.
 
-    def test_card_id_scan_pattern_strips_anchors(self):
+    The lookarounds were added by backlog A2: the bare stripped body is a
+    SUBSTRING search, so src-2026-08-06-001 matched inside
+    src-2026-08-06-0011 and every page mentioning the longer id silently
+    counted as citing the shorter one. `\\b` cannot express this -- a card
+    id ends in a digit and the character that would follow is also a
+    digit, so no word boundary exists there."""
+
+    def test_card_id_scan_pattern_strips_anchors_and_guards_the_token(self):
         self.assertEqual(
             card_id_scan_pattern(r"^src-\d{4}-\d{2}-\d{2}-\d{3}$"),
-            r"src-\d{4}-\d{2}-\d{2}-\d{3}")
+            r"(?<![A-Za-z0-9_-])src-\d{4}-\d{2}-\d{2}-\d{3}(?![A-Za-z0-9_-])")
 
 
 class CardIdPatternFromSchema(unittest.TestCase):
