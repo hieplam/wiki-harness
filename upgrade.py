@@ -342,6 +342,23 @@ def is_clean_tree(porcelain_output):
     return porcelain_output.strip() == ""
 
 
+def format_dirty_tree(porcelain_output):
+    """Pure (A11). DIRTY_TREE_MESSAGE verbatim (its first line is the crash-
+    recovery contract quoted in the T16 brief and must not change), then one
+    line per `git status --porcelain` entry so the user can see WHAT is
+    dirty -- an untracked path (`??`) is flagged as such, because "commit or
+    stash" is misleading advice for a settings directory that simply needs
+    moving aside."""
+    lines = [DIRTY_TREE_MESSAGE, "Dirty paths:"]
+    for entry in porcelain_output.splitlines():
+        if not entry.strip():
+            continue
+        status, _, path = entry[:2], entry[2:3], entry[3:]
+        suffix = " (untracked)" if status == "??" else ""
+        lines.append(f"  {status} {path}{suffix}")
+    return "\n".join(lines)
+
+
 def managed_template_files(files):
     """Pure. `files` is a manifest's "files" map ({path: {"role": ...,
     "sha256": ...}}). Returns the subset whose role is managed or
@@ -410,6 +427,23 @@ def parse_to_version(to_arg):
         return None
     harness_version = "{}.{}.{}".format(*parsed)
     return harness_version, f"v{harness_version}"
+
+
+def to_version_error(to_arg):
+    """Pure (A10). Returns None when `to_arg` parses as a version, else the
+    one-line refusal main() prints. Every non---check path (upgrade, --report,
+    dry run, --adopt) resolves a target release from --to, so a missing or
+    malformed value must be refused at the edge -- never left to
+    parse_to_version() returning None and the caller unpacking it into a
+    TypeError traceback."""
+    if to_arg is None:
+        return ("upgrade: --to vX.Y.Z is required for every mode except "
+                "--check (e.g. `--to v1.1.0`); run `--check` to see which "
+                "release is available.")
+    if parse_semver(to_arg) is None:
+        return (f"upgrade: --to {to_arg!r} is not a version; expected "
+                "vX.Y.Z (e.g. `--to v1.1.0`).")
+    return None
 
 
 def is_downgrade(to_version, installed_version):
@@ -1334,7 +1368,7 @@ def run_upgrade(target, adopt, adopt_drift_paths, to, library_path,
 
     porcelain = git_status_porcelain(target)
     if not is_clean_tree(porcelain):
-        print(DIRTY_TREE_MESSAGE, file=sys.stderr)
+        print(format_dirty_tree(porcelain), file=sys.stderr)
         return 2
 
     manifest, error = read_manifest_for_upgrade(manifest_path)
@@ -1457,6 +1491,10 @@ def main(argv):
         # --check ignores every other flag and runs as an early, standalone
         # branch, before any of the ordered steps in plan-v3 section 3.2.
         return run_check(Path(args.target))
+    to_error = to_version_error(args.to)
+    if to_error is not None:
+        print(to_error, file=sys.stderr)
+        return 2
     adopt_vars = {
         "wiki_title": args.wiki_title,
         "org_name": args.org_name,
