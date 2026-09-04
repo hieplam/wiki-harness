@@ -26,6 +26,32 @@ the release type or the Compatibility field is non-conformant with
 `docs/compatibility-policy.md` §8.
 ```
 
+## [1.1.1] — 2026-09-04
+
+**Release type:** PATCH
+
+Closes `HARDENING-BACKLOG.md` §A′ (A10, A11) — two `upgrade.py` edge findings
+from the first real consumer upgrade (ogp-wiki 1.0.0 → 1.1.0).
+
+### Fixed
+- **A10 — `upgrade.py <target> --report` without `--to` crashed.**
+  `parse_to_version(None)` returned `None` and `run_upgrade()` unpacked it into
+  a `TypeError` traceback. Every mode except `--check` resolves a target release
+  from `--to`, so `main()` now refuses a missing or malformed `--to` with one
+  line (`to_version_error()`, pure) and exit 2 — no traceback reaches the user.
+- **A11 — the clean-tree refusal did not say what was dirty.** An untracked
+  file (a `.claude/` settings directory, say) blocked the upgrade with only
+  "commit or stash local changes". The refusal keeps that verbatim first line
+  (the crash-recovery contract) and now lists every `git status --porcelain`
+  entry, flagging untracked paths, via `format_dirty_tree()` (pure).
+
+### Compatibility
+No finding code, MANAGED/TEMPLATE path, or manifest-schema change. CLI: one new
+refusal (exit 2) where there was a traceback (exit 1), and extra lines appended
+after the unchanged dirty-tree message; scripts matching that message's first
+line are unaffected. Any `upgrade` into this release is a no-op on the wiki's
+own files.
+
 ## [1.1.0] — 2026-09-04
 
 **Release type:** MINOR

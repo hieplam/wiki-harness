@@ -264,3 +264,78 @@ class LintCliUsesArgparse(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- A10
+
+class UpgradeRefusesMissingOrMalformedTo(unittest.TestCase):
+    """A10. `upgrade.py <target> --report` without `--to` crashed with a
+    TypeError traceback (`parse_to_version(None)` returned None and the
+    caller unpacked it). A traceback from a user-facing CLI is a crash,
+    not a verdict; the edge must refuse with one line and exit 2."""
+
+    def _wiki(self, tmp):
+        sys.path.insert(0, str(ROOT))
+        from tests.test_upgrade import _make_wiki  # noqa: E402
+        return _make_wiki(Path(tmp) / "target")
+
+    def _run(self, target, *args):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "upgrade.py"), str(target), *args],
+            capture_output=True, text=True, timeout=60)
+
+    def test_report_without_to_refuses_without_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run(self._wiki(tmp), "--report")
+            combined = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 2, combined)
+            self.assertNotIn("Traceback", combined)
+            self.assertIn("--to", combined)
+
+    def test_malformed_to_refuses_without_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run(self._wiki(tmp), "--to", "latest", "--report")
+            combined = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 2, combined)
+            self.assertNotIn("Traceback", combined)
+            self.assertIn("latest", combined)
+
+    def test_check_still_needs_no_to(self):
+        """--check is the standalone branch and must be unaffected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run(self._wiki(tmp), "--check")
+            self.assertNotIn("Traceback", result.stdout + result.stderr)
+            self.assertNotIn("--to", result.stderr)
+
+
+# ---------------------------------------------------------------- A11
+
+class DirtyTreeRefusalNamesThePaths(unittest.TestCase):
+    """A11. The clean-tree gate is `git status --porcelain` == empty, so an
+    UNTRACKED file (a `.claude/` settings directory, say) blocks the upgrade
+    with a message that only says "commit or stash local changes". The
+    refusal must keep its verbatim first line and then name each path,
+    flagging the untracked ones, so the user knows what to move aside."""
+
+    def test_format_dirty_tree_lists_paths_and_flags_untracked(self):
+        sys.path.insert(0, str(ROOT))
+        import upgrade  # noqa: E402
+        text = upgrade.format_dirty_tree(" M wiki/AGENTS.md\n?? .claude/\n")
+        self.assertTrue(text.startswith(upgrade.DIRTY_TREE_MESSAGE))
+        self.assertIn("wiki/AGENTS.md", text)
+        self.assertIn(".claude/ (untracked)", text)
+
+    def test_untracked_directory_is_named_in_the_refusal(self):
+        sys.path.insert(0, str(ROOT))
+        from tests.test_upgrade import _make_wiki  # noqa: E402
+        with tempfile.TemporaryDirectory() as tmp:
+            target = _make_wiki(Path(tmp) / "target")
+            (target / "notes").mkdir()
+            (target / "notes" / "todo.txt").write_text("scratch\n", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "upgrade.py"), str(target), "--to", "v1.1.0"],
+                capture_output=True, text=True, timeout=60)
+            combined = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 2, combined)
+            self.assertIn("commit or stash local changes before running upgrade", combined)
+            self.assertIn("notes/ (untracked)", combined)
