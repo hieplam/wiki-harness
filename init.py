@@ -38,6 +38,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
 from manifest import compute_manifest, hash_tree, write_manifest  # noqa: E402
 
 MANIFEST_FILENAME = ".wiki-harness-manifest.json"
+# Written into every release payload by tools/build_release.py; absent
+# from a git checkout, which answers the same questions with git.
+RELEASE_METADATA_FILENAME = "RELEASE.json"
 
 # Every variable the TEMPLATE-class sources substitute. `REQUIRED_VARS` is
 # the subset a caller must actually answer; `DEFAULTED_VARS` is the subset
@@ -479,32 +482,61 @@ def seed_claude_stubs(library_root, target):
 
 def read_version(library_root):
     """Impure edge. The library's own version, from its VERSION file.
-
-    The file carries release-please's `x-release-please-version` marker so
-    the release PR can rewrite the version in place, which means the line
-    is `1.2.0 # x-release-please-version`, not a bare version. Take the
-    first whitespace-delimited token: the whole line would otherwise reach
-    the consumer's manifest and init's summary."""
+    release-please rewrites that file on every release; take the first
+    whitespace-delimited token so a stray trailing comment cannot ride into
+    the consumer's manifest and init's summary line."""
     text = (library_root / "VERSION").read_text(encoding="utf-8").strip()
     return text.split()[0] if text.split() else ""
 
 
+def read_release_metadata(library_root):
+    """Impure edge. RELEASE.json, present only when the library root is an
+    unpacked release payload rather than a git checkout.
+
+    An installed wiki-harness runs from a tarball with no `.git`, so the
+    three source_* edges below have nothing to interrogate and would record
+    a local path, "unknown", and forty zeros in the consumer's manifest.
+    tools/build_release.py records the real values here at release time.
+
+    Returns {} for anything unusable -- absent, unreadable, not JSON, not a
+    JSON object -- so the git path below still runs. This is read on a
+    scaffold a person is waiting on: a malformed file must degrade, never
+    raise."""
+    path = library_root / RELEASE_METADATA_FILENAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _released(library_root, key):
+    """Impure edge. One RELEASE.json string field, or None when the payload
+    has no usable value for it. A non-string is treated as absent: the
+    manifest's consumers expect strings, and a number here would travel
+    into `upgrade --check`."""
+    value = read_release_metadata(library_root).get(key)
+    return value if isinstance(value, str) and value else None
+
+
 def read_source_url(library_root):
-    result = _git(library_root, "config", "--get", "remote.origin.url")
-    url = result.stdout.strip()
-    return url if url else str(library_root)
+    return (_released(library_root, "source_url")
+            or _git(library_root, "config", "--get",
+                    "remote.origin.url").stdout.strip()
+            or str(library_root))
 
 
 def read_source_ref(library_root):
-    result = _git(library_root, "describe", "--tags", "--always")
-    ref = result.stdout.strip()
-    return ref if ref else "unknown"
+    return (_released(library_root, "tag")
+            or _git(library_root, "describe", "--tags",
+                    "--always").stdout.strip()
+            or "unknown")
 
 
 def read_source_commit(library_root):
-    result = _git(library_root, "rev-parse", "HEAD")
-    commit = result.stdout.strip()
-    return commit if commit else "0" * 40
+    return (_released(library_root, "commit")
+            or _git(library_root, "rev-parse", "HEAD").stdout.strip()
+            or "0" * 40)
 
 
 def write_manifest_file(library_root, target, values, scripts_paths, hooks_paths):
