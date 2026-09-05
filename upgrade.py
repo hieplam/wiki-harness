@@ -194,6 +194,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -810,7 +811,7 @@ def git_status_porcelain(target):
     edge ... returning its raw output")."""
     result = subprocess.run(
         ["git", "-C", str(target), "status", "--porcelain"],
-        capture_output=True, text=True)
+        capture_output=True, text=True, timeout=120)
     return result.stdout
 
 
@@ -854,9 +855,9 @@ def resolve_library_checkout(version, library_path):
         return Path(library_path)
     checkout = Path(__file__).resolve().parent
     subprocess.run(["git", "-C", str(checkout), "fetch", "--tags"],
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, timeout=300)
     subprocess.run(["git", "-C", str(checkout), "checkout", f"v{version}"],
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, timeout=120)
     return checkout
 
 
@@ -1011,10 +1012,14 @@ def run_scratch_lint(scratch):
     --root <scratch>` and returns (ok, output) -- output is stdout+stderr
     combined, so a caller that aborts on failure can print exactly what
     lint.py found."""
+    env = dict(os.environ)
+    # Do not litter the scratch with bytecode this run would then have to
+    # filter back out again -- see is_generated_bytecode().
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     result = subprocess.run(
         [sys.executable, str(Path(scratch) / "scripts" / "lint.py"),
          "--root", str(scratch)],
-        capture_output=True, text=True)
+        capture_output=True, text=True, env=env, timeout=120)
     return result.returncode == 0, result.stdout + result.stderr
 
 
@@ -1057,7 +1062,7 @@ def git_checkout_dot(target):
     `git -C <dir> ...` edges (git_status_porcelain(),
     resolve_library_checkout())."""
     subprocess.run(["git", "-C", str(target), "checkout", "--", "."],
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, timeout=120)
 
 
 def git_reset_index(target):
@@ -1071,7 +1076,7 @@ def git_reset_index(target):
     the index back to HEAD first makes the following `git checkout -- .`
     genuinely restore the pre-upgrade tree."""
     subprocess.run(["git", "-C", str(target), "reset", "-q"],
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, timeout=120)
 
 
 def git_clean_untracked(target):
@@ -1086,7 +1091,7 @@ def git_clean_untracked(target):
     the apply began: any untracked file present now can only be the
     aborted apply's own write."""
     subprocess.run(["git", "-C", str(target), "clean", "-fd"],
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, timeout=120)
 
 
 def git_add_all(target):
@@ -1095,7 +1100,7 @@ def git_add_all(target):
     12's write_manifest() write) ahead of git_commit()'s real `git commit`
     subprocess call."""
     subprocess.run(["git", "-C", str(target), "add", "-A"],
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, timeout=120)
 
 
 def git_commit(target, subject):
@@ -1108,8 +1113,21 @@ def git_commit(target, subject):
     rolls back on rejection can report exactly what the hook printed."""
     result = subprocess.run(
         ["git", "-C", str(target), "commit", "-m", subject],
-        capture_output=True, text=True)
+        capture_output=True, text=True, timeout=120)
     return result.returncode == 0, result.stdout + result.stderr
+
+
+# Python bytecode the harness's own tooling generates. `lint.py` running
+# inside the scratch imports the scratch's manifest/card_frontmatter_lint
+# modules, and CPython writes scripts/__pycache__/*.pyc next to them. Those
+# files belong to no ownership class, are not in any manifest, and must
+# never be reported as a pending change or promoted into a consumer's wiki.
+# (Invisible on macOS, whose system interpreter redirects bytecode to
+# ~/Library/Caches/com.apple.python; it fires on every Linux upgrade.)
+def is_generated_bytecode(rel):
+    """Pure. True when a scratch-relative path is Python bytecode rather
+    than harness content."""
+    return "__pycache__" in rel.parts or rel.suffix in (".pyc", ".pyo")
 
 
 def promote_scratch(scratch, target):
@@ -1145,7 +1163,7 @@ def promote_scratch(scratch, target):
             if not src.is_file():
                 continue
             rel = src.relative_to(scratch)
-            if rel.as_posix() == MANIFEST_FILENAME:
+            if rel.as_posix() == MANIFEST_FILENAME or is_generated_bytecode(rel):
                 continue
             dst = target / rel
             if not dst.is_file() or dst.read_bytes() != src.read_bytes():
@@ -1175,7 +1193,7 @@ def pending_changes(scratch, target):
         if not src.is_file():
             continue
         rel = src.relative_to(scratch)
-        if rel.as_posix() == MANIFEST_FILENAME:
+        if rel.as_posix() == MANIFEST_FILENAME or is_generated_bytecode(rel):
             continue
         dst = target / rel
         if not dst.is_file() or dst.read_bytes() != src.read_bytes():
