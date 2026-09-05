@@ -648,3 +648,202 @@ class SummaryNamesTheRunningVersion(unittest.TestCase):
             result = _run_init(Path(tmp) / "version-summary-wiki")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(f"wiki-harness v{expected}", result.stdout)
+
+
+class DefaultedVarsPureCore(unittest.TestCase):
+    """v1.2.0: only --wiki-title is required; the other three template
+    variables are DERIVED when the caller leaves them empty. The derivation
+    itself is pure -- apply_defaults() takes the already-collected values
+    plus the target's basename (computed at the edge) and returns the
+    filled dict, so no test here needs a filesystem or a prompt."""
+
+    def test_defaults_derive_every_optional_var(self):
+        filled = init_module.apply_defaults(
+            {"wiki_title": "Immigration Wiki", "org_name": "",
+             "content_language": "", "repo_name": ""},
+            "immigration-wiki")
+
+        self.assertEqual(filled["wiki_title"], "Immigration Wiki")
+        self.assertEqual(filled["repo_name"], "immigration-wiki")
+        self.assertEqual(filled["content_language"], "English")
+        self.assertEqual(filled["org_name"], "Immigration Wiki")
+
+    def test_defaults_never_override_a_supplied_value(self):
+        supplied = {"wiki_title": "Immigration Wiki", "org_name": "Hiep",
+                    "content_language": "Vietnamese", "repo_name": "im-wiki"}
+
+        self.assertEqual(init_module.apply_defaults(supplied, "ignored-name"),
+                         supplied)
+
+    def test_only_wiki_title_is_required(self):
+        self.assertEqual(
+            init_module.missing_required_vars(
+                {"wiki_title": "", "org_name": "", "content_language": "",
+                 "repo_name": ""}),
+            ["wiki_title"])
+        self.assertEqual(
+            init_module.missing_required_vars(
+                {"wiki_title": "Immigration Wiki", "org_name": "",
+                 "content_language": "", "repo_name": ""}),
+            [])
+
+
+class DefaultedVarsTargetShapes(unittest.TestCase):
+    """repo_name defaults to the target's basename, so the DERIVATION has to
+    survive every spelling a person actually types for the target: an
+    absolute path, a bare relative name, a name with a trailing slash, and
+    `.` for the current directory. Each shape reaches a different branch of
+    the edge that computes the basename."""
+
+    def _repo_name_for(self, target_argv, cwd=None):
+        original_cwd = os.getcwd()
+        try:
+            if cwd is not None:
+                os.chdir(cwd)
+            exit_code = init_module.main(
+                [target_argv, "--wiki-title", "Immigration Wiki",
+                 "--non-interactive"])
+        finally:
+            os.chdir(original_cwd)
+        self.assertEqual(exit_code, 0)
+        return exit_code
+
+    def _manifest_vars(self, scaffold):
+        return json.loads(
+            (scaffold / ".wiki-harness-manifest.json").read_text(
+                encoding="utf-8"))["vars"]
+
+    def test_absolute_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scaffold = Path(tmp) / "immigration-wiki"
+            self._repo_name_for(str(scaffold))
+
+            self.assertEqual(self._manifest_vars(scaffold)["repo_name"],
+                             "immigration-wiki")
+
+    def test_relative_target(self):
+        """The shape a person actually types: cd somewhere, name the dir."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._repo_name_for("immigration-wiki", cwd=tmp)
+
+            self.assertEqual(
+                self._manifest_vars(Path(tmp) / "immigration-wiki")["repo_name"],
+                "immigration-wiki")
+
+    def test_relative_target_with_trailing_slash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._repo_name_for("immigration-wiki/", cwd=tmp)
+
+            self.assertEqual(
+                self._manifest_vars(Path(tmp) / "immigration-wiki")["repo_name"],
+                "immigration-wiki")
+
+    def test_dot_target_uses_the_current_directory_name(self):
+        """`cd immigration-wiki && init.py .` -- Path('.').name is the empty
+        string, so the edge must resolve it before the basename is taken."""
+        with tempfile.TemporaryDirectory() as tmp:
+            scaffold = Path(tmp) / "immigration-wiki"
+            scaffold.mkdir()
+            self._repo_name_for(".", cwd=str(scaffold))
+
+            self.assertEqual(self._manifest_vars(scaffold)["repo_name"],
+                             "immigration-wiki")
+
+
+class MinimalNonInteractiveInvocation(unittest.TestCase):
+    """The one-flag command a human is told to copy-paste, run as a real
+    subprocess: scaffolds a lint-clean wiki and renders the derived
+    variables into the TEMPLATE-class files."""
+
+    def test_one_flag_scaffolds_a_lint_clean_wiki(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "immigration-wiki"
+            result = subprocess.run(
+                [sys.executable, str(INIT_PY), str(target),
+                 "--wiki-title", "Immigration Wiki", "--non-interactive"],
+                capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                timeout=120)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn("lint: 0 error(s), 0 warning(s)", result.stdout)
+
+            agents = (target / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn("Immigration Wiki", agents)
+            self.assertIn("immigration-wiki", agents)
+            self.assertIn("English", agents)
+            self.assertNotIn("$", agents.splitlines()[0])
+
+
+class InteractivePromptsOfferTheDefault(unittest.TestCase):
+    """Interactive mode: --wiki-title keeps re-prompting until it is
+    answered; every derived variable is offered with its default in the
+    prompt and accepts an empty answer."""
+
+    def _collect(self, answers, target_name="immigration-wiki"):
+        prompts = []
+        replies = iter(answers)
+
+        def fake_prompt(text):
+            prompts.append(text)
+            return next(replies)
+
+        args = init_module.parse_args(["immigration-wiki"])
+        values, _ = init_module.collect_vars(
+            args, prompt=fake_prompt, read_answers=lambda _p: {},
+            target_name=target_name)
+        return prompts, init_module.apply_defaults(values, target_name)
+
+    def test_empty_answers_take_the_offered_defaults(self):
+        prompts, values = self._collect(["Immigration Wiki", "", "", ""])
+
+        self.assertEqual(values["wiki_title"], "Immigration Wiki")
+        self.assertEqual(values["org_name"], "Immigration Wiki")
+        self.assertEqual(values["content_language"], "English")
+        self.assertEqual(values["repo_name"], "immigration-wiki")
+        self.assertIn("[Immigration Wiki]", prompts[1])
+        self.assertIn("[English]", prompts[2])
+        self.assertIn("[immigration-wiki]", prompts[3])
+
+    def test_wiki_title_reprompts_until_answered(self):
+        prompts, values = self._collect(["", "  ", "Immigration Wiki",
+                                         "", "", ""])
+
+        self.assertEqual(values["wiki_title"], "Immigration Wiki")
+        self.assertEqual(prompts[:3], [prompts[0]] * 3)
+        self.assertNotIn("[", prompts[0])
+
+
+class PromptWithNoInputRefusesCleanly(unittest.TestCase):
+    """A prompt with nothing on stdin -- init run from a script, a CI job, or
+    any non-tty context without --non-interactive -- must refuse with one
+    line and exit 2. `input()` raises EOFError there, and an escaping
+    traceback is a crash to the user, not a verdict."""
+
+    def test_closed_stdin_exits_2_without_a_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "immigration-wiki"
+            result = subprocess.run(
+                [sys.executable, str(INIT_PY), str(target),
+                 "--wiki-title", "Immigration Wiki"],
+                capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                timeout=120)
+
+            self.assertEqual(result.returncode, 2,
+                             result.stdout + result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn("--non-interactive", result.stderr)
+            self.assertFalse(target.exists())
+
+    def test_closed_stdin_on_the_required_var_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "immigration-wiki"
+            result = subprocess.run(
+                [sys.executable, str(INIT_PY), str(target)],
+                capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                timeout=120)
+
+            self.assertEqual(result.returncode, 2,
+                             result.stdout + result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(target.exists())

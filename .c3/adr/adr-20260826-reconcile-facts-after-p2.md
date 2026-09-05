@@ -1,6 +1,6 @@
 ---
 id: adr-20260826-reconcile-facts-after-p2
-c3-seal: c1e9422c4ba2115b81646d2d7afc2874a6043d1ab776a654f385a1f3a514650a
+c3-seal: 1c53d00778001b9c82528e3265e57a45dc87c3c062e3403257fccdb9992c5efa
 title: reconcile-facts-after-p2
 type: adr
 goal: |-
@@ -113,11 +113,11 @@ truth.
 | Check | Result |
 | --- | --- |
 | c3x read c3-101 --full piped through grep -q 'check_harness', 'c3-201', 'A10' | Each must exit 0 |
-| c3x read c3-201 --full | grep -q 'scripts/manifest.py' | Must exit 0 |
-| c3x read ref-ownership-classes --full | grep -q 'scripts/manifest.py' | Must exit 0 |
+| c3x read c3-201 --full | grep -q 'scripts/manifest.py' |
+| c3x read ref-ownership-classes --full | grep -q 'scripts/manifest.py' |
 | c3x read ref-verbatim-port --full piped through grep -q 'T11', 'A10' | Each must exit 0 |
-| c3x read c3-102 --full | grep -c 'raises on malformed JSON' | Must print 0 |
-| c3x read c3-102 --full | grep -q 'fails closed' | Must exit 0 |
+| c3x read c3-102 --full | grep -c 'raises on malformed JSON' |
+| c3x read c3-102 --full | grep -q 'fails closed' |
 | c3x read c3-103 --full piped through grep -q 'card_id_pattern: str', 'main(argv: list\[str\]) -> int' | Each must exit 0 |
 | c3x check | Must exit 0, ok: true (stale-anchor warnings acceptable) |
 | python3 -m unittest discover -s tests -q | Must stay green (doc-only change; no code touched) |

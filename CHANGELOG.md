@@ -26,6 +26,70 @@ the release type or the Compatibility field is non-conformant with
 `docs/compatibility-policy.md` §8.
 ```
 
+## [1.2.0] — 2026-09-05
+
+**Release type:** MINOR
+
+Makes `init.py` usable without reading its source: one required flag, a
+human-facing `README.md`, and an agent-facing `AGENTS.md`.
+
+### Changed
+- **Only `--wiki-title` is required.** `--org-name`, `--content-language`, and
+  `--repo-name` are now *derived* when the caller leaves them empty, by the new
+  pure `apply_defaults()`: `repo_name` from the target directory's resolved
+  basename, `content_language` from `English`, `org_name` from `wiki_title`. A
+  value the caller supplies is never overridden. The minimal invocation is now
+  `python3 init.py <target> --wiki-title 'My Wiki' --non-interactive`.
+  `upgrade.py --adopt` derives the same three from the same function.
+- **Interactive prompts offer their default.** `--wiki-title` still re-prompts
+  until answered; each derived variable is offered as `Label [default]:` and an
+  empty answer takes it.
+- **`templates/README.md.tmpl` and `templates/AGENTS.root.md.tmpl` reworded.**
+  Both named the organisation possessively (`$org_name's knowledge source of
+  truth`), which reads wrong now that `org_name` can default to the wiki title;
+  they now read `the knowledge source of truth for $org_name`. The rendered
+  README's `<h1>` is the wiki title, with the repository name moved into the
+  line below it.
+
+### Fixed
+- **A prompt with no input crashed with a traceback.** Run without
+  `--non-interactive` from a script, a CI job, or any non-tty context,
+  `input()` raises `EOFError` and it escaped as an unhandled traceback (present
+  since v1.0.0; `--wiki-title` hit it first). The prompt edge now converts EOF
+  into a typed refusal naming the flag that fixes it, and exits 2.
+
+### Added
+- `README.md` — a quickstart a person can follow without opening any source
+  file: the two-command setup, the full flag table with every default, what the
+  scaffold contains, the card/origin/trust model, and the upgrade path.
+- `AGENTS.md` — the working manual for an agent changing this library: layout,
+  the six hard rules (stdlib-only 3.9, pure core, fail-closed edges, verbatim
+  port, no OGP strings, the compatibility policy), how to test, how to change a
+  template, and the release checklist. `CLAUDE.md` is one line, `@AGENTS.md`, so
+  every vendor reads the same instructions.
+- `docs/compatibility-policy.md` §2.1 — splits the CLI-surface row in two.
+  `upgrade.py`'s surface stays pinned as hard as the finding codes; `init.py`'s
+  MINOR column now permits a required variable to become derived, because
+  `init.py` runs once at first adoption and no installed consumer ever re-runs
+  it. The reverse move (a derived variable becoming required, a flag removed or
+  repurposed) remains a §3 removal.
+
+### Compatibility
+No finding code, MANAGED/TEMPLATE path, or manifest-schema change; `upgrade.py`'s
+CLI is untouched. Every `init.py`/`upgrade.py --adopt` invocation that worked
+before this release still works, produces the same files from the same flags, and
+prints the same messages — the only behavioural change is that invocations
+previously *refused* with `missing required value(s) for --non-interactive mode`
+now succeed, deriving what they omitted, and that an interactive run with no
+readable stdin now refuses (exit 2) where it previously crashed (exit 1). A script that depends on that refusal for
+`--org-name`, `--content-language`, or `--repo-name` (not `--wiki-title`, still
+required) must pass the values explicitly.
+
+Two TEMPLATE-class files changed content, so a consumer's next `upgrade` re-renders
+their `AGENTS.md` and `README.md` with the reworded lines above; a consumer that
+hand-edited either already carries that as drift and is unaffected by this note.
+`upgrade --check` shows the diff before anything is written.
+
 ## [1.1.1] — 2026-09-04
 
 **Release type:** PATCH

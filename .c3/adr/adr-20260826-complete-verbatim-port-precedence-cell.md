@@ -1,6 +1,6 @@
 ---
 id: adr-20260826-complete-verbatim-port-precedence-cell
-c3-seal: 0c00cc3ef436fbd8c909fec024804e3d216a7c820d0da9ae1a3d03ae67cd3584
+c3-seal: dde8b4d6b04b2e81a52f439d512db0493f0a5dc4108362d31ffe22ba880da982
 title: complete-verbatim-port-precedence-cell
 type: adr
 goal: |-
@@ -55,6 +55,6 @@ the Rationale/Notes cell, and without touching any other fact, row, or the under
 
 | Check | Result |
 | --- | --- |
-| c3x read c3-101 --full | grep -c 'are the only sanctioned deltas' | Must be 0 after apply (was 1 before) |
-| c3x read c3-101 --full | grep -q 'A10' | Must still match (Governs cell unchanged) |
+| c3x read c3-101 --full | grep -c 'are the only sanctioned deltas' |
+| c3x read c3-101 --full | grep -q 'A10' |
 | c3x check (unscoped) | Must report ok: true |

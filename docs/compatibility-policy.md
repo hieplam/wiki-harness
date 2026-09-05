@@ -32,12 +32,36 @@ forward.
 | Findings on unchanged content | Must be byte-identical: the same lint findings (code, severity, path, message) as before, run against an unmodified wiki tree. No finding may appear, disappear, or change severity/message. | May add new finding codes and new checks that fire on content that previously passed silently (a wiki may see new WARN/ERROR output it did not see before). May not change the meaning or wording of an existing code's message for content that already triggered it. | May remove or fundamentally redefine an existing finding code (subject to the deprecate-before-remove convention, §3). |
 | MANAGED/TEMPLATE path set | Fixed. No path is added, removed, or reassigned between `managed`/`template`/`instance-fork`/`removed`. | May add new MANAGED/TEMPLATE paths (new files an `upgrade` will start writing). May not remove a path a consumer's manifest already records as `managed`/`template` (that is a removed-managed-path event, §6, and is MAJOR only). | May remove a MANAGED/TEMPLATE path (§6) or reassign an existing path's role, subject to the deprecate-before-remove convention (§3). |
 | `.wiki-harness-manifest.json` schema | Fixed: existing keys keep their type and meaning. | Additive only: new optional keys may be introduced; every existing key keeps its shape. `VALID_ROLES` (`scripts/manifest.py`) may gain new enum members but never drops one. | May change or remove an existing manifest key, or change the meaning of an existing `VALID_ROLES` member. |
-| CLI surface (`init.py`/`upgrade.py`: flags, exit codes, stdout/stderr message text) | Fixed. A script that greps a message string or checks an exit code today keeps working unchanged. | Additive only: new optional flags, new informational output. No existing flag's meaning, default, or exit code changes; no existing message string changes. | May remove or repurpose a flag, or change an exit code's meaning, subject to §3. |
+| CLI surface — `upgrade.py` (flags, exit codes, stdout/stderr message text) | Fixed. A script that greps a message string or checks an exit code today keeps working unchanged. | Additive only: new optional flags, new informational output. No existing flag's meaning, default, or exit code changes; no existing message string changes. | May remove or repurpose a flag, or change an exit code's meaning, subject to §3. |
+| CLI surface — `init.py` (flags, exit codes, stdout/stderr message text) | Fixed, exactly as for `upgrade.py`. | A flag that is accepted today keeps accepting the same values and meaning them the same way, and no existing message string changes. A variable that was previously *required* may become **derived** — gaining a default, so an invocation that used to be refused now succeeds — because `init.py` runs once, at first adoption, against a target that has no manifest yet (§2.1). | May remove or repurpose a flag, or change an exit code's meaning, subject to §3. |
 
 The intent of this table is the same one the harness enforces on itself for
 `ogp-wiki`'s real content today (the extraction's own byte-identical-
 behaviour rule): a PATCH must never surprise a consumer who changed
 nothing.
+
+### 2.1 Why `init.py`'s row is weaker than `upgrade.py`'s
+
+The CLI rows above are asymmetric, deliberately. `upgrade.py` is run
+repeatedly, for the life of a wiki, often from a script or a CI job, against
+a tree the harness already manages — so its surface is pinned as hard as the
+finding codes are. `init.py` is run **once**, by a person, against a
+directory that does not yet contain a wiki; the moment it succeeds, that
+wiki's contract with the library is the manifest, and `init.py` never runs
+against it again. There is no installed consumer whose behaviour a change to
+`init.py`'s defaults can alter.
+
+Making a previously-required variable derived is therefore additive in
+effect: every invocation that worked before still works, produces the same
+files from the same flags, and prints the same messages; invocations that
+were previously *refused* now succeed. Requiring a MAJOR release for that
+would tell every consumer that an `upgrade` is risky when `upgrade.py` was
+not touched at all — the version number would carry a warning about the one
+program that did not change. The narrower rule keeps the signal honest.
+
+The reverse direction is not covered by this relaxation: making a derived
+variable required again, removing a flag, or changing what an accepted flag
+*means* is a removal, and §3 governs it.
 
 ## 3. Deprecate-before-remove
 
