@@ -873,3 +873,107 @@ class VersionFileParsing(unittest.TestCase):
         version = init_module.read_version(ROOT)
 
         self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+
+
+class ReleasePayloadProvenance(unittest.TestCase):
+    """An installed wiki-harness runs from an unpacked release tarball,
+    which has no `.git`. The three source-metadata edges ask git, so from a
+    payload they would silently record a local filesystem path, "unknown",
+    and forty zeros in the consumer's manifest -- and `source_url` is the
+    value `upgrade --check` later feeds to `git ls-remote`, so a poisoned
+    one breaks that command for the life of the wiki.
+
+    tools/build_release.py writes RELEASE.json into every payload for
+    exactly this. These edges prefer it and otherwise behave as before, so
+    a git checkout (which has no RELEASE.json) is unaffected.
+    """
+
+    RELEASE = {
+        "version": "9.9.9",
+        "tag": "v9.9.9",
+        "commit": "a" * 40,
+        "source_url": "https://github.com/hieplam/wiki-harness",
+    }
+
+    def _library(self, tmp, release=None, version="9.9.9"):
+        root = Path(tmp) / "payload"
+        root.mkdir()
+        (root / "VERSION").write_text(version + "\n", encoding="utf-8")
+        if release is not None:
+            (root / "RELEASE.json").write_text(release, encoding="utf-8")
+        return root
+
+    def test_a_payload_records_the_release_it_came_from(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._library(tmp, json.dumps(self.RELEASE))
+
+            self.assertEqual(init_module.read_source_url(root),
+                             self.RELEASE["source_url"])
+            self.assertEqual(init_module.read_source_ref(root), "v9.9.9")
+            self.assertEqual(init_module.read_source_commit(root), "a" * 40)
+
+    def test_source_url_is_never_a_local_path_from_a_payload(self):
+        """The specific failure: a path like /home/x/.cache/... recorded as
+        the remote `upgrade --check` will try to ls-remote."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._library(tmp, json.dumps(self.RELEASE))
+
+            self.assertNotIn(str(root), init_module.read_source_url(root))
+
+    def test_a_git_checkout_without_release_json_is_unchanged(self):
+        """The library's own checkout: still answered by git."""
+        self.assertEqual(init_module.read_source_commit(ROOT),
+                         _git(ROOT, "rev-parse", "HEAD").stdout.strip())
+        self.assertIn("wiki-harness", init_module.read_source_url(ROOT))
+
+    def test_a_malformed_release_json_falls_back_and_never_crashes(self):
+        for broken in ("{not json", "[]", '{"commit": 12345}', ""):
+            with self.subTest(broken=broken):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = self._library(tmp, broken)
+
+                    # No .git and no usable RELEASE.json: the documented
+                    # pre-payload fallbacks, not an exception.
+                    self.assertEqual(init_module.read_source_commit(root),
+                                     "0" * 40)
+                    self.assertEqual(init_module.read_source_ref(root),
+                                     "unknown")
+                    self.assertEqual(init_module.read_source_url(root),
+                                     str(root))
+
+    def test_init_from_a_payload_writes_an_honest_manifest(self):
+        """End to end: build the real payload, unpack it somewhere with no
+        .git, and scaffold from it -- the shape an installed CLI produces."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            version = (ROOT / "VERSION").read_text(encoding="utf-8").split()[0]
+            build = subprocess.run(
+                [sys.executable, str(ROOT / "tools" / "build_release.py"),
+                 "--tag", f"v{version}", "--out-dir", str(tmp / "dist")],
+                capture_output=True, text=True, cwd=str(ROOT), timeout=120)
+            self.assertEqual(build.returncode, 0, build.stderr)
+
+            import tarfile
+            with tarfile.open(tmp / "dist" / f"wiki-harness-{version}.tar.gz") as tar:
+                tar.extractall(tmp / "unpacked")
+            payload = tmp / "unpacked" / f"wiki-harness-{version}"
+            self.assertFalse((payload / ".git").exists())
+
+            target = tmp / "immigration-wiki"
+            result = subprocess.run(
+                [sys.executable, str(payload / "init.py"), str(target),
+                 "--wiki-title", "Immigration Wiki", "--non-interactive"],
+                capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                timeout=180)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            manifest = json.loads(
+                (target / ".wiki-harness-manifest.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(manifest["harness_version"], version)
+            self.assertEqual(manifest["source_ref"], f"v{version}")
+            self.assertRegex(manifest["source_commit"], r"^[0-9a-f]{40}$")
+            self.assertTrue(
+                manifest["source_url"].startswith("https://"),
+                f"source_url must be fetchable, got {manifest['source_url']!r}")
+            self.assertNotIn(str(tmp), manifest["source_url"])
