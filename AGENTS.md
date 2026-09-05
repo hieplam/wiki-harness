@@ -103,26 +103,58 @@ defaults to the same string as `wiki_title`.
 
 ## Commit convention
 
-`<type>(<scope>): <summary>` — e.g. `fix(upgrade): refuse a missing --to and name dirty paths`.
-This repo's own history is the reference. (The `<op>(<ref>): <summary>` convention enforced by
-`githooks/commit-msg` governs *consumer wikis*, not this library.)
+**Conventional Commits, and the type is load-bearing** — it is what decides the next release
+number. `<type>(<scope>): <summary>`, e.g. `fix(upgrade): refuse a missing --to and name dirty
+paths`.
+
+| Type | Effect on the next release |
+| --- | --- |
+| `fix(...)` | PATCH |
+| `feat(...)` | MINOR |
+| any type with `!`, or a `BREAKING CHANGE:` footer | MAJOR |
+| `docs` `chore` `ci` `test` `refactor` | none — absorbed into the next release silently |
+
+Pick the type against what [docs/compatibility-policy.md](./docs/compatibility-policy.md) §2
+permits at each level. A change that removes or repurposes a CLI flag, a finding code, a
+MANAGED/TEMPLATE path, or a manifest key needs a `BREAKING CHANGE:` footer spelling out what a
+consumer must do — that footer is the only prose that survives into the generated CHANGELOG,
+and §8 requires it for exactly those changes.
+
+This is **this library's** convention. The `<op>(<ref>): <summary>` convention that
+`scripts/check_commit_msg.py` enforces (ops: `ingest`/`lint`/`schema`/`chore`) governs
+*consumer wikis*, where it is the wiki's operation journal. The two never meet: no hook checks
+this repository's own commits, and no release tool reads a consumer's.
 
 **Never add an agent as a commit co-author.**
 
 ## Cutting a release
 
-1. Land the change with its tests green.
-2. Decide PATCH / MINOR / MAJOR against
-   [docs/compatibility-policy.md](./docs/compatibility-policy.md) §2 — the table is mechanical;
-   apply it to what actually changed.
-3. Bump `VERSION`.
-4. Add a `CHANGELOG.md` entry using the template at the top of that file. It **must** state
-   the release type and carry a **Compatibility** field describing what a consumer running
-   `upgrade` into this release needs to know: new or changed finding codes, MANAGED/TEMPLATE
-   paths added or removed, manifest-schema changes, CLI changes. An entry missing either is
-   non-conformant with §8 of the policy.
-5. Open a PR, get CI green, merge, then tag the merge commit `vX.Y.Z` and push the tag.
-   Consumers clone by tag — an untagged release does not exist.
+You do not cut releases by hand. `release-please` does, from the commits you merged.
+
+1. Land your change on `main` with CI green. Nothing else is required of you.
+2. release-please opens (or updates) a **release PR** titled `chore(main): release X.Y.Z`,
+   carrying the `VERSION` bump, the `.release-please-manifest.json` bump, and a generated
+   `CHANGELOG.md` section. Read the version it chose — if it is wrong, your commit type was
+   wrong, and the fix is a follow-up commit with the right type, not an edit to the PR.
+3. Merge the release PR. That tags `vX.Y.Z`, publishes a GitHub Release, and runs the `assets`
+   job: it re-runs the full suite against the tag, then builds and uploads
+   `wiki-harness-X.Y.Z.tar.gz` plus its `.sha256`.
+
+The uploaded payload is what `install.sh` and the `wiki-harness` CLI download — a release with
+no asset is not installable. If the asset upload fails after the tag exists, re-running on push
+cannot fix it (release-please reports `release_created: false` once the release exists); use the
+workflow's `workflow_dispatch` with the tag instead.
+
+`tools/build_release.py` builds that payload. It lives in `tools/`, never `scripts/`, because
+`init.py`'s `copy_scripts()` vendors every `scripts/*.py` into each consumer wiki — a build tool
+there would ship into every wiki and change every consumer's manifest hash.
+
+### One-time setup
+
+Add a repo secret `RELEASE_PLEASE_TOKEN` — a PAT with `contents: write` and
+`pull-requests: write`. Without it the workflow falls back to `GITHUB_TOKEN`, which still cuts
+releases, but a PR opened with `GITHUB_TOKEN` never triggers further workflow runs, so
+`test.yml` will not run on the release PR.
 
 ## Architecture facts (C3)
 

@@ -477,7 +477,15 @@ def seed_claude_stubs(library_root, target):
 
 
 def read_version(library_root):
-    return (library_root / "VERSION").read_text(encoding="utf-8").strip()
+    """Impure edge. The library's own version, from its VERSION file.
+
+    The file carries release-please's `x-release-please-version` marker so
+    the release PR can rewrite the version in place, which means the line
+    is `1.2.0 # x-release-please-version`, not a bare version. Take the
+    first whitespace-delimited token: the whole line would otherwise reach
+    the consumer's manifest and init's summary."""
+    text = (library_root / "VERSION").read_text(encoding="utf-8").strip()
+    return text.split()[0] if text.split() else ""
 
 
 def read_source_url(library_root):

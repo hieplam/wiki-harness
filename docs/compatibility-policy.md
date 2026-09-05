@@ -195,19 +195,53 @@ documented) once such an engine exists, exactly as `upgrade.py`'s existing
 drift/removal guards (§5, §6) already refuse to write outside their
 declared scope today.
 
-## 8. CHANGELOG requirement
+## 8. CHANGELOG and the release loop
 
-`wiki-harness` does not yet have a `CHANGELOG.md` — that file is created by
-a later task in this same phase, not by this document. This policy binds
-whoever authors it:
+`CHANGELOG.md` is **generated**, not hand-written. `release-please` reads
+the Conventional Commit subjects that landed on `main` since the last tag,
+computes the next version from them, and opens a release PR carrying the
+version bump and the new CHANGELOG section. Merging that PR is what cuts
+the release: it tags `vX.Y.Z`, publishes a GitHub Release, and triggers the
+payload build.
 
-**Every `CHANGELOG.md` entry must state which of PATCH, MINOR, or MAJOR the
-release is, and must include an explicit "Compatibility" field** describing,
-in prose, what a consumer running `upgrade` into that release needs to know
-before doing so (new/changed finding codes, any MANAGED/TEMPLATE path
-added or — MAJOR only — removed, any manifest or CLI change). A release
-entry that only lists changes without stating its PATCH/MINOR/MAJOR
-category and a Compatibility field is incomplete under this policy.
+This supersedes the hand-written entry format used through v1.2.0. Those
+entries stay in the file as history; nothing rewrites them.
+
+**The version category is no longer stated in prose — it is computed.** The
+commit type is what decides it, so the type is the load-bearing part of
+every subject line:
+
+| Commit subject | Release |
+| --- | --- |
+| `fix(...): ...` | PATCH |
+| `feat(...): ...` | MINOR |
+| any type with `!`, or a `BREAKING CHANGE:` footer | MAJOR |
+| `docs:`, `chore:`, `ci:`, `test:`, `refactor:` | none — absorbed silently |
+
+Choosing the wrong type releases the wrong category. §2's table still
+governs what each category is *allowed* to change; it is now enforced by
+picking the right commit type rather than by writing a sentence afterwards.
+
+**Anything a consumer must act on goes in a `BREAKING CHANGE:` footer.**
+That is the one mechanism that survives generation: release-please renders
+those footers verbatim, under their own heading, at the top of the entry.
+Use it for a removed or repurposed CLI flag, a removed finding code, a
+removed MANAGED/TEMPLATE path, a manifest-schema change — anything a
+consumer running `upgrade` would otherwise discover by breaking. A change
+that merely *adds* needs no footer.
+
+```
+feat(lint)!: drop the ORPHAN finding
+
+BREAKING CHANGE: ORPHAN no longer exists. A consumer whose CI greps for
+"ORPHAN" must drop that check; wiki pages that were only reachable from
+index.md now pass silently.
+```
+
+This convention governs **this library's own commits**. It is unrelated to
+the `<op>(<ref>): <summary>` convention `scripts/check_commit_msg.py`
+enforces inside a consumer wiki, which is that wiki's operation journal and
+is not read by any release tool.
 
 ## 9. Independent verification / CI: nothing is shipped in v1.0.0
 
@@ -247,3 +281,28 @@ Until that condition is met, `upgrade`'s and `lint`'s guarantees are
 exactly what §2's table states and no more: internal self-consistency of
 whatever is on disk, not independent proof that what is on disk matches
 what an upstream release actually shipped.
+
+### 9.1 What the release pipeline did and did not change
+
+Two things arrived after v1.0.0 that touch the sentences above, and neither
+of them changes the conclusion.
+
+**There are now CI workflow files in this repository.** `test.yml` runs the
+library's own suite on every pull request and on `main`;
+`release-please.yml` re-runs it against the tag before publishing a payload.
+That is the *library* proving its own correctness before it ships. §9 is
+about something else entirely — an opt-in job inside a **consumer wiki**
+that re-fetches upstream and diffs that wiki's managed content against it.
+No such job exists, in this repository or in anything `init`/`upgrade`
+writes into a consumer. The gap §9 describes is untouched.
+
+**Release payloads now carry a `sha256` checksum**, which the installed CLI
+verifies before unpacking. This is integrity against a corrupted or
+truncated download, and nothing more: the checksum is published by the same
+GitHub Release as the payload it describes, so anyone able to alter one can
+alter the other. It is **not** independent verification and must not be
+described as such.
+
+Risk #3 — commits authored through the GitHub API or a cloud agent's
+sandbox bypass `.githooks/*` structurally — remains unmitigated, exactly as
+stated above.

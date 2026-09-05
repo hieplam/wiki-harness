@@ -1,30 +1,18 @@
 # Changelog
 
-All notable changes to `wiki-harness` are documented here. This file follows
-the compatibility policy in `docs/compatibility-policy.md`, in particular
-§8 (CHANGELOG requirement): every entry below states which of **PATCH**,
-**MINOR**, or **MAJOR** the release is, and includes an explicit
-**Compatibility** field describing what a consumer running `upgrade` into
-that release needs to know before doing so.
+All notable changes to `wiki-harness` are documented here, newest first, under
+the compatibility policy in `docs/compatibility-policy.md` §8.
 
-## Entry template (for all future entries)
+## How entries are written
 
-```
-## [X.Y.Z] — YYYY-MM-DD
+Entries from **v1.3.0 onward are generated** by `release-please` from the Conventional Commit
+subjects that landed on `main` — see `docs/compatibility-policy.md` §8. The version category is
+computed from the commit types (`fix:` → PATCH, `feat:` → MINOR, `!`/`BREAKING CHANGE:` →
+MAJOR), and anything a consumer must act on before running `upgrade` belongs in a
+`BREAKING CHANGE:` footer, which is rendered verbatim at the top of the entry.
 
-**Release type:** PATCH | MINOR | MAJOR
-
-### Changed
-- ...
-
-### Compatibility
-Describe, in prose, what a consumer running `upgrade` into this release
-needs to know before doing so: any new or changed finding code (`lint.py`),
-any MANAGED/TEMPLATE path added or — MAJOR only — removed, and any
-manifest-schema or CLI (`init.py`/`upgrade.py`) change. An entry that omits
-the release type or the Compatibility field is non-conformant with
-`docs/compatibility-policy.md` §8.
-```
+Entries up to and including v1.2.0 were hand-written under the older §8, which required an
+explicit release type and a prose **Compatibility** field. They are kept exactly as published.
 
 ## [1.2.0] — 2026-09-05
 
