@@ -1,0 +1,40 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the floor the harness promises (rule-stdlib-only-py39): a
+        # consumer wiki runs `python3 scripts/lint.py` on whatever bare
+        # interpreter it has. The newest release guards against relying on
+        # behaviour 3.9 happens to allow but later versions changed.
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # The suite drives init.py/upgrade.py as real subprocesses that make
+      # real commits, and several fixtures build git-backed library repos.
+      # Without an identity `git commit` fails and the failures look like
+      # logic errors.
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@wiki-harness.invalid"
+          git config --global user.name "wiki-harness CI"
+
+      - name: Run the suite
+        run: ./run_tests.sh

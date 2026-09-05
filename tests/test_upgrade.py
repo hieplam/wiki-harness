@@ -1865,3 +1865,72 @@ class TestCliPolish(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BytecodeNeverReachesTheTarget(unittest.TestCase):
+    """Regression: `python3 scripts/lint.py` inside the scratch imports the
+    scratch's own manifest/card_frontmatter_lint modules, and CPython writes
+    `scripts/__pycache__/*.pyc` next to them. Both promote_scratch() and
+    pending_changes() walk the scratch with rglob("*"), so that bytecode was
+    reported as a "managed/template path that would change" and then copied
+    into the consumer's wiki.
+
+    Invisible on macOS, where the system interpreter redirects bytecode to
+    ~/Library/Caches/com.apple.python; it fires on every Linux upgrade.
+    Caught by the first CI run on this repository.
+
+    Two independent guards, tested separately: the lint subprocess is told
+    not to write bytecode at all, and both tree walks skip it regardless of
+    what created it.
+    """
+
+    def _scratch_and_target(self, tmp):
+        """A scratch tree carrying bytecode the target does not have."""
+        scratch = Path(tmp) / "scratch"
+        target = Path(tmp) / "target"
+        for root in (scratch, target):
+            (root / "scripts").mkdir(parents=True)
+            (root / "scripts" / "lint.py").write_text("# lint\n", encoding="utf-8")
+        cache = scratch / "scripts" / "__pycache__"
+        cache.mkdir()
+        (cache / "manifest.cpython-39.pyc").write_bytes(b"\x00compiled\n")
+        (cache / "lint.cpython-313.pyc").write_bytes(b"\x00compiled\n")
+        (scratch / "wiki").mkdir()
+        (scratch / "wiki" / "AGENTS.md").write_text("real change\n", encoding="utf-8")
+        return scratch, target
+
+    def test_pending_changes_never_reports_bytecode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scratch, target = self._scratch_and_target(tmp)
+
+            changed = upgrade.pending_changes(scratch, target)
+
+            self.assertIn("wiki/AGENTS.md", changed)
+            for path in changed:
+                self.assertNotIn("__pycache__", path)
+                self.assertFalse(path.endswith(".pyc"), path)
+
+    def test_promote_never_copies_bytecode_into_the_wiki(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scratch, target = self._scratch_and_target(tmp)
+
+            self.assertIsNone(upgrade.promote_scratch(scratch, target))
+
+            self.assertEqual(
+                (target / "wiki" / "AGENTS.md").read_text(encoding="utf-8"),
+                "real change\n")
+            self.assertFalse((target / "scripts" / "__pycache__").exists())
+
+    def test_the_scratch_lint_is_told_not_to_write_bytecode(self):
+        """Root cause, not just cleanup: the bytecode is never created."""
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured.update(kwargs)
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        with patch.object(upgrade.subprocess, "run", side_effect=fake_run):
+            upgrade.run_scratch_lint("/tmp/does-not-matter")
+
+        self.assertEqual(captured["env"]["PYTHONDONTWRITEBYTECODE"], "1")
+        self.assertIsNotNone(captured.get("timeout"))

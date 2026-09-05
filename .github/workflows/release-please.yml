@@ -1,0 +1,84 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+  # Recovery path. If asset upload fails (a runner outage, a transient
+  # GitHub error) the version is already tagged and released, and re-running
+  # on push cannot fix it: release-please reports `release_created: false`
+  # once the release exists, so `assets` would skip. Dispatch the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and upload assets for (e.g. v1.3.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    # Dispatch exists to re-upload assets for a tag that already released;
+    # it must never cut a new release.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          # Prefer a PAT: a PR opened with GITHUB_TOKEN never fires further
+          # workflow runs, so test.yml does not run on the release PR and a
+          # required check would stay pending forever. Falls back to
+          # GITHUB_TOKEN so releases still work before the secret exists --
+          # the `assets` job re-runs the suite against the tag either way,
+          # so an unverified release PR is not an unverified release.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  assets:
+    needs: release-please
+    # `!cancelled()` is required: on dispatch the `release-please` job is
+    # skipped, and a skipped dependency would otherwise skip this job too.
+    if: ${{ !cancelled() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@wiki-harness.invalid"
+          git config --global user.name "wiki-harness CI"
+
+      # The tag is what consumers install; prove it before publishing an
+      # asset built from it.
+      - name: Run the suite
+        run: ./run_tests.sh
+
+      - name: Build the release payload
+        id: payload
+        run: |
+          TAG="${{ inputs.tag || needs.release-please.outputs.tag_name }}"
+          python3 tools/build_release.py --tag "$TAG" --out-dir dist
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the payload to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ steps.payload.outputs.tag }}" \
+            dist/*.tar.gz dist/*.tar.gz.sha256 --clobber

@@ -847,3 +847,29 @@ class PromptWithNoInputRefusesCleanly(unittest.TestCase):
                              result.stdout + result.stderr)
             self.assertNotIn("Traceback", result.stderr)
             self.assertFalse(target.exists())
+
+
+class VersionFileParsing(unittest.TestCase):
+    """VERSION is rewritten on every release by release-please's `simple`
+    strategy (`version-file: VERSION`), whose DefaultUpdater replaces the
+    file with a bare version. read_version() takes the first token anyway:
+    the value flows straight into the consumer's manifest and into init's
+    summary line, so a stray trailing comment must not travel with it."""
+
+    def _read(self, contents):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "VERSION").write_text(contents, encoding="utf-8")
+            return init_module.read_version(Path(tmp))
+
+    def test_bare_version_is_the_release_please_shape(self):
+        """Exactly what DefaultUpdater writes: the version and a newline."""
+        self.assertEqual(self._read("1.2.0\n"), "1.2.0")
+
+    def test_trailing_content_never_reaches_the_manifest(self):
+        self.assertEqual(self._read("1.2.0 # hand-added note\n"), "1.2.0")
+
+    def test_the_repos_own_version_file_parses(self):
+        """The real file, as release-please leaves it."""
+        version = init_module.read_version(ROOT)
+
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")

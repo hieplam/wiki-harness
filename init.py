@@ -295,7 +295,8 @@ def _git(root, *args):
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_SYSTEM"] = os.devnull
     return subprocess.run(["git", "-C", str(root), *args],
-                          capture_output=True, text=True, env=env)
+                          capture_output=True, text=True, env=env,
+                          timeout=120)
 
 
 def _copy_verbatim(src, dst):
@@ -477,7 +478,15 @@ def seed_claude_stubs(library_root, target):
 
 
 def read_version(library_root):
-    return (library_root / "VERSION").read_text(encoding="utf-8").strip()
+    """Impure edge. The library's own version, from its VERSION file.
+
+    The file carries release-please's `x-release-please-version` marker so
+    the release PR can rewrite the version in place, which means the line
+    is `1.2.0 # x-release-please-version`, not a bare version. Take the
+    first whitespace-delimited token: the whole line would otherwise reach
+    the consumer's manifest and init's summary."""
+    text = (library_root / "VERSION").read_text(encoding="utf-8").strip()
+    return text.split()[0] if text.split() else ""
 
 
 def read_source_url(library_root):
@@ -521,10 +530,15 @@ def set_hooks_path(target):
 
 
 def run_lint(target):
-    """Step 12."""
+    """Step 12. PYTHONDONTWRITEBYTECODE keeps a freshly scaffolded wiki free
+    of scripts/__pycache__/*.pyc that this very step would otherwise
+    generate: the seeded .gitignore hides them from the first commit, but a
+    scaffold should not be littered by its own self-check."""
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     result = subprocess.run(
         [sys.executable, str(target / "scripts" / "lint.py"), "--root", str(target)],
-        capture_output=True, text=True)
+        capture_output=True, text=True, env=env, timeout=120)
     return result.returncode == 0, result.stdout + result.stderr
 
 
@@ -538,6 +552,8 @@ def dry_run_hooks(target, subject):
     env = dict(os.environ)
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_SYSTEM"] = os.devnull
+    # The hooks shell out to lint.py; same reason as run_lint().
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
 
     fd, msg_path = tempfile.mkstemp(suffix=".msg")
     try:
@@ -545,7 +561,8 @@ def dry_run_hooks(target, subject):
             f.write(subject + "\n")
         commit_msg_result = subprocess.run(
             [str((target / ".githooks" / "commit-msg").resolve()), msg_path],
-            cwd=target, capture_output=True, text=True, env=env)
+            cwd=target, capture_output=True, text=True, env=env,
+            timeout=120)
     finally:
         os.unlink(msg_path)
     if commit_msg_result.returncode != 0:
@@ -553,7 +570,7 @@ def dry_run_hooks(target, subject):
 
     pre_commit_result = subprocess.run(
         [str((target / ".githooks" / "pre-commit").resolve())],
-        cwd=target, capture_output=True, text=True, env=env)
+        cwd=target, capture_output=True, text=True, env=env, timeout=120)
     return pre_commit_result.returncode == 0
 
 
