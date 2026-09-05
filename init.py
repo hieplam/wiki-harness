@@ -11,8 +11,9 @@ and its three nested stubs are seeded as ordinary MANAGED, TRACKED files
 path.
 
 Pure core: resolve_target_refusal(), missing_required_vars(),
-parse_origins(), parse_answers_file(), merge_answers(), apply_origins(),
-build_role_map(), commit_subject(), render(), summary_text() -- plain data
+apply_defaults(), parse_origins(), parse_answers_file(), merge_answers(),
+apply_origins(), build_role_map(), commit_subject(), render(),
+summary_text() -- plain data
 in, plain data/decision out, no filesystem/subprocess/clock access. Impure
 edges: every function below the "impure edges" marker (filesystem writes,
 git/subprocess calls, the clock, interactive prompts, --answers-file
@@ -38,7 +39,15 @@ from manifest import compute_manifest, hash_tree, write_manifest  # noqa: E402
 
 MANIFEST_FILENAME = ".wiki-harness-manifest.json"
 
-REQUIRED_VARS = ("wiki_title", "org_name", "content_language", "repo_name")
+# Every variable the TEMPLATE-class sources substitute. `REQUIRED_VARS` is
+# the subset a caller must actually answer; `DEFAULTED_VARS` is the subset
+# apply_defaults() derives when the caller leaves it empty (v1.2.0 -- before
+# that release all four were required, and --non-interactive refused when
+# any was missing).
+TEMPLATE_VARS = ("wiki_title", "org_name", "content_language", "repo_name")
+REQUIRED_VARS = ("wiki_title",)
+DEFAULTED_VARS = ("org_name", "content_language", "repo_name")
+DEFAULT_CONTENT_LANGUAGE = "English"
 PROMPT_LABELS = {
     "wiki_title": "Wiki title",
     "org_name": "Organisation name",
@@ -48,6 +57,10 @@ PROMPT_LABELS = {
 
 REFUSAL_MESSAGE = ("target directory {path} is not empty; re-run with "
                    "--force to scaffold into it anyway.")
+
+NO_INPUT_MESSAGE = (
+    "no input available to answer {label!r}; re-run with --non-interactive "
+    "(and --wiki-title) to take the defaults without prompting.")
 
 # Every MANAGED path copied verbatim (no per-instance variables) whose
 # library source is not scripts/*.py or .githooks/* (those two sets are
@@ -114,9 +127,26 @@ def resolve_target_refusal(target, exists, is_empty, force, is_dir=True):
 
 
 def missing_required_vars(values):
-    """Pure. Step 2: which of the 4 required variables are still missing
-    (None or empty) after collection."""
+    """Pure. Step 2: which REQUIRED variable is still missing (None or
+    empty) after collection. Since v1.2.0 that is `wiki_title` alone --
+    every other template variable is derived by apply_defaults()."""
     return [k for k in REQUIRED_VARS if not values.get(k)]
+
+
+def apply_defaults(values, target_name):
+    """Pure. Step 2: derives every template variable the caller left empty,
+    so only --wiki-title has to be answered. `target_name` is the target
+    directory's basename, resolved at the edge (main()) because `.` and a
+    trailing slash both need the real path before a basename means
+    anything. A value the caller did supply is never overridden."""
+    filled = dict(values)
+    if not filled.get("repo_name"):
+        filled["repo_name"] = target_name
+    if not filled.get("content_language"):
+        filled["content_language"] = DEFAULT_CONTENT_LANGUAGE
+    if not filled.get("org_name"):
+        filled["org_name"] = filled.get("wiki_title") or ""
+    return filled
 
 
 def missing_vars_message(missing):
@@ -131,6 +161,14 @@ def parse_origins(raw):
         return ["session"]
     items = [o.strip() for o in raw.split(",") if o.strip()]
     return items or ["session"]
+
+
+class NoInputError(Exception):
+    """Raised when an interactive prompt has nothing to read -- init was run
+    without --non-interactive from a script, a CI job, or any other non-tty
+    context, so `input()` hits EOF. main() converts it into the same clean
+    exit-2 stderr refusal every other invalid-input path uses; a traceback
+    escaping a CLI is a crash to the user, not a verdict."""
 
 
 class AnswersFileError(Exception):
@@ -160,7 +198,7 @@ def parse_answers_file(text):
         raise AnswersFileError(
             "must be a JSON object mapping variable names to string "
             f"values, not {type(data).__name__}")
-    for key in REQUIRED_VARS:
+    for key in TEMPLATE_VARS:
         if key in data and not isinstance(data[key], str):
             raise AnswersFileError(
                 f"value for {key!r} must be a JSON string, got "
@@ -178,7 +216,7 @@ def merge_answers(cli_values, cli_origins, file_values):
     file only fills gaps flags left empty. Returns (values, origins_raw),
     the latter still unparsed and ready for parse_origins()."""
     values = dict(cli_values)
-    for key in REQUIRED_VARS:
+    for key in TEMPLATE_VARS:
         if not values.get(key) and file_values.get(key):
             values[key] = file_values[key]
     origins_raw = cli_origins if cli_origins else file_values.get("origins")
@@ -300,7 +338,19 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
-def collect_vars(args, prompt=input, read_answers=read_answers_file):
+def _ask(prompt, label, text):
+    """Impure edge. One prompt, with EOF converted into a typed refusal --
+    `input()` raises EOFError the moment stdin is closed or exhausted, which
+    is exactly what a script or a CI job running init without
+    --non-interactive hands it."""
+    try:
+        return prompt(text).strip()
+    except EOFError:
+        raise NoInputError(NO_INPUT_MESSAGE.format(label=label)) from None
+
+
+def collect_vars(args, prompt=input, read_answers=read_answers_file,
+                 target_name=""):
     """Step 2's collection edge. `prompt` is an injected seam (default
     builtins.input) so the interactive path never has to be exercised to
     test the rest of this function's behaviour. `read_answers` is the
@@ -308,8 +358,15 @@ def collect_vars(args, prompt=input, read_answers=read_answers_file):
     merge logic can be tested without a real file on disk. Precedence:
     an individually-passed flag always wins over the --answers-file value
     for the same key; the file only fills gaps flags left empty. Returns
-    (values, origins_raw) -- the merged 4 required values and the
-    still-unparsed origins string, ready for parse_origins()."""
+    (values, origins_raw) -- the merged template values and the
+    still-unparsed origins string, ready for parse_origins().
+
+    Interactively, only REQUIRED_VARS re-prompts until answered; each
+    DEFAULTED_VARS prompt offers apply_defaults()' derivation in brackets
+    and an empty answer takes it. `target_name` (the resolved basename
+    main() computes) is what that derivation needs; it is only ever used
+    to build the offer, and main() applies the same pure derivation again
+    afterwards, so a non-interactive run reaches the identical values."""
     cli_values = {
         "wiki_title": args.wiki_title,
         "org_name": args.org_name,
@@ -321,7 +378,14 @@ def collect_vars(args, prompt=input, read_answers=read_answers_file):
     if not args.non_interactive:
         for key in REQUIRED_VARS:
             while not values[key]:
-                values[key] = prompt(f"{PROMPT_LABELS[key]}: ").strip()
+                values[key] = _ask(prompt, PROMPT_LABELS[key],
+                                   f"{PROMPT_LABELS[key]}: ")
+        for key in DEFAULTED_VARS:
+            if values[key]:
+                continue
+            offered = apply_defaults(values, target_name)[key]
+            values[key] = _ask(prompt, PROMPT_LABELS[key],
+                               f"{PROMPT_LABELS[key]} [{offered}]: ") or offered
     return values, origins_raw
 
 
@@ -524,15 +588,21 @@ def main(argv):
         print(refusal, file=sys.stderr)
         return 2
 
+    # The basename apply_defaults() derives `repo_name` from. Resolved
+    # first: `.` has an empty basename and a trailing slash keeps one only
+    # after normalisation, so both spellings need the real path.
+    target_name = target.resolve().name
+
     try:
-        values, origins_raw = collect_vars(args)
-    except AnswersFileError as exc:
+        values, origins_raw = collect_vars(args, target_name=target_name)
+    except (AnswersFileError, NoInputError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     missing = missing_required_vars(values)
     if missing:
         print(missing_vars_message(missing), file=sys.stderr)
         return 2
+    values = apply_defaults(values, target_name)
     origins = parse_origins(origins_raw)
 
     target.mkdir(parents=True, exist_ok=True)

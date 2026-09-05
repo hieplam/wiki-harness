@@ -1751,6 +1751,10 @@ class TestAdopt(unittest.TestCase):
                 "the idempotency re-run must write zero files")
 
     def test_adopt_missing_required_var_exits_2(self):
+        """--wiki-title is the one variable adopt cannot derive. Omitting it
+        refuses before a single byte is written (v1.2.0 narrowed the
+        required set to this one flag; --org-name/--content-language/
+        --repo-name are derived, see the sibling test below)."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
@@ -1760,17 +1764,42 @@ class TestAdopt(unittest.TestCase):
             result = _run_upgrade(
                 target, "--to", "v1.0.0", "--adopt",
                 "--library-path", str(v100),
-                "--wiki-title", ADOPT_ANSWERS["wiki_title"],
+                "--org-name", ADOPT_ANSWERS["org_name"],
                 "--content-language", ADOPT_ANSWERS["content_language"],
                 "--repo-name", ADOPT_ANSWERS["repo_name"])
             self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
             self.assertIn(
                 "missing required value(s) for --non-interactive mode: "
-                "--org-name", result.stdout + result.stderr)
+                "--wiki-title", result.stdout + result.stderr)
             self.assertNotIn("Traceback", result.stdout + result.stderr)
             # Nothing was written -- the real target is untouched.
             self.assertEqual(_tree_snapshot(target), before_snapshot)
             self.assertFalse((target / MANIFEST_FILENAME).exists())
+
+    def test_adopt_derives_every_optional_var_from_one_flag(self):
+        """v1.2.0: adopt runs off --wiki-title alone, deriving the other
+        three exactly as init does -- repo_name from the target's own
+        basename, content_language from the library default, org_name from
+        the title -- and records them in the manifest it writes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = _make_pre_adopt_target(tmp / "existing-repo")
+
+            result = _run_upgrade(
+                target, "--to", "v1.0.0", "--adopt",
+                "--library-path", str(v100),
+                "--wiki-title", "Existing Wiki")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            manifest = json.loads(
+                (target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["vars"], {
+                "wiki_title": "Existing Wiki",
+                "org_name": "Existing Wiki",
+                "content_language": "English",
+                "repo_name": "existing-repo",
+            })
 
 
 class TestCliPolish(unittest.TestCase):

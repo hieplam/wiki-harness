@@ -1234,6 +1234,11 @@ def run_adopt(target, to, library_path, values):
     if missing:
         print(init_mod.missing_vars_message(missing), file=sys.stderr)
         return 2
+    # Same derivation init uses (v1.2.0): only --wiki-title has to be
+    # answered; anything left empty is filled from the target's own
+    # basename and the library defaults, so adopt and init reach identical
+    # `vars` for the same flags.
+    values = init_mod.apply_defaults(values, target.resolve().name)
 
     agents_md_path = target / "sources" / "cards" / "AGENTS.md"
     original_agents_md = (agents_md_path.read_text(encoding="utf-8")
