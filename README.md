@@ -21,7 +21,7 @@ git clone --branch v1.2.0 https://github.com/hieplam/wiki-harness.git ~/tools/wi
 
 # 2. Scaffold your wiki. One flag is required.
 cd ~/repo
-python3 ~/tools/wiki-harness/init.py immigration-wiki --wiki-title 'Immigration Wiki'
+python3 ~/tools/wiki-harness/init.py your-wiki --wiki-title 'Your Wiki'
 ```
 
 That is the whole setup. `init.py` creates the directory, wires the git hooks, runs its own
@@ -30,7 +30,7 @@ linter against what it just wrote, and makes the first commit:
 ```
 lint: 0 error(s), 0 warning(s)
 
-Scaffolded immigration-wiki -- lint clean, .githooks wired, first commit a1b2c3d4e5f6.
+Scaffolded your-wiki -- lint clean, .githooks wired, first commit a1b2c3d4e5f6.
 Next: start ingesting -- see AGENTS.md's Workflow: Ingest.
 ```
 
@@ -38,7 +38,7 @@ Then set your own git identity (init stamps the scaffold commit with a placehold
 deliberately ignores your global git config, so runs are reproducible):
 
 ```bash
-cd immigration-wiki
+cd your-wiki
 git config user.name  "Your Name"
 git config user.email "you@example.com"
 ```
@@ -51,7 +51,7 @@ Only `--wiki-title` is required. Everything else has a default you can change la
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--wiki-title` | **required** | The wiki's human name, e.g. `'Immigration Wiki'` |
+| `--wiki-title` | **required** | The wiki's human name, e.g. `'Your Wiki'` |
 | `--org-name` | the wiki title | Who the wiki belongs to — a person, a team, a company |
 | `--repo-name` | the target directory's name | The repo's own name |
 | `--content-language` | `English` | The language pages are written in, whatever language you chat in |
@@ -64,11 +64,11 @@ Run it with no flags at all and it prompts, offering each default in brackets �
 to accept:
 
 ```
-$ python3 ~/tools/wiki-harness/init.py immigration-wiki
-Wiki title: Immigration Wiki
-Organisation name [Immigration Wiki]:
+$ python3 ~/tools/wiki-harness/init.py your-wiki
+Wiki title: Your Wiki
+Organisation name [Your Wiki]:
 Content language [English]:
-Repository name [immigration-wiki]:
+Repository name [Your-wiki]:
 ```
 
 `--non-interactive` is for scripts and agents: it turns the prompts off, so a missing
@@ -79,7 +79,7 @@ Repository name [immigration-wiki]:
 ## What you get
 
 ```
-immigration-wiki/
+Your-wiki/
 ├── AGENTS.md              ← the operating manual your agent reads first
 ├── CLAUDE.md              ← @AGENTS.md, so Claude Code reads the same file
 ├── README.md              ← your wiki's own readme
@@ -131,7 +131,7 @@ it**. They are independent axes, and both are closed enums the linter enforces.
   the claim, not when you filed it.
 - `origin` is yours to define. `--origins` seeds it at init time; after that it lives in
   `sources/cards/card-schema.json`, and you widen it by editing that file and committing with
-  op `schema:`. A wiki about immigration might use
+  op `schema:`. A wiki about your might use
   `--origins 'official-doc,gov-form,caseworker,forum,session'`; a wiki about a codebase might
   use the shipped default, `session`.
 
@@ -169,8 +169,8 @@ Pull a newer harness release into an existing wiki from the library clone:
 ```bash
 cd ~/tools/wiki-harness && git fetch --tags && git checkout v1.2.1
 
-python3 ~/tools/wiki-harness/upgrade.py ~/repo/immigration-wiki --check
-python3 ~/tools/wiki-harness/upgrade.py ~/repo/immigration-wiki --to 1.2.1 --apply --commit
+python3 ~/tools/wiki-harness/upgrade.py ~/repo/your-wiki --check
+python3 ~/tools/wiki-harness/upgrade.py ~/repo/your-wiki --to 1.2.1 --apply --commit
 ```
 
 Upgrade refuses before writing anything if the tree is dirty or a MANAGED file has drifted; it
