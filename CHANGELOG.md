@@ -14,6 +14,14 @@ MAJOR), and anything a consumer must act on before running `upgrade` belongs in 
 Entries up to and including v1.2.0 were hand-written under the older §8, which required an
 explicit release type and a prose **Compatibility** field. They are kept exactly as published.
 
+## [1.3.0](https://github.com/hieplam/wiki-harness/compare/v1.2.1...v1.3.0) (2026-09-06)
+
+
+### Features
+
+* **cli:** install a wiki-harness command that runs from releases ([36aa4f7](https://github.com/hieplam/wiki-harness/commit/36aa4f74db0873cd9b5f56ea22fe7eb91cc22f1b))
+* **cli:** install a wiki-harness command that runs from releases ([03aa784](https://github.com/hieplam/wiki-harness/commit/03aa78482056cb82f5a90936abc6bb64395a2c37))
+
 ## [1.2.1](https://github.com/hieplam/wiki-harness/compare/v1.2.0...v1.2.1) (2026-09-05)
 
 
