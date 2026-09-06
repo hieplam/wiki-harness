@@ -1934,3 +1934,100 @@ class BytecodeNeverReachesTheTarget(unittest.TestCase):
 
         self.assertEqual(captured["env"]["PYTHONDONTWRITEBYTECODE"], "1")
         self.assertIsNotNone(captured.get("timeout"))
+
+
+class LibraryCheckoutFailsClosed(unittest.TestCase):
+    """resolve_library_checkout()'s no---library-path branch git-fetches and
+    git-checks-out a tag inside upgrade.py's OWN directory. It ignored both
+    return codes, so a failed fetch or a missing tag left the checkout on
+    whatever version it happened to be on and the pipeline built a scaffold
+    from it -- labelled with the version the operator asked for.
+
+    The installed CLI always passes --library-path (the release payload it
+    just unpacked), so this is the legacy path. It still must not produce a
+    wrong-version wiki silently."""
+
+    def test_a_supplied_library_path_is_used_verbatim(self):
+        """The CLI's path: no git, no network, no side effect."""
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = Path(tmp) / "payload"
+            payload.mkdir()
+            (payload / "VERSION").write_text("1.3.0\n", encoding="utf-8")
+
+            self.assertEqual(
+                upgrade.resolve_library_checkout("1.3.0", str(payload)),
+                payload)
+
+    def test_a_failed_checkout_refuses_instead_of_proceeding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = Path(tmp) / "library"
+            checkout.mkdir()
+            (checkout / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+            failed = subprocess.CompletedProcess([], 1, stdout="", stderr="")
+
+            with patch.object(upgrade, "_library_git", return_value=failed), \
+                 patch.object(upgrade, "library_checkout_root",
+                              return_value=checkout):
+                with self.assertRaises(upgrade.LibraryCheckoutError):
+                    upgrade.resolve_library_checkout("9.9.9", None)
+
+    def test_a_checkout_left_on_the_wrong_version_is_caught(self):
+        """The silent case: git reports success but VERSION disagrees with
+        the tag that was asked for."""
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = Path(tmp) / "library"
+            checkout.mkdir()
+            (checkout / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+            ok = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+            with patch.object(upgrade, "_library_git", return_value=ok), \
+                 patch.object(upgrade, "library_checkout_root",
+                              return_value=checkout):
+                with self.assertRaises(upgrade.LibraryCheckoutError) as caught:
+                    upgrade.resolve_library_checkout("9.9.9", None)
+
+            self.assertIn("9.9.9", str(caught.exception))
+            self.assertIn("1.0.0", str(caught.exception))
+
+    def test_a_matching_checkout_is_returned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = Path(tmp) / "library"
+            checkout.mkdir()
+            (checkout / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+            ok = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+            with patch.object(upgrade, "_library_git", return_value=ok), \
+                 patch.object(upgrade, "library_checkout_root",
+                              return_value=checkout):
+                self.assertEqual(
+                    upgrade.resolve_library_checkout("9.9.9", None), checkout)
+
+    def test_main_turns_the_refusal_into_exit_2_and_writes_nothing(self):
+        """The refusal reaches the operator as one line, not a traceback,
+        and the target is untouched -- step 6 resolves the library before
+        the scratch copy exists.
+
+        Driven in-process with a stubbed checkout root: the real one is this
+        repository, and a test must never run `git fetch`/`git checkout`
+        against it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            target = _make_pre_adopt_target(tmp / "target")
+            before = _tree_snapshot(target)
+            stub = tmp / "library"
+            stub.mkdir()
+            (stub / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+            failed = subprocess.CompletedProcess([], 1, stdout="",
+                                                 stderr="no such tag")
+            stderr = io.StringIO()
+
+            with patch.object(upgrade, "_library_git", return_value=failed), \
+                 patch.object(upgrade, "library_checkout_root",
+                              return_value=stub), \
+                 contextlib.redirect_stderr(stderr):
+                code = upgrade.main([str(target), "--to", "v9.9.9", "--adopt",
+                                     "--wiki-title", "X"])
+
+            self.assertEqual(code, 2)
+            self.assertIn("no such tag", stderr.getvalue())
+            self.assertEqual(_tree_snapshot(target), before)

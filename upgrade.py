@@ -840,24 +840,73 @@ def read_manifest_for_upgrade(manifest_path):
     return classification.manifest, None
 
 
+class LibraryCheckoutError(Exception):
+    """The library checkout could not be put on the requested release.
+    main() turns this into a one-line refusal and exit 2 -- never a scaffold
+    built from whatever version happened to be on disk."""
+
+
+def library_checkout_root():
+    """Impure edge. The directory upgrade.py itself lives in. Split out so
+    the resolution logic can be exercised without a real checkout."""
+    return Path(__file__).resolve().parent
+
+
+def _library_git(checkout, *args):
+    """Impure edge. One git call against the LIBRARY checkout, host config
+    neutralised so a machine-specific setting cannot change which version a
+    consumer ends up with. Network operations get the longer budget."""
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    budget = 300 if "fetch" in args else 120
+    return subprocess.run(["git", "-C", str(checkout), *args],
+                          capture_output=True, text=True, env=env,
+                          timeout=budget)
+
+
 def resolve_library_checkout(version, library_path):
-    """Impure edge (step 6). If `library_path` is given, use it directly --
-    the caller supplies a checkout already positioned at the target
-    version; no network is ever touched on this branch. Otherwise, fetch
-    and check out the target tag in this library's own checkout (the
-    directory upgrade.py itself lives in -- exactly like init.py's
-    library_root = Path(__file__).resolve().parent): `git -C <checkout>
-    fetch --tags && git -C <checkout> checkout v<X.Y.Z>` (plan-v3 section
-    3.2 step 6). No test in this task exercises this else-branch -- every
-    fixture drives the pipeline via --library-path against a local fixture
-    library git repo instead."""
+    """Impure edge (step 6). Returns the library root to build from.
+
+    With `library_path` -- what the installed `wiki-harness` CLI always
+    passes, naming the release payload it just unpacked -- that path is used
+    verbatim and no network or git is touched.
+
+    Without it, this is the legacy git-checkout path: fetch tags and check
+    out v<version> inside upgrade.py's own directory. It now FAILS CLOSED.
+    Both git calls are checked, and the resulting checkout's VERSION must
+    match the requested release. Previously both return codes were ignored,
+    so a failed fetch, a missing tag, a dirty library tree or no network at
+    all left the checkout on whatever version it was already on -- and the
+    pipeline built a scaffold from it, labelled with the version the
+    operator asked for."""
     if library_path is not None:
         return Path(library_path)
-    checkout = Path(__file__).resolve().parent
-    subprocess.run(["git", "-C", str(checkout), "fetch", "--tags"],
-                   capture_output=True, text=True, timeout=300)
-    subprocess.run(["git", "-C", str(checkout), "checkout", f"v{version}"],
-                   capture_output=True, text=True, timeout=120)
+
+    checkout = library_checkout_root()
+    fetched = _library_git(checkout, "fetch", "--tags")
+    if fetched.returncode != 0:
+        raise LibraryCheckoutError(
+            f"could not fetch tags in the library checkout {checkout}: "
+            f"{fetched.stderr.strip() or 'git failed'}")
+
+    checked_out = _library_git(checkout, "checkout", f"v{version}")
+    if checked_out.returncode != 0:
+        raise LibraryCheckoutError(
+            f"could not check out v{version} in the library checkout "
+            f"{checkout}: {checked_out.stderr.strip() or 'git failed'}")
+
+    try:
+        on_disk = (checkout / "VERSION").read_text(encoding="utf-8").strip()
+        on_disk = on_disk.split()[0] if on_disk.split() else ""
+    except OSError as exc:
+        raise LibraryCheckoutError(
+            f"could not read {checkout / 'VERSION'}: {exc}") from None
+    if on_disk != version:
+        raise LibraryCheckoutError(
+            f"the library checkout {checkout} is on {on_disk!r} after "
+            f"checking out v{version}; refusing to build a scaffold from "
+            f"the wrong release")
     return checkout
 
 
@@ -1524,9 +1573,15 @@ def main(argv):
         "content_language": args.content_language,
         "repo_name": args.repo_name,
     }
-    return run_upgrade(Path(args.target), args.adopt, args.adopt_drift,
-                       args.to, args.library_path, args.allow_downgrade,
-                       args.apply, args.commit, adopt_vars)
+    try:
+        return run_upgrade(Path(args.target), args.adopt, args.adopt_drift,
+                           args.to, args.library_path, args.allow_downgrade,
+                           args.apply, args.commit, adopt_vars)
+    except LibraryCheckoutError as exc:
+        # Raised before anything is written to the target -- step 6 resolves
+        # the library long before the scratch copy exists.
+        print(f"upgrade: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

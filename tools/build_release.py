@@ -48,7 +48,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # whole trees, not file lists -- a new template or script ships with no
 # change here. Anything absent from this tuple never reaches a consumer.
 PAYLOAD_PATHS = ("init.py", "upgrade.py", "VERSION",
-                 "scripts", "githooks", "templates")
+                 "bin", "scripts", "githooks", "templates")
 
 DEFAULT_SOURCE_URL = "https://github.com/hieplam/wiki-harness"
 

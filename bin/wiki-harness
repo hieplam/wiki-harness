@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""The `wiki-harness` command.
+
+Installed on PATH by install.sh. It does one job: decide which wiki-harness
+RELEASE a command needs, make that release present on disk, and hand over to
+it. All the harness logic lives in the release payload, so this file stays
+small and rarely changes -- a new init.py or upgrade.py flag needs no change
+here at all, because everything after the subcommand is passed through
+untouched.
+
+    wiki-harness init <target> --wiki-title 'My Wiki' [init.py flags]
+    wiki-harness upgrade <target> --to 1.3.0 [upgrade.py flags]
+    wiki-harness versions
+    wiki-harness self-update
+    wiki-harness --version
+
+Which release each command gets:
+
+    init                     the newest published release
+    upgrade --to X           exactly X -- naming a version is the point
+    upgrade --check          the newest, since it names no version
+    --harness-version X      X, for any command
+
+Releases are cached under ~/.cache/wiki-harness/releases/<version>/ and
+reused forever, so the same version is downloaded once. Payloads are
+verified against the .sha256 published beside them before anything is
+unpacked. That is integrity against a corrupted download, NOT independent
+verification: the checksum ships from the same GitHub Release as the payload
+it describes (docs/compatibility-policy.md 9.1).
+
+Pure core: parse_cli(), select_version(), asset_url(), checksum_url(),
+parse_latest_tag(), cache_dir_for(), is_safe_member(), checksum_refusal(),
+usage() -- data in, data or a refusal out. Impure edges: http_get(),
+fetch_latest_version(), ensure_release(), unpack(), exec_payload(),
+run_self_update(), main().
+
+Python 3.9 stdlib only, same floor as the harness it installs.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+# Bumped by hand when this file changes; the harness releases carry their own
+# versions independently. Shown by `wiki-harness --version`.
+LAUNCHER_VERSION = "1.0.0"
+
+REPO = "hieplam/wiki-harness"
+RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"
+DOWNLOAD_BASE = f"https://github.com/{REPO}/releases/download"
+INSTALL_SH = f"https://raw.githubusercontent.com/{REPO}/main/install.sh"
+
+SUBCOMMANDS = ("init", "upgrade", "versions", "self-update")
+VERSION_RE = re.compile(r"^v?(\d+\.\d+\.\d+)$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+NETWORK_TIMEOUT = 60
+
+
+class LauncherError(Exception):
+    """Any condition the user must be told about in one line. main()
+    converts it into a clean exit 2; a traceback out of a command on
+    someone's PATH is a crash, not a verdict."""
+
+
+class Invocation:
+    """What parse_cli() returns: the launcher's own decisions plus the
+    argument list the payload gets verbatim."""
+
+    def __init__(self, subcommand, passthrough, pinned, to_version):
+        self.subcommand = subcommand
+        self.passthrough = passthrough
+        self.pinned = pinned
+        self.to_version = to_version
+
+
+# ---- pure core ----
+
+def normalise_version(raw):
+    """Pure. 'v1.2.3' and '1.2.3' both mean 1.2.3; anything else is None."""
+    if not raw:
+        return None
+    match = VERSION_RE.match(raw.strip())
+    return match.group(1) if match else None
+
+
+def parse_cli(argv):
+    """Pure. Splits the launcher's own flags off the front and leaves
+    everything else alone, so payload flags this launcher has never heard
+    of still work. Also reads --to, which the launcher needs to know WHICH
+    release to fetch, but leaves it in the passthrough because upgrade.py
+    needs it too."""
+    subcommand = argv[0] if argv and not argv[0].startswith("-") else None
+    if subcommand not in SUBCOMMANDS:
+        subcommand = None
+    rest = argv[1:] if subcommand else list(argv)
+
+    passthrough, pinned, to_version = [], None, None
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg == "--harness-version" and i + 1 < len(rest):
+            pinned = rest[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--harness-version="):
+            pinned = arg.split("=", 1)[1]
+            i += 1
+            continue
+        if arg == "--to" and i + 1 < len(rest):
+            to_version = rest[i + 1]
+        elif arg.startswith("--to="):
+            to_version = arg.split("=", 1)[1]
+        passthrough.append(arg)
+        i += 1
+
+    return Invocation(subcommand, passthrough, pinned, to_version)
+
+
+def select_version(subcommand, pinned, to_version, latest):
+    """Pure. The resolution rule, as data. An explicit pin always wins;
+    otherwise `upgrade --to X` means X and everything else means newest."""
+    if pinned:
+        return pinned
+    if subcommand == "upgrade" and to_version:
+        return to_version
+    return latest
+
+
+def asset_url(version):
+    """Pure. Where the release workflow uploads the payload."""
+    return f"{DOWNLOAD_BASE}/v{version}/wiki-harness-{version}.tar.gz"
+
+
+def checksum_url(version):
+    """Pure. The .sha256 published beside the payload."""
+    return asset_url(version) + ".sha256"
+
+
+def cache_dir_for(cache_root, version):
+    """Pure. One directory per version, so two versions never collide and a
+    cached release is found by name alone."""
+    return Path(cache_root) / "releases" / version
+
+
+def parse_latest_tag(text):
+    """Pure. The version from the releases API's JSON, or None when the
+    response is unusable -- unparseable, not an object, or carrying a tag
+    that is not a release version (a moving tag like 'nightly' must never
+    be mistaken for one)."""
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return normalise_version(data.get("tag_name"))
+
+
+def is_safe_member(name):
+    """Pure. True when a tar member writes inside the extraction root.
+
+    The payload arrives over TLS from a release its checksum pins, but this
+    holds on its own: an archive is untrusted input, and an unpacker that
+    trusts member names is one bad tarball away from writing anywhere the
+    user can."""
+    if name.startswith("/") or ".." in Path(name).parts:
+        return False
+    return not Path(name).is_absolute()
+
+
+def checksum_refusal(checksum_text, payload, version):
+    """Pure. None when `payload` matches the published digest, else the
+    message explaining the mismatch.
+
+    An unreadable checksum file is a refusal, never a pass: 'nothing to
+    verify' must not be reachable by serving an empty file."""
+    recorded = (checksum_text or "").split()
+    digest = recorded[0].lower() if recorded else ""
+    if not SHA256_RE.match(digest):
+        return (f"the published checksum for v{version} is unreadable "
+                f"({checksum_text.strip()[:40]!r}); refusing to install an "
+                f"unverified payload")
+    actual = hashlib.sha256(payload).hexdigest()
+    if actual != digest:
+        return (f"checksum mismatch for v{version}: the release publishes "
+                f"{digest}, the download hashes to {actual}. Nothing was "
+                f"installed; re-run to try again.")
+    return None
+
+
+def usage():
+    """Pure. The help text, printed for no arguments and for an unknown
+    subcommand."""
+    return (
+        "wiki-harness -- scaffold and upgrade an LLM-maintained wiki\n"
+        "\n"
+        "  wiki-harness init <target> --wiki-title 'My Wiki' [flags]\n"
+        "      Scaffold a new wiki. Only --wiki-title is required; run it\n"
+        "      with no other flags to be prompted, each with a default.\n"
+        "\n"
+        "  wiki-harness upgrade <target> --to <X.Y.Z> [--check|--apply|--commit]\n"
+        "      Move an existing wiki to another harness release.\n"
+        "\n"
+        "  wiki-harness versions          list cached and available releases\n"
+        "  wiki-harness self-update       reinstall the launcher\n"
+        "  wiki-harness --version         show versions and exit\n"
+        "\n"
+        "  --harness-version <X.Y.Z>      pin any command to one release\n"
+        "\n"
+        "Every other flag is passed straight through to the release's own\n"
+        "init.py / upgrade.py. Docs: https://github.com/" + REPO + "\n")
+
+
+# ---- impure edges ----
+
+def http_get(url):
+    """Impure edge. One HTTPS GET, returning bytes. Every failure mode --
+    no network, DNS, TLS, 404, timeout -- becomes a LauncherError carrying
+    something a person can act on."""
+    request = urllib.request.Request(
+        url, headers={"User-Agent": f"wiki-harness/{LAUNCHER_VERSION}",
+                      "Accept": "application/octet-stream"})
+    try:
+        with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        raise LauncherError(f"{exc.code} fetching {url}") from None
+    except urllib.error.URLError as exc:
+        raise LauncherError(f"cannot reach {url}: {exc.reason}") from None
+    except OSError as exc:
+        raise LauncherError(f"cannot reach {url}: {exc}") from None
+
+
+def fetch_latest_version(fetch=http_get):
+    """Impure edge. The newest published release, via the releases API."""
+    version = parse_latest_tag(fetch(RELEASES_API).decode("utf-8", "replace"))
+    if not version:
+        raise LauncherError(
+            "could not determine the newest release from "
+            f"{RELEASES_API}; pass --harness-version <X.Y.Z> to pick one")
+    return version
+
+
+def unpack(archive, destination):
+    """Impure edge. Extracts `archive` into `destination`, refusing any
+    member that would write outside it. Extracts to a sibling temp
+    directory and renames, so an aborted unpack never leaves a partial
+    payload the next run would treat as a cache hit."""
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(dir=str(destination.parent),
+                                    prefix=".unpack-"))
+    try:
+        with tarfile.open(archive) as tar:
+            members = tar.getmembers()
+            for member in members:
+                if not is_safe_member(member.name):
+                    raise LauncherError(
+                        f"refusing to unpack {member.name!r}: it would write "
+                        f"outside {destination}")
+                if member.issym() or member.islnk():
+                    raise LauncherError(
+                        f"refusing to unpack link member {member.name!r}")
+            tar.extractall(staging)
+
+        # The payload is one top-level directory; promote its contents so
+        # the cache holds the payload itself, not a nested wrapper.
+        entries = [p for p in staging.iterdir()]
+        root = entries[0] if len(entries) == 1 and entries[0].is_dir() else staging
+        os.replace(str(root), str(destination))
+    except tarfile.TarError as exc:
+        raise LauncherError(f"the downloaded payload is not readable: {exc}") from None
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return destination
+
+
+def ensure_release(version, cache_root, fetch=http_get):
+    """Impure edge. Returns the on-disk payload directory for `version`,
+    downloading and verifying it first if the cache does not already have
+    it. A cached release touches the network not at all."""
+    payload = cache_dir_for(cache_root, version)
+    if (payload / "init.py").is_file():
+        return payload
+
+    try:
+        archive_bytes = fetch(asset_url(version))
+        checksum_text = fetch(checksum_url(version)).decode("utf-8", "replace")
+    except LauncherError as exc:
+        raise LauncherError(
+            f"could not download wiki-harness v{version}: {exc}\n"
+            f"Releases before the first one built by the release workflow "
+            f"publish no payload; see "
+            f"https://github.com/{REPO}/releases") from None
+
+    refusal = checksum_refusal(checksum_text, archive_bytes, version)
+    if refusal:
+        raise LauncherError(refusal)
+
+    with tempfile.TemporaryDirectory() as staging:
+        archive = Path(staging) / f"wiki-harness-{version}.tar.gz"
+        archive.write_bytes(archive_bytes)
+        unpack(archive, payload)
+    return payload
+
+
+def exec_payload(payload, script, args):
+    """Impure edge. Hands over to the release's own entry point and returns
+    its exit code. Runs as a child rather than exec() so this process can
+    still report a clean failure if the interpreter cannot start."""
+    try:
+        return subprocess.run(
+            [sys.executable, str(payload / script), *args]).returncode
+    except OSError as exc:
+        raise LauncherError(f"could not run {payload / script}: {exc}") from None
+
+
+def cached_versions(cache_root):
+    """Impure edge. Every release already on disk, newest first."""
+    releases = Path(cache_root) / "releases"
+    if not releases.is_dir():
+        return []
+    found = [p.name for p in releases.iterdir()
+             if p.is_dir() and normalise_version(p.name)]
+    return sorted(found, key=lambda v: [int(n) for n in v.split(".")],
+                  reverse=True)
+
+
+def run_self_update():
+    """Impure edge. Re-runs the published installer, which is what install
+    and update both mean here."""
+    script = http_get(INSTALL_SH)
+    try:
+        result = subprocess.run(["sh", "-s"], input=script, timeout=300)
+    except OSError as exc:
+        raise LauncherError(f"could not run the installer: {exc}") from None
+    return result.returncode
+
+
+def cache_root():
+    """Impure edge. WIKI_HARNESS_CACHE, else XDG_CACHE_HOME, else
+    ~/.cache -- all under $HOME, so nothing here ever needs sudo."""
+    override = os.environ.get("WIKI_HARNESS_CACHE")
+    if override:
+        return Path(override)
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".cache"
+    return base / "wiki-harness"
+
+
+def main(argv):
+    if not argv:
+        print(usage(), file=sys.stderr)
+        return 2
+
+    if argv[0] in ("--version", "-V"):
+        print(f"wiki-harness launcher {LAUNCHER_VERSION}")
+        cached = cached_versions(cache_root())
+        print(f"cached releases: {', '.join(cached) if cached else 'none'}")
+        return 0
+    if argv[0] in ("--help", "-h", "help"):
+        print(usage())
+        return 0
+
+    parsed = parse_cli(argv)
+    if parsed.subcommand is None:
+        print(f"unknown command {argv[0]!r}", file=sys.stderr)
+        print(usage(), file=sys.stderr)
+        return 2
+
+    if parsed.subcommand == "self-update":
+        return run_self_update()
+
+    pinned = None
+    if parsed.pinned:
+        pinned = normalise_version(parsed.pinned)
+        if not pinned:
+            print(f"--harness-version {parsed.pinned!r} is not a release "
+                  f"version; expected X.Y.Z", file=sys.stderr)
+            return 2
+
+    to_version = None
+    if parsed.to_version:
+        to_version = normalise_version(parsed.to_version)
+        if not to_version:
+            print(f"--to {parsed.to_version!r} is not a release version; "
+                  f"expected X.Y.Z", file=sys.stderr)
+            return 2
+
+    root = cache_root()
+
+    if parsed.subcommand == "versions":
+        cached = cached_versions(root)
+        print(f"cached:    {', '.join(cached) if cached else 'none'}")
+        try:
+            print(f"newest:    {fetch_latest_version()}")
+        except LauncherError as exc:
+            print(f"newest:    unavailable ({exc})")
+        return 0
+
+    version = select_version(parsed.subcommand, pinned, to_version,
+                             latest=None)
+    if version is None:
+        version = fetch_latest_version()
+
+    payload = ensure_release(version, root)
+
+    args = list(parsed.passthrough)
+    if parsed.subcommand == "upgrade" and "--library-path" not in args:
+        # The payload IS the library for this run. Without this, upgrade.py
+        # falls back to git-fetching and checking out a tag inside its own
+        # directory -- meaningless for an unpacked release, and the source
+        # of the detached-HEAD surprise a git checkout suffers.
+        args += ["--library-path", str(payload)]
+
+    script = "init.py" if parsed.subcommand == "init" else "upgrade.py"
+    return exec_payload(payload, script, args)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except LauncherError as exc:
+        print(f"wiki-harness: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except KeyboardInterrupt:
+        print("wiki-harness: interrupted", file=sys.stderr)
+        sys.exit(130)

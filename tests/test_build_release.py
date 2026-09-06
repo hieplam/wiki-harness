@@ -36,7 +36,7 @@ class PayloadContentsArePure(unittest.TestCase):
         """A consumer wiki is assembled from these four trees plus the two
         entry points; dropping any one silently breaks `init`."""
         for required in ("scripts", "githooks", "templates", "init.py",
-                         "upgrade.py", "VERSION"):
+                         "upgrade.py", "VERSION", "bin"):
             self.assertIn(required, build_release.PAYLOAD_PATHS)
 
     def test_payload_excludes_what_a_consumer_never_runs(self):
@@ -107,6 +107,7 @@ class BuiltPayloadIsUsable(unittest.TestCase):
         prefix = f"wiki-harness-{self.version}"
 
         for expected in (f"{prefix}/init.py", f"{prefix}/upgrade.py",
+                         f"{prefix}/bin/wiki-harness",
                          f"{prefix}/VERSION", f"{prefix}/RELEASE.json",
                          f"{prefix}/scripts/lint.py",
                          f"{prefix}/scripts/manifest.py",
