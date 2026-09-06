@@ -66,6 +66,12 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 NETWORK_TIMEOUT = 60
 
+# GitHub's REST API answers `Accept: application/octet-stream` with 415
+# Unsupported Media Type, so the JSON endpoint and the asset download must
+# ask for different things.
+ACCEPT_JSON = "application/vnd.github+json"
+ACCEPT_BYTES = "application/octet-stream"
+
 
 class LauncherError(Exception):
     """Any condition the user must be told about in one line. main()
@@ -224,13 +230,16 @@ def usage():
 
 # ---- impure edges ----
 
-def http_get(url):
+def http_get(url, accept=ACCEPT_BYTES):
     """Impure edge. One HTTPS GET, returning bytes. Every failure mode --
     no network, DNS, TLS, 404, timeout -- becomes a LauncherError carrying
-    something a person can act on."""
+    something a person can act on.
+
+    `accept` defaults to the asset content type; the JSON API needs
+    ACCEPT_JSON or it answers 415."""
     request = urllib.request.Request(
         url, headers={"User-Agent": f"wiki-harness/{LAUNCHER_VERSION}",
-                      "Accept": "application/octet-stream"})
+                      "Accept": accept})
     try:
         with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT) as response:
             return response.read()
@@ -244,7 +253,8 @@ def http_get(url):
 
 def fetch_latest_version(fetch=http_get):
     """Impure edge. The newest published release, via the releases API."""
-    version = parse_latest_tag(fetch(RELEASES_API).decode("utf-8", "replace"))
+    version = parse_latest_tag(
+        fetch(RELEASES_API, accept=ACCEPT_JSON).decode("utf-8", "replace"))
     if not version:
         raise LauncherError(
             "could not determine the newest release from "
