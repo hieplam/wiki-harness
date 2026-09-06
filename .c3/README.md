@@ -1,6 +1,6 @@
 ---
 id: c3-0
-c3-seal: 8ff3a7ca4fe573387f75467377e45b5c0c8346c5bc7ec5e450dbdd92d4fc6914
+c3-seal: 3aedb8b9aacfd15dc403c279e1ce8ddcc3d9585b9183c633f3babce9de13579f
 title: wiki-harness
 goal: |-
     Provide a versioned, standalone Python library that stamps a lint/hook/rules harness onto any
@@ -24,6 +24,7 @@ source of truth instead of each forking its own copy of the scripts.
 | c3-2 | lifecycle |  | active | Stamp a brand-new wiki instance (init) and safely bring an existing one forward to a newer | Stamp a brand-new wiki instance (init) and safely bring an existing one forward to a newer |
 | c3-3 | templates |  | active | Hold every MANAGED/TEMPLATE/SEEDED source file a wiki instance is stamped with, split by | Hold every MANAGED/TEMPLATE/SEEDED source file a wiki instance is stamped with, split by |
 | c3-4 | tests |  | active | Prove the library's own correctness once, against a synthetic fixture that is never ogp-wiki | Prove the library's own correctness once, against a synthetic fixture that is never ogp-wiki |
+| c3-5 | distribution | service | active | Put the harness on a user's machine and keep it current, so adopting a wiki is one command | Put the harness on a user's machine and keep it current, so adopting a wiki is one command |
 
 ## Abstract Constraints
 
