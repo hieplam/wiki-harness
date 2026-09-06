@@ -385,3 +385,74 @@ class EndToEndAgainstARealPayload(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RequestHeaders(unittest.TestCase):
+    """Regression: one Accept header was sent for every request, including
+    the JSON API call, and GitHub answers `Accept: application/octet-stream`
+    on /releases/latest with 415 Unsupported Media Type. Every `init` failed
+    at the very first step:
+
+        wiki-harness: 415 fetching
+        https://api.github.com/repos/hieplam/wiki-harness/releases/latest
+
+    Only an end-to-end run against the real API could show this -- the
+    seams every other test injects skip http_get() entirely.
+    """
+
+    def _captured_request(self, url, **kwargs):
+        seen = {}
+
+        class FakeResponse:
+            def read(self):
+                return b"{}"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(request, timeout=None):
+            seen["url"] = request.full_url
+            seen["headers"] = {k.lower(): v
+                               for k, v in request.header_items()}
+            seen["timeout"] = timeout
+            return FakeResponse()
+
+        with patch.object(launcher.urllib.request, "urlopen",
+                          side_effect=fake_urlopen):
+            launcher.http_get(url, **kwargs)
+        return seen
+
+    def test_the_json_api_asks_for_json(self):
+        seen = self._captured_request(launcher.RELEASES_API,
+                                      accept=launcher.ACCEPT_JSON)
+
+        self.assertIn("github", seen["headers"]["accept"])
+        self.assertIn("json", seen["headers"]["accept"])
+        self.assertNotIn("octet-stream", seen["headers"]["accept"])
+
+    def test_an_asset_download_asks_for_bytes(self):
+        seen = self._captured_request(launcher.asset_url("1.3.0"))
+
+        self.assertEqual(seen["headers"]["accept"], "application/octet-stream")
+
+    def test_fetch_latest_version_uses_the_json_accept(self):
+        """The specific call that 415'd."""
+        seen = {}
+
+        def fake_fetch(url, accept=None):
+            seen["url"] = url
+            seen["accept"] = accept
+            return b'{"tag_name": "v1.3.0"}'
+
+        self.assertEqual(launcher.fetch_latest_version(fetch=fake_fetch),
+                         "1.3.0")
+        self.assertEqual(seen["url"], launcher.RELEASES_API)
+        self.assertIn("json", (seen["accept"] or ""))
+
+    def test_every_request_carries_a_timeout(self):
+        seen = self._captured_request(launcher.asset_url("1.3.0"))
+
+        self.assertEqual(seen["timeout"], launcher.NETWORK_TIMEOUT)
