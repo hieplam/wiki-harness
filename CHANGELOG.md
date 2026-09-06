@@ -20,7 +20,6 @@ explicit release type and a prose **Compatibility** field. They are kept exactly
 ### Bug Fixes
 
 * **cli:** ask the JSON API for JSON, not octet-stream ([66a0439](https://github.com/hieplam/wiki-harness/commit/66a0439d792459a500e776cefdb0636ecf35028b))
-* **cli:** ask the JSON API for JSON, not octet-stream ([267e7a5](https://github.com/hieplam/wiki-harness/commit/267e7a5e22d624ee28a1ad14255f710f91d7e322))
 
 ## [1.3.0](https://github.com/hieplam/wiki-harness/compare/v1.2.1...v1.3.0) (2026-09-06)
 
