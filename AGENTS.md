@@ -26,6 +26,9 @@ cards/origin/trust mean, how to run `init`). Do not duplicate that here — link
 
 | Path | What it is |
 |---|---|
+| `bin/wiki-harness` | The installed CLI. Resolves a release, caches it, execs that release's `init.py`/`upgrade.py`. Everything after the subcommand is passed through, so payload flags need no change here. |
+| `install.sh` | Puts the launcher on PATH. Verifies the published checksum; writes only under `$HOME`. |
+| `tools/build_release.py` | Builds the release payload. **Never** put a build tool in `scripts/` — that vendors it into every consumer wiki. |
 | `init.py` | First adoption: 16 ordered, fail-closed steps. Runs **once** per wiki, ever. |
 | `upgrade.py` | Every subsequent release move, plus `--adopt` for a pre-harness wiki. |
 | `scripts/lint.py` | The linter a consumer runs. Emits `Finding(severity, code, path, msg)`. |
@@ -35,6 +38,7 @@ cards/origin/trust mean, how to run `init`). Do not duplicate that here — link
 | `githooks/` | `pre-commit` + `commit-msg`, copied into a consumer's `.githooks/`. |
 | `templates/` | Every MANAGED / TEMPLATE / SEEDED source `init` places into a consumer. |
 | `tests/` | The library's own suite. `./run_tests.sh` runs all of it. |
+| `tools/` | Repo-internal tooling. Not shipped to consumers, not vendored. |
 | `docs/` | Compatibility policy, known limitations, the extraction plan and its records. |
 | `.c3/` | Architecture facts. Read them through the C3 CLI — **never** open the files. |
 
@@ -70,6 +74,25 @@ These are enforced, not advisory. A change that breaks one gets rejected.
    MANAGED/TEMPLATE path, the manifest schema, or a CLI surface, read
    [docs/compatibility-policy.md](./docs/compatibility-policy.md) §2 and decide the release
    type it forces. That decision goes in the CHANGELOG entry.
+
+## Two ways the harness runs
+
+Every change has to work under both, and they differ in one way that has already
+caused a defect:
+
+- **From a git checkout** — `python3 init.py …`, what the test suite and the fixture
+  libraries do. `.git` is present, so the `read_source_*` edges can ask git.
+- **From a release payload** — an unpacked tarball with **no `.git`**, what the
+  installed `wiki-harness` command runs. The `read_source_*` edges read `RELEASE.json`
+  instead; without it they silently record a cache path, `"unknown"`, and forty zeros
+  in the consumer's manifest, and `source_url` is what `upgrade --check` later feeds
+  to `git ls-remote`.
+
+`tools/build_release.py` is what makes a payload, and `PAYLOAD_PATHS` in it decides
+what a consumer receives. Add a top-level file or directory a wiki needs and you must
+add it there too — the payload test asserts every `scripts/*.py` and every template
+ships, precisely because a missing one produces a release that scaffolds a broken wiki
+and is invisible until someone runs `init`.
 
 ## Testing
 

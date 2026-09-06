@@ -8,42 +8,65 @@ those cards. `wiki-harness` is the machinery that makes that repeatable: the lin
 hooks, the file layout, the agent instructions, and a versioned upgrade path so a wiki set up
 today can pull next year's fixes without hand-merging anything.
 
-It is not a package you install. You clone this repo at a release tag and run `init.py`; the
-harness copies itself into your wiki and records what it owns.
+You install one small command; it fetches the release it needs and copies the harness into
+your wiki, recording every file it owns so later upgrades can tell your edits from its own.
 
 ---
 
 ## Quickstart — create a wiki
 
 ```bash
-# 1. Get the harness at a release tag.
-git clone --branch v1.2.0 https://github.com/hieplam/wiki-harness.git ~/tools/wiki-harness
-
-# 2. Scaffold your wiki. One flag is required.
-cd ~/repo
-python3 ~/tools/wiki-harness/init.py your-wiki --wiki-title 'Your Wiki'
+curl -fsSL https://raw.githubusercontent.com/hieplam/wiki-harness/main/install.sh | sh
 ```
 
-That is the whole setup. `init.py` creates the directory, wires the git hooks, runs its own
+That puts `wiki-harness` in `~/.local/bin`. Then, from anywhere:
+
+```bash
+wiki-harness init immigration-wiki --wiki-title 'Immigration Wiki'
+```
+
+One flag. The command creates the directory, wires the git hooks, runs its own
 linter against what it just wrote, and makes the first commit:
 
 ```
 lint: 0 error(s), 0 warning(s)
 
-Scaffolded your-wiki -- lint clean, .githooks wired, first commit a1b2c3d4e5f6.
+Scaffolded immigration-wiki -- lint clean, .githooks wired, first commit a1b2c3d4e5f6.
 Next: start ingesting -- see AGENTS.md's Workflow: Ingest.
 ```
 
-Then set your own git identity (init stamps the scaffold commit with a placeholder author and
-deliberately ignores your global git config, so runs are reproducible):
+Then set your own git identity — `init` stamps the scaffold commit with a placeholder
+author and deliberately ignores your global git config, so runs are reproducible:
 
 ```bash
-cd your-wiki
+cd immigration-wiki
 git config user.name  "Your Name"
 git config user.email "you@example.com"
 ```
 
 Now open the generated `AGENTS.md` and tell your agent to start ingesting.
+
+### How the command finds a release
+
+`wiki-harness` is a small launcher. It downloads the release it needs from GitHub,
+verifies the checksum published beside it, caches it under
+`~/.cache/wiki-harness/releases/<version>/`, and hands over to that release's own
+`init.py` / `upgrade.py`.
+
+| Command | Release it runs |
+|---|---|
+| `wiki-harness init …` | the newest published release |
+| `wiki-harness upgrade … --to 1.3.0` | exactly `1.3.0` — naming a version is the point |
+| `wiki-harness upgrade … --check` | the newest, since it names none |
+| any command with `--harness-version X` | `X` |
+
+A release already in the cache is reused with no network call at all. To update the
+launcher itself, run `wiki-harness self-update` (it re-runs the installer).
+
+```bash
+wiki-harness versions     # what is cached, and what is newest
+wiki-harness --version    # launcher version and cached releases
+```
 
 ### The flags
 
@@ -51,7 +74,7 @@ Only `--wiki-title` is required. Everything else has a default you can change la
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--wiki-title` | **required** | The wiki's human name, e.g. `'Your Wiki'` |
+| `--wiki-title` | **required** | The wiki's human name, e.g. `'Immigration Wiki'` |
 | `--org-name` | the wiki title | Who the wiki belongs to — a person, a team, a company |
 | `--repo-name` | the target directory's name | The repo's own name |
 | `--content-language` | `English` | The language pages are written in, whatever language you chat in |
@@ -60,19 +83,32 @@ Only `--wiki-title` is required. Everything else has a default you can change la
 | `--answers-file` | — | A JSON file supplying the same values (individual flags win over it) |
 | `--force` | off | Scaffold into a directory that is not empty (it never deletes anything) |
 
-Run it with no flags at all and it prompts, offering each default in brackets — press Enter
-to accept:
+Run it with no flags beyond the title and it prompts, offering each default in
+brackets — press Enter to accept:
 
 ```
-$ python3 ~/tools/wiki-harness/init.py your-wiki
-Wiki title: Your Wiki
-Organisation name [Your Wiki]:
+$ wiki-harness init immigration-wiki
+Wiki title: Immigration Wiki
+Organisation name [Immigration Wiki]:
 Content language [English]:
-Repository name [Your-wiki]:
+Repository name [immigration-wiki]:
 ```
 
 `--non-interactive` is for scripts and agents: it turns the prompts off, so a missing
 `--wiki-title` becomes a clean exit-2 refusal instead of a hang.
+
+### Installing without the one-liner
+
+Read [install.sh](./install.sh) first if you would rather not pipe a script to a
+shell — it is short, writes only under `$HOME`, and never needs `sudo`. Or set where
+it goes and which release it installs:
+
+```bash
+WIKI_HARNESS_BIN_DIR=~/bin WIKI_HARNESS_VERSION=1.2.1 sh install.sh
+```
+
+You can also skip the CLI entirely and run a clone directly; see
+[Working on the harness itself](#working-on-the-harness-itself).
 
 ---
 
@@ -164,14 +200,15 @@ place it is about to write, and never infers a convention from surrounding files
 
 ## Upgrading a wiki
 
-Pull a newer harness release into an existing wiki from the library clone:
+Pull a newer harness release into an existing wiki:
 
 ```bash
-cd ~/tools/wiki-harness && git fetch --tags && git checkout v1.2.1
-
-python3 ~/tools/wiki-harness/upgrade.py ~/repo/your-wiki --check
-python3 ~/tools/wiki-harness/upgrade.py ~/repo/your-wiki --to 1.2.1 --apply --commit
+wiki-harness upgrade ~/repo/immigration-wiki --check
+wiki-harness upgrade ~/repo/immigration-wiki --to 1.3.0 --apply --commit
 ```
+
+The launcher fetches the release you named and hands it its own payload as
+`--library-path`, so nothing ever checks out a tag inside a clone you are using.
 
 Upgrade refuses before writing anything if the tree is dirty or a MANAGED file has drifted; it
 stages the whole change in a scratch copy, lints it there, and only then promotes it — with a
