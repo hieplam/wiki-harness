@@ -24,7 +24,7 @@ _SUBPROCESS_TIMEOUT = 30
 
 GapInputs = namedtuple(
     "GapInputs",
-    "ledger_text view_text schema_text head_bytes work_bytes "
+    "ledger_text view_text schema_text head_bytes work_bytes index_bytes "
     "deleted_lines git_error card_ids page_paths")
 
 
@@ -75,6 +75,21 @@ def check_gaps(inputs):
     if violation:
         findings.append(Finding("ERROR", "GAP_APPEND",
                                 gap_ledger.LEDGER_PATH, violation))
+
+    # C1: the working tree is what an agent edits by hand, and this check
+    # catches tampering there before it is ever staged -- but what a
+    # commit actually captures is the INDEX, not the working tree. A
+    # binary-looking blob staged via `git update-index --cacheinfo` (or a
+    # `.gitattributes -diff` marker) never touches the working file, so
+    # the check above alone would wave it through. Judge the staged bytes
+    # against HEAD with the exact same pure comparator, so a forged index
+    # entry is rejected on its own evidence, independent of what the
+    # working tree says.
+    staged_violation = gap_ledger.append_only_violation(
+        inputs.head_bytes, inputs.index_bytes)
+    if staged_violation:
+        findings.append(Finding("ERROR", "GAP_APPEND",
+                                gap_ledger.LEDGER_PATH, staged_violation))
 
     # Second, independent mechanism: a staged diff that removes lines is a
     # violation on its own evidence, through a different code path.
@@ -252,6 +267,88 @@ def _git_bytes(root, path, state):
     return result.stdout, None
 
 
+def _path_staged(root, path):
+    """Impure edge. Whether <path> has an index entry at all -- decided by
+    exit code, never by parsing `git status`/`diff` text. `:0:<path>`
+    addresses stage 0 of the index directly, so this needs no HEAD to
+    resolve and no working-tree read; it is the one question C1's forged
+    commit ("stage a NUL-prefixed blob via `git update-index
+    --cacheinfo`") cannot lie about through a text-parsing side channel,
+    because there is no text here to parse."""
+    result, error = _run_git(root, ["git", "cat-file", "-e", ":0:{}".format(path)],
+                             "git cat-file")
+    if error is not None:
+        return None, error
+    return result.returncode == 0, None
+
+
+def _staged_bytes(root, path, state):
+    """Impure edge. (bytes or None, error or None) for the STAGED (index)
+    content of <path> -- the bytes that actually land in the next commit,
+    as opposed to `_git_bytes` (committed at HEAD) or the working tree
+    read directly in `gather()`.
+
+    This is C1's fix: the append-only guard used to judge only the
+    working tree and a numstat line-count summary, and a staged blob git
+    treats as binary (a forged blob written via `git update-index
+    --cacheinfo`, or any path a `.gitattributes -diff` line marks) never
+    shows up as parseable text in either of those. Reading the raw staged
+    bytes with `git cat-file blob :0:<path>` sidesteps text parsing
+    entirely: git either hands back the exact bytes stage 0 holds, or the
+    command fails by exit code, with no diff-summary heuristic in
+    between.
+
+    `state.error` is threaded through and checked first purely to avoid
+    spending a second git call once `gather()` already knows git itself
+    is unusable for this invocation; unlike `_git_bytes`, this function
+    does not otherwise depend on `state.unborn`/`state.head_resolves` --
+    the index exists (or does not, path by path) independently of whether
+    HEAD resolves to anything at all.
+
+    Three outcomes:
+    1. `state.error` is set, or the existence/content git calls below
+       fail or time out: fail closed, (None, error).
+    2. `path` IS present in the index (`_path_staged` is True): its
+       staged blob is returned verbatim.
+    3. `path` is NOT present in the index: nothing is staged for it. This
+       is the "committed ledger present in HEAD but not staged" case the
+       task calls out for a deliberate decision, and it is legitimate,
+       not an error -- reasoning:
+
+       Git carries an untouched, previously-committed path's index entry
+       forward automatically. The ONLY way a path that HEAD already has
+       can be absent from the index is that something explicitly removed
+       it (`git rm --cached`, or staging a whole-file deletion) -- an
+       ORDINARY commit that never touches the ledger leaves the ledger's
+       index entry exactly as HEAD left it, so it stays present here (and
+       lands in outcome 2, comparing equal to `head_bytes`, so no
+       violation fires). There is therefore no ambiguous case to
+       special-case: reporting `b""` uniformly for "absent from the
+       index" is correct either way -- when `head_bytes` is itself empty
+       (nothing was ever committed for this path), `append_only_violation`
+       already treats an empty HEAD as a prefix of anything and stays
+       silent; when `head_bytes` is non-empty, the same comparator
+       correctly reports a shrink, because a deliberately staged deletion
+       of a committed ledger IS an append-only violation.
+    """
+    if state.error is not None:
+        return None, state.error
+    present, error = _path_staged(root, path)
+    if error is not None:
+        return None, error
+    if not present:
+        return b"", None
+
+    result, error = _run_git(root, ["git", "cat-file", "blob", ":0:{}".format(path)],
+                             "git cat-file")
+    if error is not None:
+        return None, error
+    if result.returncode != 0:
+        return None, (result.stderr.decode("utf-8", "replace").strip()
+                      or "git cat-file blob failed")
+    return result.stdout, None
+
+
 def _staged_deletions(root, path, state):
     """Impure edge. Counts removal lines in the staged diff for one path.
 
@@ -287,6 +384,16 @@ def _staged_deletions(root, path, state):
         parts = line.split("\t")
         if len(parts) >= 2 and parts[1].isdigit():
             return int(parts[1]), None
+        # A numstat line for this path exists but does not parse as a
+        # digit deletion count -- git prints "-\t-\t<path>" for a blob it
+        # treats as binary (a forged NUL-containing blob, or a path
+        # covered by a `-diff` .gitattributes entry). That is exactly the
+        # C1 bypass: falling through to `return 0, None` here reported
+        # the staged change as clean. Fail closed instead: a line we
+        # cannot quantify must never be read as "zero deletions".
+        return 0, ("git diff --numstat reported an unparseable (likely "
+                   "binary-treated) staged change for {}; refusing to "
+                   "treat that as zero deleted lines".format(path))
     return 0, None
 
 
@@ -305,6 +412,7 @@ def gather(root):
     ledger = root / gap_ledger.LEDGER_PATH
     state = _resolve_repo_state(root)
     head_bytes, git_error = _git_bytes(root, gap_ledger.LEDGER_PATH, state)
+    index_bytes, index_error = _staged_bytes(root, gap_ledger.LEDGER_PATH, state)
     deleted, diff_error = _staged_deletions(root, gap_ledger.LEDGER_PATH, state)
     try:
         work_bytes = ledger.read_bytes()
@@ -321,8 +429,9 @@ def gather(root):
         schema_text=schema_text,
         head_bytes=head_bytes,
         work_bytes=work_bytes,
+        index_bytes=index_bytes,
         deleted_lines=deleted,
-        git_error=git_error or diff_error,
+        git_error=git_error or index_error or diff_error,
         card_ids=card_ids,
         page_paths=page_paths,
     )

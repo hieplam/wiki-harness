@@ -58,6 +58,7 @@ def inputs(**overrides):
         schema_text=SCHEMA_TEXT,
         head_bytes=b"",
         work_bytes=overrides.get("ledger_text", "").encode("utf-8"),
+        index_bytes=overrides.get("ledger_text", "").encode("utf-8"),
         deleted_lines=0,
         git_error=None,
         card_ids=frozenset(),
@@ -446,6 +447,129 @@ class GhostRefBypassAttack(unittest.TestCase):
             self.assertTrue(findings)
             self.assertTrue(all(f.severity == "ERROR" for f in findings))
             self.assertIn("GAP_APPEND", codes(findings))
+
+
+class ForgedIndexBypassAttack(unittest.TestCase):
+    """C1 (whole-branch review, final pass): the lint used to judge only
+    the working tree (`work_bytes`) plus a numstat line-count summary
+    (`deleted_lines`). What a commit actually captures is the INDEX, and
+    for a blob git treats as binary, `git diff --cached --numstat` prints
+    `-\\t-\\t<path>` -- unparseable as a digit, so the old
+    `_staged_deletions` fell through to `return 0, None`: clean. These
+    tests must FAIL against the pre-fix `gap_lint` (no `index_bytes`
+    input, `_staged_deletions` returning 0 on a binary line) and PASS
+    after `_staged_bytes`/`_staged_deletions` were made to judge the raw
+    staged bytes and fail closed."""
+
+    def _seed_committed_ledger(self, root):
+        _init_repo(root)
+        (root / "sources" / "cards").mkdir(parents=True)
+        (root / "wiki").mkdir()
+        gaps_dir = root / "gaps"
+        gaps_dir.mkdir()
+        text = ledger_text(gap_record("gap-2024-01-15-001"),
+                           gap_record("gap-2024-01-16-001"))
+        (gaps_dir / "knowledge-gaps.jsonl").write_text(text, encoding="utf-8")
+        (gaps_dir / "gap-schema.json").write_text(SCHEMA_TEXT, encoding="utf-8")
+        records, _ = gap_ledger.parse_ledger(text)
+        (gaps_dir / "KNOWLEDGE_GAP.md").write_text(
+            gap_ledger.render_view(records), encoding="utf-8")
+        self.assertEqual(_git(root, "add", "-A").returncode, 0)
+        commit = _git(root, "commit", "-q", "-m", "seed real ledger")
+        self.assertEqual(commit.returncode, 0, commit.stderr)
+        return text
+
+    def test_forged_nul_blob_staged_via_update_index_is_caught(self):
+        """The reviewer's exact demonstrated bypass: write HEAD's ledger
+        with a leading NUL byte to a new blob, and stage THAT blob for the
+        ledger path with `git update-index --cacheinfo` -- never touching
+        the working tree at all, so the working-tree check alone would
+        stay silent, and `git diff --cached --numstat` reports the change
+        as binary ('-\\t-\\t<path>'), unparseable as a digit."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            head_text = self._seed_committed_ledger(root)
+
+            forged_path = root / "forged.bin"
+            forged_path.write_bytes(b"\x00" + head_text.encode("utf-8"))
+            hash_object = _git(root, "hash-object", "-w", str(forged_path))
+            self.assertEqual(hash_object.returncode, 0, hash_object.stderr)
+            blob = hash_object.stdout.strip()
+
+            cacheinfo = "100644,{},{}".format(blob, gap_ledger.LEDGER_PATH)
+            update = _git(root, "update-index", "--cacheinfo", cacheinfo)
+            self.assertEqual(update.returncode, 0, update.stderr)
+
+            # Confirm the exact reviewer-observed numstat shape before
+            # asserting the fix -- this is the bypass's root cause, not
+            # incidental to it.
+            numstat = _git(root, "diff", "--cached", "--numstat", "--",
+                           gap_ledger.LEDGER_PATH)
+            self.assertEqual(numstat.stdout.strip(),
+                             "-\t-\t{}".format(gap_ledger.LEDGER_PATH))
+
+            findings = gap_lint.run(root)
+            self.assertTrue(
+                findings,
+                "a forged binary blob staged for the ledger must be "
+                "caught, not silently pass with []")
+            self.assertTrue(all(f.severity == "ERROR" for f in findings))
+            self.assertIn("GAP_APPEND", codes(findings))
+
+    def test_gitattributes_diff_marker_plus_staged_line_removal_is_caught(self):
+        """The second trigger the review names: mark the ledger `-diff` in
+        `.gitattributes` (committed, so it is honoured), stage a line
+        removal, then restore the working tree so ONLY the index differs
+        from HEAD. If the fix judged the working tree alone this would
+        pass; the index still carries the shrunk content."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            head_text = self._seed_committed_ledger(root)
+
+            (root / ".gitattributes").write_text(
+                "{} -diff\n".format(gap_ledger.LEDGER_PATH), encoding="utf-8")
+            self.assertEqual(_git(root, "add", "-A").returncode, 0)
+            attr_commit = _git(root, "commit", "-q", "-m", "mark ledger -diff")
+            self.assertEqual(attr_commit.returncode, 0, attr_commit.stderr)
+
+            ledger_path = root / gap_ledger.LEDGER_PATH
+            shrunk = "".join(head_text.splitlines(keepends=True)[:1])
+            ledger_path.write_text(shrunk, encoding="utf-8")
+            self.assertEqual(_git(root, "add", "--", gap_ledger.LEDGER_PATH).returncode, 0)
+
+            # Confirm '-diff' really did make numstat binary/unparseable,
+            # then restore the working tree so only the INDEX still
+            # differs from HEAD -- the wedge the review describes: the
+            # working-tree check alone now sees no divergence at all.
+            numstat = _git(root, "diff", "--cached", "--numstat", "--",
+                           gap_ledger.LEDGER_PATH)
+            self.assertEqual(numstat.stdout.strip(),
+                             "-\t-\t{}".format(gap_ledger.LEDGER_PATH))
+            ledger_path.write_text(head_text, encoding="utf-8")
+
+            findings = gap_lint.run(root)
+            self.assertTrue(
+                findings,
+                "a staged line-removal hidden behind a '-diff' attribute "
+                "must be caught even when the working tree was restored")
+            self.assertTrue(all(f.severity == "ERROR" for f in findings))
+            self.assertIn("GAP_APPEND", codes(findings))
+
+    def test_ordinary_commit_touching_unrelated_file_is_still_clean(self):
+        """The false-positive guard for the 'committed ledger present in
+        HEAD but not staged' decision: staging an unrelated file while the
+        ledger itself is untouched (working tree AND index both still
+        exactly what HEAD committed) must produce no gap findings at
+        all."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._seed_committed_ledger(root)
+
+            (root / "README.md").write_text("routine tidy\n", encoding="utf-8")
+            self.assertEqual(_git(root, "add", "--", "README.md").returncode, 0)
+
+            findings = gap_lint.run(root)
+            self.assertEqual(findings, [])
 
 
 if __name__ == "__main__":
