@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from card_frontmatter_lint import (  # noqa: E402  (needs the sys.path line above)
     RULES_FILES, SCHEMA_PATH, Finding, card_id_pattern_from_schema,
     card_id_scan_pattern, check_card, load_schema, parse_frontmatter, resolve)
+import gap_lint  # noqa: E402  (needs the sys.path line above)
 from manifest import diff_manifest, hash_tree, is_valid_role, read_manifest  # noqa: E402
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
@@ -164,7 +165,7 @@ SUBPROCESS_TIMEOUT = 30
 # per-filename, because the harness only ever vendors recipes.md into
 # sources/cards/ (see init.py's step 8).
 RULES_CONTAINERS = {
-    "AGENTS.md": ("", "wiki/", "sources/", "sources/cards/"),
+    "AGENTS.md": ("", "wiki/", "sources/", "sources/cards/", "gaps/"),
     "CLAUDE.md": ("", "wiki/", "sources/", "sources/cards/"),
     "recipes.md": ("sources/cards/",),
 }
@@ -189,9 +190,20 @@ def is_rules_file(path):
     return prefix in containers
 
 
+# Generated, deliberately not listed in index.md, and not wiki content:
+# the ledger view is rendered from gaps/knowledge-gaps.jsonl. Excluded from
+# _wiki_pages so it is never judged as an orphan page, and excluded from
+# check_broken_links so a recorded gap's markdown-shaped prose (a question
+# quoting "[link](...)") is never link-checked as if it were authored wiki
+# content -- see check_broken_links for why that must never block a
+# commit. scan() still reads it, so its OTHER frontmatter/shape checks (if
+# any are ever added) can still see it; only link-checking is exempted.
+GENERATED_PAGES = frozenset({"gaps/KNOWLEDGE_GAP.md"})
+
+
 def _wiki_pages(files):
     return [p for p in files if p.startswith("wiki/") and p.endswith(".md")
-            and not is_rules_file(p)]
+            and not is_rules_file(p) and p not in GENERATED_PAGES]
 
 
 def _cards(files):
@@ -202,7 +214,18 @@ def _cards(files):
 def check_broken_links(files):
     findings = []
     for path in sorted(files):
-        if not path.endswith(".md"):
+        if not path.endswith(".md") or path in GENERATED_PAGES:
+            # Generated pages (the gap ledger's rendered view) are agent
+            # prose fed straight into a markdown table cell, not authored
+            # wiki content: a recorded question containing an ordinary
+            # markdown link (`[the runbook](./runbook.md)`) would otherwise
+            # get link-checked here and turn a legitimate, schema-valid gap
+            # record into a permanent commit-blocking wedge, because the
+            # ledger itself may never be hand-edited or deleted to route
+            # around it. Fixing it here also makes GENERATED_PAGES actually
+            # do something: `_wiki_pages` already filters these out, so
+            # without this exclusion GENERATED_PAGES was inert and this was
+            # the one check that still reached the file.
             continue
         for target in extract_links(files[path]):
             if resolve(path, target) not in files:
@@ -383,11 +406,15 @@ def check_harness(manifest_state):
     return findings
 
 
-def run(files, changes):
+def run(files, changes, gap_findings=()):
     """Loads the schema once here so check_card_citations() can be
     schema-driven; check_cards() still loads it a second time itself, since
     it is the one that must independently report a CARD_SCHEMA finding when
-    the schema is missing or malformed."""
+    the schema is missing or malformed.
+
+    `gap_findings` is pre-gathered by the caller (the impure edge) via
+    gap_lint.run(root) -- this function stays a pure decision function that
+    only folds findings it is handed, never gathering its own."""
     schema, _ = load_schema(files.get(SCHEMA_PATH))
     findings = []
     for check in (check_broken_links, check_orphans):
@@ -396,6 +423,7 @@ def run(files, changes):
     for check in (check_cards, check_frontmatter, check_index_sync):
         findings += check(files)
     findings += check_raw_immutability(changes)
+    findings += list(gap_findings)
     return findings
 
 
@@ -433,7 +461,8 @@ def scan(root):
     encoding_findings = []
     for pattern in ("index.md", "AGENTS.md", "VISION.md", "sources/AGENTS.md",
                     "sources/cards/card-schema.json", "sources/cards/recipes.md",
-                    "wiki/**/*.md", "sources/cards/*.md"):
+                    "wiki/**/*.md", "sources/cards/*.md",
+                    "gaps/AGENTS.md", "gaps/KNOWLEDGE_GAP.md"):
         for f in root.glob(pattern):
             if f.is_file():
                 rel = f.relative_to(root).as_posix()
@@ -586,7 +615,13 @@ def main(argv):
     args = parser.parse_args(argv)
     root = args.root
     files, enc = scan(root)
-    findings = run(files, git_changes(root)) + enc
+    # gap_lint.run() itself now decides -- via a filesystem-only check for
+    # a `.git` entry anywhere up the tree, never a git command -- whether
+    # `root` is genuinely not a repository (upgrade.py's scratch copy,
+    # bare test fixtures) or a real repository whose git state must be
+    # asked and, on failure, fail closed. See its docstring.
+    gap_findings = gap_lint.run(root)
+    findings = run(files, git_changes(root), gap_findings=gap_findings) + enc
     findings += hooks_finding(root)
     findings += check_harness(read_harness_manifest(root))
     for f in sorted(findings):

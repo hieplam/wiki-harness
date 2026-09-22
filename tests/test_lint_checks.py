@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import card_frontmatter_lint
+import gap_ledger
 import lint
 from card_frontmatter_lint import SCHEMA_PATH, check_card, load_schema
 from lint import (MANIFEST_FILENAME, check_broken_links, check_card_citations,
@@ -25,6 +27,73 @@ TEMPLATE_ROOT = Path(__file__).resolve().parent.parent / "templates"
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample-wiki"
 FIXTURE_SCHEMA = (FIXTURE / SCHEMA_PATH).read_text(encoding="utf-8")
 SCHEMA, _SCHEMA_ERRORS = load_schema(FIXTURE_SCHEMA)
+
+LINT_PY = Path(__file__).resolve().parent.parent / "scripts" / "lint.py"
+GAP_SCHEMA_TEXT = (Path(__file__).resolve().parent.parent / "templates"
+                  / "gap-schema.default.json").read_text(encoding="utf-8")
+
+
+def _git(root, *args):
+    """Isolated exactly like test_gap_lint.py's own _git() helper: the
+    host's global/system gitconfig must never change whether these
+    assertions hold."""
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    return subprocess.run(["git", "-C", str(root), *args],
+                          capture_output=True, text=True, env=env)
+
+
+def _init_repo(root):
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.email", "hunter@example.com")
+    _git(root, "config", "user.name", "Hunter")
+
+
+def _gap_record(gid="gap-2024-01-15-001"):
+    return {
+        "type": "gap", "id": gid, "at": "2024-01-15T09:00:00+00:00",
+        "service": "example-service", "session": "0000-session",
+        "topics": ["concurrency"], "context": "reading a worker loop",
+        "prompt_verbatim": "whats a channel",
+        "question": "what is the difference between goroutines and channels in Go?",
+        "wiki_answer": "no page covers this", "answer_given": "from general knowledge",
+    }
+
+
+def _ledger_text(*records):
+    return "".join(json.dumps(r, sort_keys=True) + "\n" for r in records)
+
+
+def _seed_committed_ledger(root, gid="gap-2024-01-15-001"):
+    """Commits a real, schema-valid ledger (plus the sources/cards and
+    wiki/ dirs gap_lint.gather() expects to exist) to `root`, already
+    inited as a git repo by the caller."""
+    (root / "sources" / "cards").mkdir(parents=True)
+    (root / "wiki").mkdir()
+    gaps_dir = root / "gaps"
+    gaps_dir.mkdir()
+    text = _ledger_text(_gap_record(gid))
+    (gaps_dir / "knowledge-gaps.jsonl").write_text(text, encoding="utf-8")
+    (gaps_dir / "gap-schema.json").write_text(GAP_SCHEMA_TEXT, encoding="utf-8")
+    records, _ = gap_ledger.parse_ledger(text)
+    (gaps_dir / "KNOWLEDGE_GAP.md").write_text(
+        gap_ledger.render_view(records), encoding="utf-8")
+    assert _git(root, "add", "-A").returncode == 0
+    commit = _git(root, "commit", "-q", "-m", "seed real ledger")
+    assert commit.returncode == 0, commit.stderr
+
+
+def _run_lint(root):
+    """Runs the real scripts/lint.py CLI (not gap_lint.run() directly)
+    against `root`, isolated from the host's gitconfig the same way
+    _git() is."""
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    return subprocess.run(
+        [sys.executable, str(LINT_PY), "--root", str(root)],
+        capture_output=True, text=True, env=env)
 
 GOOD_CARD = """---
 id: src-2024-01-15-001
@@ -638,6 +707,7 @@ class LinksInsideCode(unittest.TestCase):
                 "sources/AGENTS.md": "# Rules for sources/\n",
                 "sources/cards/AGENTS.md": "# Rules for sources/cards/\n",
                 "sources/cards/card-schema.json": FIXTURE_SCHEMA,
+                "gaps/AGENTS.md": (TEMPLATE_ROOT / "gaps.AGENTS.md").read_text(encoding="utf-8"),
                 "VISION.md": "# Deferred work\n",
                 "index.md": (TEMPLATE_ROOT / "index.md.header.tmpl").read_text(encoding="utf-8"),
             }
@@ -656,6 +726,190 @@ class LinksInsideCode(unittest.TestCase):
                 capture_output=True, text=True)
             self.assertEqual(result.stderr, "", result.stderr)
             self.assertNotRegex(result.stdout, r"(?m)^(ERROR|WARN) LINK ")
+
+
+class GapsWiredIntoLint(unittest.TestCase):
+    def test_scan_picks_up_the_gaps_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "gaps").mkdir()
+            (root / "gaps" / "AGENTS.md").write_text("# rules\n", encoding="utf-8")
+            (root / "gaps" / "KNOWLEDGE_GAP.md").write_text("# view\n", encoding="utf-8")
+            files, _ = lint.scan(root)
+            self.assertIn("gaps/AGENTS.md", files)
+            self.assertIn("gaps/KNOWLEDGE_GAP.md", files)
+
+    def test_gaps_agents_md_is_a_rules_file(self):
+        self.assertTrue(lint.is_rules_file("gaps/AGENTS.md"))
+
+    def test_the_generated_view_is_never_an_orphan(self):
+        files = {"index.md": "# index\n", "gaps/KNOWLEDGE_GAP.md": "# view\n"}
+        self.assertEqual(
+            [f for f in lint.check_orphans(files) if "gaps/" in f.path], [])
+
+    def test_gap_findings_are_folded_into_run(self):
+        finding = lint.Finding("ERROR", "GAP", "gaps/knowledge-gaps.jsonl", "boom")
+        out = lint.run({"index.md": "# index\n"}, [], gap_findings=[finding])
+        self.assertIn(finding, out)
+
+
+class GeneratedGapViewIsNeverLinkChecked(unittest.TestCase):
+    """C2 (whole-branch review, final pass): `gap_ledger._cell()` escapes
+    `|` and flattens newlines, but nothing else -- a recorded `question`
+    (or `topics`/`service`/`reason`) renders verbatim into
+    `gaps/KNOWLEDGE_GAP.md`, and `check_broken_links` treated that
+    generated file as ordinary wiki prose, link-checking agent-authored
+    text. A markdown link inside a recorded question then makes every
+    future commit fail lint with no legal way out (the ledger is
+    append-only; the view is byte-compared against a fresh render). This
+    test scaffolds a real wiki with `init.py` (so the assertion of a clean
+    `lint.py` exit code is meaningful -- a hand-built scratch tree would
+    always carry unrelated HARNESS/CARD_SCHEMA findings), records a real
+    gap with `gap.py add`, then runs the scaffolded copy's own
+    `scripts/lint.py`. Must FAIL against the pre-fix `check_broken_links`
+    (no GENERATED_PAGES exclusion there) and PASS after the fix."""
+
+    def test_markdown_link_in_a_recorded_question_does_not_block_lint(self):
+        init_py = Path(__file__).resolve().parent.parent / "init.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            init_result = subprocess.run(
+                [sys.executable, str(init_py), str(target),
+                 "--wiki-title", "Sample Wiki", "--org-name", "Sample Org",
+                 "--content-language", "English", "--repo-name", "sample-wiki",
+                 "--non-interactive"],
+                capture_output=True, text=True)
+            self.assertEqual(init_result.returncode, 0, init_result.stderr)
+
+            env = dict(os.environ)
+            env["GIT_CONFIG_GLOBAL"] = os.devnull
+            env["GIT_CONFIG_SYSTEM"] = os.devnull
+            add = subprocess.run(
+                [sys.executable, str(target / "scripts" / "gap.py"), "add",
+                 "--service", "example-service", "--session", "0000-session",
+                 "--context", "reading a runbook",
+                 "--prompt", "why does the runbook say X",
+                 "--question",
+                 "why does [the runbook](./runbook.md) say X?",
+                 "--wiki-answer", "no page covers this",
+                 "--answer-given", "answered from general knowledge",
+                 "--topics", "ops", "--no-commit"],
+                cwd=str(target), capture_output=True, text=True, env=env)
+            self.assertEqual(add.returncode, 0, add.stdout + add.stderr)
+
+            view = (target / "gaps" / "KNOWLEDGE_GAP.md").read_text(encoding="utf-8")
+            self.assertIn("[the runbook](./runbook.md)", view,
+                         "the markdown link must actually reach the "
+                         "rendered view for this test to be meaningful")
+
+            result = subprocess.run(
+                [sys.executable, str(target / "scripts" / "lint.py"),
+                 "--root", str(target)],
+                capture_output=True, text=True, env=env)
+            self.assertNotIn(
+                "LINK", result.stdout,
+                "a markdown link inside a recorded question must never "
+                "be link-checked in the generated view -- stdout was:\n"
+                + result.stdout)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class GapGateNeverSkipsOnCorruptedGit(unittest.TestCase):
+    """The Critical bypass the reviewer demonstrated: lint.py's old
+    `_is_git_worktree()` gate asked git `rev-parse --is-inside-work-tree`,
+    which fails identically whether a repository never existed OR a real
+    repository's `.git/HEAD` was corrupted with a single file write. The
+    gate then silently skipped calling gap_lint.run() at all in the
+    second case, discarding the append-only check's whole security value
+    on any repo an attacker can touch `.git/HEAD` in. These tests drive
+    the full `scripts/lint.py --root <root>` CLI path (never gap_lint.run()
+    directly, since gap_lint's own logic was never broken -- only lint.py's
+    gate around it was)."""
+
+    def test_ghost_ref_corruption_still_reports_gap_append_error(self):
+        """THE regression test. Must FAIL against the pre-fix
+        `_is_git_worktree()` gate (which reports 0 GAP_* findings once
+        `.git/HEAD` is corrupted) and PASS after the fix (which fails
+        closed with a GAP_APPEND ERROR instead)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            _seed_committed_ledger(root)
+
+            # The attack: one file write, no special tools, no git
+            # command. `.git/HEAD` no longer names anything real.
+            (root / ".git" / "HEAD").write_text(
+                "garbage-not-a-ref\n", encoding="utf-8")
+
+            # Tamper with the ledger too, exactly as the reviewer's repro
+            # does, so a pre-fix run would otherwise have every reason to
+            # complain -- and silently doesn't.
+            gaps_dir = root / "gaps"
+            (gaps_dir / "knowledge-gaps.jsonl").write_text(
+                _ledger_text(_gap_record("gap-2099-01-01-001")),
+                encoding="utf-8")
+            _git(root, "add", "-A")
+
+            result = _run_lint(root)
+            self.assertIn(
+                "GAP_APPEND", result.stdout,
+                "a corrupted .git/HEAD must never silently skip the "
+                "append-only check -- stdout was:\n" + result.stdout)
+            self.assertRegex(result.stdout, r"(?m)^ERROR GAP_APPEND ")
+
+    def test_scratch_copy_with_no_git_at_all_produces_no_gap_findings(self):
+        """upgrade.py's run_scratch_lint() case: a tempfile.mkdtemp() copy
+        that was never a git repository, anywhere up its tree. Must keep
+        producing zero GAP_* findings -- this is the exact regression the
+        original (broken) gate was added to prevent, and the fix must not
+        reintroduce it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "scratch"
+            root.mkdir()
+            (root / "sources" / "cards").mkdir(parents=True)
+            (root / "wiki").mkdir()
+            (root / "index.md").write_text("# index\n", encoding="utf-8")
+
+            result = _run_lint(root)
+            self.assertNotRegex(result.stdout, r"(?m)^(ERROR|WARN) GAP")
+
+    def test_real_worktree_with_dot_git_file_is_still_linted(self):
+        """`.git` is a plain FILE (not a directory) inside a git worktree
+        (`git worktree add`). The fix must test for existence, not
+        directory-ness, or a real worktree would be wrongly treated as
+        "no repository here" and its append-only check silently skipped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            primary = Path(tmp) / "primary"
+            primary.mkdir()
+            _init_repo(primary)
+            _seed_committed_ledger(primary)
+
+            worktree = Path(tmp) / "worktree"
+            add = _git(primary, "worktree", "add", "-b", "other", str(worktree))
+            self.assertEqual(add.returncode, 0, add.stderr)
+            self.assertTrue((worktree / ".git").is_file())
+
+            # Tamper the ledger in the worktree's working copy, staged
+            # there, and confirm it is still caught.
+            (worktree / "gaps" / "knowledge-gaps.jsonl").write_text(
+                _ledger_text(_gap_record("gap-2099-01-01-001")),
+                encoding="utf-8")
+            _git(worktree, "add", "-A")
+
+            result = _run_lint(worktree)
+            self.assertRegex(result.stdout, r"(?m)^ERROR GAP_APPEND ")
+
+    def test_zero_commit_repo_with_no_gaps_folder_lints_clean_of_gap_findings(self):
+        """init.py runs the pre-commit hook before the first commit ever
+        lands -- an unborn HEAD, no gaps/ folder at all. This must not
+        regress, or `wiki-harness init` breaks for every new wiki."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            (root / "index.md").write_text("# index\n", encoding="utf-8")
+
+            result = _run_lint(root)
+            self.assertNotRegex(result.stdout, r"(?m)^(ERROR|WARN) GAP")
 
 
 if __name__ == "__main__":

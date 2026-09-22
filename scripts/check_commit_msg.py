@@ -2,12 +2,14 @@
 """Validate a commit message against the wiki's operation-commit convention.
 
 Subject format: <op>(<ref>): <summary>
-  op  : ingest | lint | schema | chore
+  op  : ingest | lint | schema | chore | gap
   ref : required for ingest (a card id matching card-schema.json's id.pattern),
+        required for gap (a gap id matching gap-schema.json's id_pattern),
         optional otherwise.
 Merge/Revert/fixup/squash subjects are exempt.
-Pure core: validate(). Edge: main() reads the message file (git commit-msg hook arg)
-and the schema's id.pattern (sources/cards/card-schema.json under --root, default cwd).
+Pure core: validate(). Edge: main() reads the message file (git commit-msg hook arg),
+the card schema's id.pattern (sources/cards/card-schema.json under --root, default cwd),
+and the gap schema's id_pattern (gaps/gap-schema.json under --root, default cwd).
 """
 from __future__ import annotations
 
@@ -18,13 +20,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from card_frontmatter_lint import (  # noqa: E402  (needs the sys.path line above)
     DEFAULT_CARD_ID_PATTERN, SCHEMA_PATH, card_id_pattern_from_schema, load_schema)
+from gap_ledger import (  # noqa: E402  (needs the sys.path line above)
+    DEFAULT_GAP_ID_PATTERN, GAP_SCHEMA_PATH, gap_id_pattern_from_schema,
+    load_gap_schema)
 
-OPS = ("ingest", "lint", "schema", "chore")
-SUBJECT_RE = re.compile(r"^(ingest|lint|schema|chore)(\(([^)]*)\))?: \S.*$")
+OPS = ("ingest", "lint", "schema", "chore", "gap")
+SUBJECT_RE = re.compile(r"^(ingest|lint|schema|chore|gap)(\(([^)]*)\))?: \S.*$")
 EXEMPT_PREFIXES = ("Merge", "Revert", "fixup!", "squash!")
 
 
-def validate(message: str, card_id_pattern: str = DEFAULT_CARD_ID_PATTERN) -> list[str]:
+def validate(message: str, card_id_pattern: str = DEFAULT_CARD_ID_PATTERN,
+             gap_id_pattern: str = DEFAULT_GAP_ID_PATTERN) -> list[str]:
     lines = [l for l in message.splitlines() if not l.startswith("#")]
     subject = lines[0].strip() if lines else ""
     if not subject:
@@ -41,6 +47,9 @@ def validate(message: str, card_id_pattern: str = DEFAULT_CARD_ID_PATTERN) -> li
     if op == "ingest" and (not ref or not re.fullmatch(card_id_pattern, ref)):
         return ["ingest commits require ref = card id, e.g. "
                 "'ingest(src-2026-08-06-001): summary'"]
+    if op == "gap" and (not ref or not re.fullmatch(gap_id_pattern, ref)):
+        return ["gap commits require ref = gap id, e.g. "
+                "'gap(gap-2024-01-15-001): summary'"]
     return []
 
 
@@ -69,8 +78,27 @@ def main(argv: list[str]) -> int:
         # this hook only needs a usable id-ref matcher.
         schema = None
     card_id_pattern = card_id_pattern_from_schema(schema)
+
+    gap_schema_file = root / GAP_SCHEMA_PATH
+    try:
+        gap_text = gap_schema_file.read_text(encoding="utf-8-sig") \
+            if gap_schema_file.is_file() else None
+        gap_schema, _ = load_gap_schema(gap_text)
+        gap_pattern = gap_id_pattern_from_schema(gap_schema)
+    except (OSError, ValueError):
+        # Same fail-soft posture as the card schema: OSError covers
+        # PermissionError / IsADirectoryError / FileNotFoundError, ValueError
+        # covers UnicodeDecodeError from the utf-8-sig decode above --
+        # load_gap_schema() already swallows json.JSONDecodeError internally
+        # and returns (None, message) rather than raising, so decoding is
+        # the only ValueError risk left at this call site. Either way this
+        # must not block every commit, only weaken this one check to its
+        # default pattern.
+        gap_pattern = DEFAULT_GAP_ID_PATTERN
+
     with open(msg_file, encoding="utf-8") as f:
-        errors = validate(f.read(), card_id_pattern=card_id_pattern)
+        errors = validate(f.read(), card_id_pattern=card_id_pattern,
+                           gap_id_pattern=gap_pattern)
     for e in errors:
         print(f"commit-msg: {e}", file=sys.stderr)
     return 1 if errors else 0

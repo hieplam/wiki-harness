@@ -977,3 +977,47 @@ class ReleasePayloadProvenance(unittest.TestCase):
                 manifest["source_url"].startswith("https://"),
                 f"source_url must be fetchable, got {manifest['source_url']!r}")
             self.assertNotIn(str(tmp), manifest["source_url"])
+
+
+class GapsFolderIsManaged(unittest.TestCase):
+    """Task 8: gaps/AGENTS.md and gaps/gap-schema.json ship as MANAGED
+    paths (never SEEDED) precisely so upgrade.py's overwrite_scratch() --
+    which never calls seed_starters() -- still delivers them to an
+    existing wiki. The ledger itself (knowledge-gaps.jsonl) and its
+    generated view are created on demand by scripts/gap.py and must never
+    be seeded here."""
+
+    def test_init_writes_the_gaps_rules_and_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            result = _run_init(target)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((target / "gaps" / "AGENTS.md").is_file())
+            self.assertTrue((target / "gaps" / "gap-schema.json").is_file())
+
+    def test_both_are_managed_in_the_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            result = _run_init(target)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(
+                (target / ".wiki-harness-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["files"]["gaps/AGENTS.md"]["role"], "managed")
+            self.assertEqual(manifest["files"]["gaps/gap-schema.json"]["role"], "managed")
+
+    def test_a_fresh_init_lints_clean_with_no_ledger(self):
+        """A wiki that has recorded no gaps has no ledger file, and that
+        must not be an error -- scripts/gap_lint.py treats an unadopted
+        ledger as clean, not as a finding."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            result = _run_init(target)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((target / "gaps" / "knowledge-gaps.jsonl").exists())
+
+            lint_result = subprocess.run(
+                [sys.executable, str(target / "scripts" / "lint.py"),
+                 "--root", str(target)],
+                capture_output=True, text=True)
+            self.assertEqual(lint_result.returncode, 0,
+                             lint_result.stdout + lint_result.stderr)

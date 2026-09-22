@@ -135,5 +135,26 @@ class FullSuiteDiscovery(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+class GapFilesAreSwept(unittest.TestCase):
+    """The new gap tooling lands inside the existing GENERICITY_GLOBS, so
+    it is swept automatically. This test asserts that rather than assuming
+    it -- a future glob change that silently dropped these files would
+    otherwise go unnoticed."""
+
+    def test_gap_modules_and_templates_are_in_the_sweep(self):
+        swept = {p.relative_to(ROOT).as_posix() for p in _library_files()}
+        for expected in ("scripts/gap.py", "scripts/gap_ledger.py",
+                         "scripts/gap_lint.py", "templates/gaps.AGENTS.md",
+                         "templates/gap-schema.default.json"):
+            self.assertIn(expected, swept)
+
+    def test_gap_files_contain_no_denylisted_terms(self):
+        paths = [p for p in _library_files()
+                 if "gap" in p.name or p.name == "gaps.AGENTS.md"]
+        files = [(p.relative_to(ROOT).as_posix(), p.read_text(encoding="utf-8"))
+                 for p in paths]
+        self.assertEqual(find_ogp_strings(files), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2031,3 +2031,132 @@ class LibraryCheckoutFailsClosed(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("no such tag", stderr.getvalue())
             self.assertEqual(_tree_snapshot(target), before)
+
+
+def _strip_gaps_support(library_root):
+    """Test-only mutation: reverts a fixture library checkout (built from
+    THIS repo's real current sources by _make_library()) to its
+    pre-Task-8/10 shape -- no gaps.AGENTS.md/gap-schema.default.json template
+    sources, no gaps/-aware lines in init.py, and no gaps mentions in the
+    root AGENTS.md template -- so a wiki `_run_init`
+    from it is a faithful stand-in for a wiki initialised by an OLDER
+    wiki-harness release that never shipped gaps/ at all. Used only to
+    prove upgrade.py genuinely DELIVERS the folder to such a wiki, rather
+    than to a wiki whose manifest already recorded (and then lost) it --
+    the latter is drift, which upgrade correctly refuses without
+    --adopt-drift, so it cannot stand in for "never had gaps/ "."""
+    (library_root / "templates" / "gaps.AGENTS.md").unlink()
+    root_tmpl_path = library_root / "templates" / "AGENTS.root.md.tmpl"
+    root_tmpl_text = root_tmpl_path.read_text(encoding="utf-8")
+    for snippet in (
+        '| `gaps/` | Ledger of questions this wiki could not answer | '
+        'Ledger is **append-only**; view is generated | '
+        '[gaps/AGENTS.md](./gaps/AGENTS.md) |\n',
+        '| `gap` | Recording anything in the knowledge-gap ledger | '
+        'REQUIRED: the gap id |\n',
+    ):
+        assert snippet in root_tmpl_text, f"expected snippet not found: {snippet!r}"
+        root_tmpl_text = root_tmpl_text.replace(snippet, "", 1)
+    section_start = root_tmpl_text.index("## Workflow: Record a gap")
+    section_end = root_tmpl_text.index("## Workflow: Lint")
+    root_tmpl_text = root_tmpl_text[:section_start] + root_tmpl_text[section_end:]
+    assert "gaps/" not in root_tmpl_text
+    assert "gap.py" not in root_tmpl_text
+    root_tmpl_path.write_text(root_tmpl_text, encoding="utf-8")
+    (library_root / "templates" / "gap-schema.default.json").unlink()
+    init_text = (library_root / "init.py").read_text(encoding="utf-8")
+    for snippet in (
+        '    ("gaps.AGENTS.md", "gaps/AGENTS.md"),\n',
+        '    "gaps/AGENTS.md", "gaps/gap-schema.json",\n',
+        '    # gaps/gap-schema.json is MANAGED (not seeded) precisely so upgrade\n'
+        '    # re-delivers it -- unlike sources/cards/card-schema.json, it is not\n'
+        '    # per-instance-customised via --origins, so a verbatim copy is enough.\n'
+        '    _copy_verbatim(templates_dir / "gap-schema.default.json",\n'
+        '                   target / "gaps" / "gap-schema.json")\n',
+    ):
+        assert snippet in init_text, f"expected snippet not found: {snippet!r}"
+        init_text = init_text.replace(snippet, "", 1)
+    assert '("gaps.AGENTS.md"' not in init_text
+    assert '"gaps/AGENTS.md"' not in init_text
+    assert '"gaps/gap-schema.json"' not in init_text
+    (library_root / "init.py").write_text(init_text, encoding="utf-8")
+
+
+class UpgradeDeliversGapsToAnExistingWiki(unittest.TestCase):
+    """Task 8: gaps/AGENTS.md and gaps/gap-schema.json are MANAGED
+    precisely so an upgrade -- which never calls seed_starters() -- still
+    delivers them to a wiki that lacks the folder entirely, and does so
+    without ever touching a real, recorded ledger."""
+
+    def test_upgrade_adds_the_gaps_folder_to_a_wiki_that_lacks_it(self):
+        """The reason gaps/ is MANAGED and not SEEDED: upgrade never writes
+        seeded paths, so a SEEDED ledger would never reach an existing wiki.
+        Simulates a wiki initialised by a pre-Task-8 wiki-harness (its
+        manifest never recorded gaps/AGENTS.md at all, so upgrade's step-1
+        drift check -- which only inspects paths the OLD manifest already
+        called managed/template -- has nothing to refuse), then upgrades
+        it against a library that DOES ship gaps/ support."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100_current = _make_library(tmp / "lib-v1.0.0-current", "1.0.0")
+            v100_pre_gaps = _make_library(tmp / "lib-v1.0.0-pre-gaps", "1.0.0")
+            _strip_gaps_support(v100_pre_gaps)
+
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100_pre_gaps, target).returncode, 0)
+            self.assertFalse((target / "gaps").exists())
+            manifest_before = json.loads(
+                (target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            self.assertNotIn("gaps/AGENTS.md", manifest_before["files"])
+
+            result = _run_upgrade(target, "--to", "v1.0.0", "--apply",
+                                  "--library-path", str(v100_current))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((target / "gaps" / "AGENTS.md").is_file())
+            self.assertTrue((target / "gaps" / "gap-schema.json").is_file())
+
+            manifest = json.loads(
+                (target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["files"]["gaps/AGENTS.md"]["role"], "managed")
+            self.assertEqual(
+                manifest["files"]["gaps/gap-schema.json"]["role"], "managed")
+
+    def test_upgrade_never_creates_a_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+            self.assertFalse((target / "gaps" / "knowledge-gaps.jsonl").exists())
+
+            result = _run_upgrade(target, "--to", "v1.0.0", "--apply",
+                                  "--library-path", str(v100))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse((target / "gaps" / "knowledge-gaps.jsonl").exists())
+
+    def test_upgrade_never_overwrites_an_existing_ledger(self):
+        """An upgrade that overwrote a wiki's recorded gaps would destroy
+        exactly the data this feature exists to preserve."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            target = tmp / "target"
+            self.assertEqual(_run_init(v100, target).returncode, 0)
+
+            ledger = target / "gaps" / "knowledge-gaps.jsonl"
+            add = subprocess.run(
+                [sys.executable, "scripts/gap.py", "add",
+                 "--service", "example-repo", "--session", "sess-1",
+                 "--context", "testing upgrade preservation",
+                 "--prompt", "why does the ledger survive an upgrade?",
+                 "--question", "does upgrade ever touch an existing ledger",
+                 "--wiki-answer", "unknown", "--answer-given", "no",
+                 "--topics", "upgrade,ledger"],
+                cwd=str(target), capture_output=True, text=True)
+            self.assertEqual(add.returncode, 0, add.stdout + add.stderr)
+            recorded = ledger.read_text(encoding="utf-8")
+
+            result = _run_upgrade(target, "--to", "v1.0.0", "--apply",
+                                  "--library-path", str(v100))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(ledger.read_text(encoding="utf-8"), recorded)
