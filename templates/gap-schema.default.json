@@ -1,0 +1,31 @@
+{
+  "_comment": "Single source of truth for knowledge-gap ledger records. To add or change a key, edit THIS file and commit with op 'schema:'. scripts/gap_ledger.py reads it; nothing else defines gap record keys.",
+  "id_pattern": "^gap-\\d{4}-\\d{2}-\\d{2}-\\d{3}$",
+  "types": {
+    "gap": {
+      "required": ["type", "id", "at", "service", "session", "topics", "context", "prompt_verbatim", "question", "wiki_answer", "answer_given"],
+      "optional": [],
+      "description": "A question the wiki could not fully answer, recorded at the moment of the miss."
+    },
+    "resolution": {
+      "required": ["type", "gap", "at", "card", "wiki_page"],
+      "optional": [],
+      "description": "Intent: this source card is meant to answer that gap. Does not by itself change status."
+    },
+    "measurement": {
+      "required": ["type", "gap", "at", "verdict", "wiki_answer"],
+      "optional": [],
+      "description": "A re-run of the gap's question against the wiki, recording what came back."
+    },
+    "ratification": {
+      "required": ["type", "gap", "at", "verdict", "reason"],
+      "optional": [],
+      "description": "A human judgement that the question is out of scope for this wiki."
+    }
+  },
+  "enums": {
+    "measurement.verdict": ["answered", "partial", "still-missing"],
+    "ratification.verdict": ["unrelated"]
+  },
+  "list_keys": ["topics"]
+}
