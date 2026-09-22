@@ -297,14 +297,14 @@ class GatherAndRunAgainstRealGit(unittest.TestCase):
             self.assertEqual(_git(root, "add", "-A").returncode, 0)
             self.assertEqual(
                 _git(root, "commit", "-q", "-m", "init").returncode, 0)
-            data, error = gap_lint._git_bytes(root, "HEAD:gaps/knowledge-gaps.jsonl")
+            data, error = gap_lint._git_bytes(root, "gaps/knowledge-gaps.jsonl")
             self.assertEqual(data, b"")
             self.assertIsNone(error)
 
     def test_git_bytes_outside_a_git_repo_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            data, error = gap_lint._git_bytes(root, "HEAD:gaps/knowledge-gaps.jsonl")
+            data, error = gap_lint._git_bytes(root, "gaps/knowledge-gaps.jsonl")
             self.assertIsNone(data)
             self.assertIsNotNone(error)
 
@@ -317,7 +317,7 @@ class GatherAndRunAgainstRealGit(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _init_repo(root)
-            data, error = gap_lint._git_bytes(root, "HEAD:gaps/knowledge-gaps.jsonl")
+            data, error = gap_lint._git_bytes(root, "gaps/knowledge-gaps.jsonl")
             self.assertEqual(data, b"")
             self.assertIsNone(error)
 
@@ -354,6 +354,106 @@ class GatherAndRunAgainstRealGit(unittest.TestCase):
                 root, gap_ledger.LEDGER_PATH)
             self.assertIsNone(error)
             self.assertGreaterEqual(deleted, 1)
+
+    def test_git_bytes_path_not_in_head_with_other_commits_present(self):
+        """A repository that has real history, but never committed this
+        particular path, must still read as (b"", None) -- not confused
+        with the truly-unborn case, and not an error."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            (root / "README.md").write_text("hello\n", encoding="utf-8")
+            self.assertEqual(_git(root, "add", "-A").returncode, 0)
+            self.assertEqual(
+                _git(root, "commit", "-q", "-m", "init").returncode, 0)
+            data, error = gap_lint._git_bytes(root, "gaps/knowledge-gaps.jsonl")
+            self.assertEqual(data, b"")
+            self.assertIsNone(error)
+
+
+class GhostRefBypassAttack(unittest.TestCase):
+    """The reviewer's demonstrated bypass, reproduced end to end. Writing
+    `ref: refs/heads/ghost` into `.git/HEAD` makes `git show
+    HEAD:<path>` fail with the exact same stderr text
+    ("fatal: invalid object name 'HEAD'.") as a genuinely unborn
+    repository -- even though a real commit with a real, committed
+    ledger still exists at refs/heads/main. Stderr-matching code cannot
+    tell these two cases apart; this test proves the fix, which never
+    reads stderr, can. This test must FAIL against the pre-fix
+    `_git_bytes` (stderr substring matching) and PASS after the
+    exit-code/count-based redesign."""
+
+    def _seed_committed_ledger(self, root):
+        _init_repo(root)
+        (root / "sources" / "cards").mkdir(parents=True)
+        (root / "wiki").mkdir()
+        gaps_dir = root / "gaps"
+        gaps_dir.mkdir()
+        text = ledger_text(gap_record("gap-2024-01-15-001"))
+        (gaps_dir / "knowledge-gaps.jsonl").write_text(text, encoding="utf-8")
+        (gaps_dir / "gap-schema.json").write_text(SCHEMA_TEXT, encoding="utf-8")
+        records, _ = gap_ledger.parse_ledger(text)
+        (gaps_dir / "KNOWLEDGE_GAP.md").write_text(
+            gap_ledger.render_view(records), encoding="utf-8")
+        self.assertEqual(_git(root, "add", "-A").returncode, 0)
+        commit = _git(root, "commit", "-q", "-m", "seed real ledger")
+        self.assertEqual(commit.returncode, 0, commit.stderr)
+
+    def test_ghost_ref_bypass_is_caught_end_to_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._seed_committed_ledger(root)
+
+            # The attack: point HEAD at a branch ref that was never
+            # created. No git command, no privileges -- a single file
+            # write. The real commit (and its real ledger) still exists
+            # at refs/heads/main; only the HEAD pointer is forged.
+            (root / ".git" / "HEAD").write_text(
+                "ref: refs/heads/ghost\n", encoding="utf-8")
+
+            # Forge the ledger: replace committed content with a fully
+            # schema-valid, fabricated record.
+            forged = ledger_text(gap_record("gap-2099-01-01-001"))
+            gaps_dir = root / "gaps"
+            (gaps_dir / "knowledge-gaps.jsonl").write_text(
+                forged, encoding="utf-8")
+            forged_records, _ = gap_ledger.parse_ledger(forged)
+            (gaps_dir / "KNOWLEDGE_GAP.md").write_text(
+                gap_ledger.render_view(forged_records), encoding="utf-8")
+
+            findings = gap_lint.run(root)
+            self.assertTrue(
+                findings,
+                "the ghost-ref bypass must be caught, not silently pass "
+                "with []")
+            self.assertTrue(all(f.severity == "ERROR" for f in findings))
+            self.assertIn("GAP_APPEND", codes(findings))
+
+    def test_bogus_sha_head_is_also_caught(self):
+        """The pre-existing 'exists on disk, but not in' phrase was
+        exploitable the same way: a bogus 40-hex SHA in .git/HEAD
+        produces that exact stderr, already matched as legitimate by the
+        old code. Confirm the fix catches this variant too."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._seed_committed_ledger(root)
+
+            bogus_sha = "f" * 40
+            (root / ".git" / "HEAD").write_text(bogus_sha + "\n",
+                                                encoding="utf-8")
+
+            forged = ledger_text(gap_record("gap-2099-01-01-001"))
+            gaps_dir = root / "gaps"
+            (gaps_dir / "knowledge-gaps.jsonl").write_text(
+                forged, encoding="utf-8")
+            forged_records, _ = gap_ledger.parse_ledger(forged)
+            (gaps_dir / "KNOWLEDGE_GAP.md").write_text(
+                gap_ledger.render_view(forged_records), encoding="utf-8")
+
+            findings = gap_lint.run(root)
+            self.assertTrue(findings)
+            self.assertTrue(all(f.severity == "ERROR" for f in findings))
+            self.assertIn("GAP_APPEND", codes(findings))
 
 
 if __name__ == "__main__":

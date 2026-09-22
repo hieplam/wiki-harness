@@ -94,49 +94,157 @@ def check_gaps(inputs):
     return findings
 
 
-def _git_bytes(root, rev_path):
-    """Impure edge. (bytes or None, error or None). None bytes with no
-    error means the path is simply not in HEAD yet -- the legitimate
-    first-commit case."""
+def _run_git(root, args, timeout_label):
+    """Impure edge. One subprocess.run wrapper shared by every git call
+    below, so every caller gets the same OSError/timeout handling and the
+    same bounded wait. Returns (CompletedProcess or None, error or None)."""
     try:
-        result = subprocess.run(["git", "show", rev_path], cwd=str(root),
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                timeout=_SUBPROCESS_TIMEOUT)
+        return subprocess.run(args, cwd=str(root), stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,
+                              timeout=_SUBPROCESS_TIMEOUT), None
     except OSError as exc:
         return None, "git could not be run: {}".format(exc)
     except subprocess.TimeoutExpired:
-        return None, "git show timed out"
-    if result.returncode == 0:
-        return result.stdout, None
-    stderr = result.stderr.decode("utf-8", "replace")
-    if "does not exist" in stderr or "exists on disk, but not in" in stderr:
+        return None, "{} timed out".format(timeout_label)
+
+
+def _commit_count(root):
+    """Impure edge. The number of commits reachable from ANY ref, or an
+    error. This is the structural test for "truly unborn": a repository
+    with zero commits anywhere has nothing committed for any path, full
+    stop. It is deliberately `--all`, not just HEAD, so a HEAD that has
+    been pointed at a nonexistent ref (the demonstrated attack) is not
+    confused with a genuinely fresh repository -- the attack repo still
+    has a real commit reachable from refs/heads/main, so this returns a
+    positive count and routes into the HEAD-resolution check below instead
+    of the unborn short-circuit."""
+    result, error = _run_git(root, ["git", "rev-list", "--all", "--count"],
+                             "git rev-list")
+    if error is not None:
+        return None, error
+    if result.returncode != 0:
+        return None, (result.stderr.decode("utf-8", "replace").strip()
+                      or "git rev-list failed")
+    text = result.stdout.decode("utf-8", "replace").strip()
+    try:
+        return int(text), None
+    except ValueError:
+        return None, "git rev-list returned unparseable output: {!r}".format(text)
+
+
+def _head_resolves(root):
+    """Impure edge. Whether HEAD names a real, existing commit -- decided
+    purely by exit code, never by reading stderr. `git rev-parse --verify`
+    exits 0 only when the ref chain actually resolves to an object; a HEAD
+    that names a branch that was never created (the attack: `ref:
+    refs/heads/ghost`) or a bogus SHA both exit non-zero here regardless of
+    what stderr says."""
+    result, error = _run_git(root, ["git", "rev-parse", "--verify", "-q", "HEAD"],
+                             "git rev-parse")
+    if error is not None:
+        return None, error
+    return result.returncode == 0, None
+
+
+def _path_in_head(root, path):
+    """Impure edge. Whether <path> exists in the tree at HEAD -- decided
+    by exit code. Only ever called after `_head_resolves` has confirmed
+    HEAD itself is good, so a non-zero exit here can only mean "this path
+    was never committed", the legitimate case."""
+    result, error = _run_git(root, ["git", "cat-file", "-e", "HEAD:{}".format(path)],
+                             "git cat-file")
+    if error is not None:
+        return None, error
+    return result.returncode == 0, None
+
+
+def _git_bytes(root, path):
+    """Impure edge. (bytes or None, error or None) for the committed
+    content of <path> at HEAD.
+
+    Three states are possible, and each is decided by an exit code or an
+    explicit count -- never by matching git's human-readable stderr text.
+    Stderr matching is what the demonstrated bypass exploited: writing
+    `ref: refs/heads/ghost` (a ref that was never created) into `.git/HEAD`
+    makes `git show HEAD:<path>` fail with "fatal: invalid object name
+    'HEAD'." -- the *exact same string* a genuinely unborn repository
+    produces -- even though a real commit with a real ledger still exists
+    at refs/heads/main. Matching that string can never tell those two
+    cases apart; only asking git structurally can.
+
+    1. The repository has no commits at all, anywhere (`_commit_count` is
+       0): genuinely unborn. Nothing is committed for any path yet;
+       (b"", None) is the truthful answer.
+    2. HEAD resolves to a real commit (`_head_resolves` is True), but the
+       path is not present in that commit's tree (`_path_in_head` is
+       False): the path has simply never been committed. Legitimate;
+       (b"", None).
+    3. Anything else -- commits exist somewhere but HEAD does not resolve
+       (a dangling or forged ref, or any other corruption), or any git
+       invocation itself failed or timed out. Fail closed: (None, error).
+    """
+    count, error = _commit_count(root)
+    if error is not None:
+        return None, error
+    if count == 0:
         return b"", None
-    if "unknown revision" in stderr or "bad revision" in stderr:
+
+    resolves, error = _head_resolves(root)
+    if error is not None:
+        return None, error
+    if not resolves:
+        return None, ("HEAD does not resolve to a commit even though the "
+                      "repository has history -- refusing to treat a "
+                      "dangling or forged HEAD as clean")
+
+    present, error = _path_in_head(root, path)
+    if error is not None:
+        return None, error
+    if not present:
         return b"", None
-    # An unborn HEAD (a repository with no commits yet) fails with this
-    # exact message, since every call here asks for "HEAD:<path>". That is
-    # still "nothing committed for this path yet", not a git failure --
-    # matched on the quoted 'HEAD' specifically, not a bare "invalid object
-    # name", so a genuinely corrupt HEAD (some other invalid object name)
-    # still fails closed instead of being read as "clean".
-    if "invalid object name 'HEAD'" in stderr:
-        return b"", None
-    return None, stderr.strip() or "git show failed"
+
+    result, error = _run_git(root, ["git", "show", "HEAD:{}".format(path)],
+                             "git show")
+    if error is not None:
+        return None, error
+    if result.returncode != 0:
+        return None, (result.stderr.decode("utf-8", "replace").strip()
+                      or "git show failed")
+    return result.stdout, None
 
 
 def _staged_deletions(root, path):
-    """Impure edge. Counts removal lines in the staged diff for one path."""
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--cached", "--numstat", "--", path],
-            cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=_SUBPROCESS_TIMEOUT)
-    except OSError as exc:
-        return 0, "git could not be run: {}".format(exc)
-    except subprocess.TimeoutExpired:
-        return 0, "git diff timed out"
+    """Impure edge. Counts removal lines in the staged diff for one path.
+
+    `git diff --cached` silently diffs against git's empty tree when HEAD
+    does not resolve -- it never fails, it just reports every staged line
+    as a pure insertion with zero deletions, which is precisely how the
+    second "independent" mechanism was shown to share the same blind spot
+    as `_git_bytes`. So this must not trust the numstat output at all
+    unless it has separately confirmed HEAD is in a state where "diff
+    against HEAD" is a meaningful question: either the repository is truly
+    unborn (nothing to diff against, so 0 is correct), or HEAD actually
+    resolves. Anything else -- history exists but HEAD does not resolve --
+    is an error, not a silent 0."""
+    count, error = _commit_count(root)
+    if error is not None:
+        return 0, error
+    if count > 0:
+        resolves, error = _head_resolves(root)
+        if error is not None:
+            return 0, error
+        if not resolves:
+            return 0, ("HEAD does not resolve to a commit even though the "
+                       "repository has history -- refusing to treat the "
+                       "staged diff as clean")
+
+    result, error = _run_git(
+        root, ["git", "diff", "--cached", "--numstat", "--", path], "git diff")
+    if error is not None:
+        return 0, error
     if result.returncode != 0:
-        return 0, result.stderr.decode("utf-8", "replace").strip() or "git diff failed"
+        return 0, (result.stderr.decode("utf-8", "replace").strip()
+                   or "git diff failed")
     for line in result.stdout.decode("utf-8", "replace").splitlines():
         parts = line.split("\t")
         if len(parts) >= 2 and parts[1].isdigit():
@@ -157,7 +265,7 @@ def gather(root):
     """Impure edge. Builds the GapInputs check_gaps() judges."""
     root = Path(root)
     ledger = root / gap_ledger.LEDGER_PATH
-    head_bytes, git_error = _git_bytes(root, "HEAD:{}".format(gap_ledger.LEDGER_PATH))
+    head_bytes, git_error = _git_bytes(root, gap_ledger.LEDGER_PATH)
     deleted, diff_error = _staged_deletions(root, gap_ledger.LEDGER_PATH)
     try:
         work_bytes = ledger.read_bytes()
