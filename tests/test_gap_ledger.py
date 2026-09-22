@@ -219,5 +219,58 @@ class NextGapId(unittest.TestCase):
                          "gap-2024-01-15-008")
 
 
+class RenderView(unittest.TestCase):
+    def test_empty_ledger_renders_a_stable_header(self):
+        out = gap_ledger.render_view([])
+        self.assertTrue(out.startswith("# Knowledge gaps"))
+        self.assertTrue(out.endswith("\n"))
+        self.assertIn("No gaps recorded yet.", out)
+
+    def test_render_is_deterministic(self):
+        records = [(1, valid_gap())]
+        self.assertEqual(gap_ledger.render_view(records),
+                         gap_ledger.render_view(records))
+
+    def test_a_gap_appears_with_its_status_and_question(self):
+        out = gap_ledger.render_view([(1, valid_gap())])
+        self.assertIn("gap-2024-01-15-001", out)
+        self.assertIn("opened", out)
+        self.assertIn("goroutines and channels", out)
+
+    def test_pipes_in_prose_do_not_break_the_table(self):
+        rec = valid_gap()
+        rec["question"] = "is it a | or a b?"
+        out = gap_ledger.render_view([(1, rec)])
+        row = [ln for ln in out.splitlines() if "gap-2024-01-15-001" in ln][0]
+        self.assertIn(r"\|", row)
+        # Six columns means seven delimiter pipes. The escaped pipe from the
+        # prose contributes to count("|") too, so subtract it back out.
+        self.assertEqual(row.count("|") - row.count(r"\|"), 7)
+
+    def test_newlines_in_prose_do_not_break_the_table(self):
+        rec = valid_gap()
+        rec["question"] = "line one\nline two"
+        out = gap_ledger.render_view([(1, rec)])
+        self.assertIn("line one line two", out)
+
+    def test_resolution_card_is_shown_for_an_answered_gap(self):
+        res = {"type": "resolution", "gap": "gap-2024-01-15-001",
+               "at": "2024-01-16T09:00:00+00:00", "card": "src-2024-01-16-001",
+               "wiki_page": "wiki/widget-assembly.md"}
+        meas = {"type": "measurement", "gap": "gap-2024-01-15-001",
+                "at": "2024-01-16T10:00:00+00:00", "verdict": "answered",
+                "wiki_answer": "covered now"}
+        out = gap_ledger.render_view([(1, valid_gap()), (2, res), (3, meas)])
+        self.assertIn("src-2024-01-16-001", out)
+        self.assertIn("answered", out)
+
+    def test_unrelated_reason_is_shown(self):
+        rat = {"type": "ratification", "gap": "gap-2024-01-15-001",
+               "at": "2024-01-17T09:00:00+00:00", "verdict": "unrelated",
+               "reason": "general language question"}
+        out = gap_ledger.render_view([(1, valid_gap()), (2, rat)])
+        self.assertIn("general language question", out)
+
+
 if __name__ == "__main__":
     unittest.main()

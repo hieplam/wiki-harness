@@ -216,3 +216,65 @@ def next_gap_id(existing_ids, today):
         if match and match.group(1) == today:
             highest = max(highest, int(match.group(2)))
     return "gap-{}-{:03d}".format(today, highest + 1)
+
+
+VIEW_HEADER = (
+    "# Knowledge gaps\n"
+    "\n"
+    "Questions this wiki could not answer, and what happened to them.\n"
+    "\n"
+    "**This file is generated.** It is rendered from `knowledge-gaps.jsonl` by\n"
+    "`scripts/gap.py render`; edit the ledger, never this view. Status is folded\n"
+    "from the ledger records in file order -- see `AGENTS.md` in this folder.\n"
+    "\n"
+)
+
+_VIEW_COLUMNS = ("Gap", "Status", "Service", "Question", "Answering card", "Note")
+
+
+def _cell(value):
+    """Pure. One prose value in -> one table-safe cell out. A pipe would end
+    the cell and a newline would end the row, so both are neutralised."""
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        value = ", ".join(str(v) for v in value)
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    text = " ".join(text.split("\n"))
+    return text.replace("|", r"\|").strip()
+
+
+def render_view(records):
+    """Pure. [(lineno, record)] in -> the full markdown view out.
+
+    Deterministic: the same records always render byte-identically, which is
+    what lets lint compare this against the committed file.
+    """
+    statuses = fold_status(records)
+    gaps = [r for _ln, r in records if r.get("type") == GAP_TYPE]
+    if not gaps:
+        return VIEW_HEADER + "No gaps recorded yet.\n"
+
+    cards = {}
+    notes = {}
+    for _ln, record in records:
+        rtype = record.get("type")
+        if rtype == "resolution":
+            cards[record.get("gap")] = record.get("card")
+        elif rtype == "ratification":
+            notes[record.get("gap")] = record.get("reason")
+
+    lines = [VIEW_HEADER.rstrip("\n"), ""]
+    lines.append("| " + " | ".join(_VIEW_COLUMNS) + " |")
+    lines.append("|" + "|".join(["---"] * len(_VIEW_COLUMNS)) + "|")
+    for record in gaps:
+        gid = record.get("id")
+        lines.append("| " + " | ".join((
+            _cell(gid),
+            _cell(statuses.get(gid, STATUS_OPENED)),
+            _cell(record.get("service")),
+            _cell(record.get("question")),
+            _cell(cards.get(gid)),
+            _cell(notes.get(gid)),
+        )) + " |")
+    return "\n".join(lines) + "\n"
