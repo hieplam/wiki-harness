@@ -192,8 +192,12 @@ def is_rules_file(path):
 
 # Generated, deliberately not listed in index.md, and not wiki content:
 # the ledger view is rendered from gaps/knowledge-gaps.jsonl. Excluded from
-# _wiki_pages so it is never judged as an orphan page, while still being
-# read by scan() so its links are checked.
+# _wiki_pages so it is never judged as an orphan page, and excluded from
+# check_broken_links so a recorded gap's markdown-shaped prose (a question
+# quoting "[link](...)") is never link-checked as if it were authored wiki
+# content -- see check_broken_links for why that must never block a
+# commit. scan() still reads it, so its OTHER frontmatter/shape checks (if
+# any are ever added) can still see it; only link-checking is exempted.
 GENERATED_PAGES = frozenset({"gaps/KNOWLEDGE_GAP.md"})
 
 
@@ -210,7 +214,18 @@ def _cards(files):
 def check_broken_links(files):
     findings = []
     for path in sorted(files):
-        if not path.endswith(".md"):
+        if not path.endswith(".md") or path in GENERATED_PAGES:
+            # Generated pages (the gap ledger's rendered view) are agent
+            # prose fed straight into a markdown table cell, not authored
+            # wiki content: a recorded question containing an ordinary
+            # markdown link (`[the runbook](./runbook.md)`) would otherwise
+            # get link-checked here and turn a legitimate, schema-valid gap
+            # record into a permanent commit-blocking wedge, because the
+            # ledger itself may never be hand-edited or deleted to route
+            # around it. Fixing it here also makes GENERATED_PAGES actually
+            # do something: `_wiki_pages` already filters these out, so
+            # without this exclusion GENERATED_PAGES was inert and this was
+            # the one check that still reached the file.
             continue
         for target in extract_links(files[path]):
             if resolve(path, target) not in files:

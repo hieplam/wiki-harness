@@ -753,6 +753,67 @@ class GapsWiredIntoLint(unittest.TestCase):
         self.assertIn(finding, out)
 
 
+class GeneratedGapViewIsNeverLinkChecked(unittest.TestCase):
+    """C2 (whole-branch review, final pass): `gap_ledger._cell()` escapes
+    `|` and flattens newlines, but nothing else -- a recorded `question`
+    (or `topics`/`service`/`reason`) renders verbatim into
+    `gaps/KNOWLEDGE_GAP.md`, and `check_broken_links` treated that
+    generated file as ordinary wiki prose, link-checking agent-authored
+    text. A markdown link inside a recorded question then makes every
+    future commit fail lint with no legal way out (the ledger is
+    append-only; the view is byte-compared against a fresh render). This
+    test scaffolds a real wiki with `init.py` (so the assertion of a clean
+    `lint.py` exit code is meaningful -- a hand-built scratch tree would
+    always carry unrelated HARNESS/CARD_SCHEMA findings), records a real
+    gap with `gap.py add`, then runs the scaffolded copy's own
+    `scripts/lint.py`. Must FAIL against the pre-fix `check_broken_links`
+    (no GENERATED_PAGES exclusion there) and PASS after the fix."""
+
+    def test_markdown_link_in_a_recorded_question_does_not_block_lint(self):
+        init_py = Path(__file__).resolve().parent.parent / "init.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "wiki"
+            init_result = subprocess.run(
+                [sys.executable, str(init_py), str(target),
+                 "--wiki-title", "Sample Wiki", "--org-name", "Sample Org",
+                 "--content-language", "English", "--repo-name", "sample-wiki",
+                 "--non-interactive"],
+                capture_output=True, text=True)
+            self.assertEqual(init_result.returncode, 0, init_result.stderr)
+
+            env = dict(os.environ)
+            env["GIT_CONFIG_GLOBAL"] = os.devnull
+            env["GIT_CONFIG_SYSTEM"] = os.devnull
+            add = subprocess.run(
+                [sys.executable, str(target / "scripts" / "gap.py"), "add",
+                 "--service", "example-service", "--session", "0000-session",
+                 "--context", "reading a runbook",
+                 "--prompt", "why does the runbook say X",
+                 "--question",
+                 "why does [the runbook](./runbook.md) say X?",
+                 "--wiki-answer", "no page covers this",
+                 "--answer-given", "answered from general knowledge",
+                 "--topics", "ops", "--no-commit"],
+                cwd=str(target), capture_output=True, text=True, env=env)
+            self.assertEqual(add.returncode, 0, add.stdout + add.stderr)
+
+            view = (target / "gaps" / "KNOWLEDGE_GAP.md").read_text(encoding="utf-8")
+            self.assertIn("[the runbook](./runbook.md)", view,
+                         "the markdown link must actually reach the "
+                         "rendered view for this test to be meaningful")
+
+            result = subprocess.run(
+                [sys.executable, str(target / "scripts" / "lint.py"),
+                 "--root", str(target)],
+                capture_output=True, text=True, env=env)
+            self.assertNotIn(
+                "LINK", result.stdout,
+                "a markdown link inside a recorded question must never "
+                "be link-checked in the generated view -- stdout was:\n"
+                + result.stdout)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
 class GapGateNeverSkipsOnCorruptedGit(unittest.TestCase):
     """The Critical bypass the reviewer demonstrated: lint.py's old
     `_is_git_worktree()` gate asked git `rev-parse --is-inside-work-tree`,
