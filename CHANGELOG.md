@@ -14,6 +14,13 @@ MAJOR), and anything a consumer must act on before running `upgrade` belongs in 
 Entries up to and including v1.2.0 were hand-written under the older §8, which required an
 explicit release type and a prose **Compatibility** field. They are kept exactly as published.
 
+## [1.4.0](https://github.com/hieplam/wiki-harness/compare/v1.3.1...v1.4.0) (2026-09-22)
+
+
+### Features
+
+* **gaps:** add the knowledge gap ledger ([cada8d8](https://github.com/hieplam/wiki-harness/commit/cada8d8c957a8ad370815579da5faf0a074e8596))
+
 ## [1.3.1](https://github.com/hieplam/wiki-harness/compare/v1.3.0...v1.3.1) (2026-09-06)
 
 
