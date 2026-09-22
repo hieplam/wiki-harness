@@ -73,6 +73,7 @@ MANAGED_COPY_MAP = (
     ("sources.AGENTS.md", "sources/AGENTS.md"),
     ("wiki.AGENTS.md", "wiki/AGENTS.md"),
     ("sources.cards.AGENTS.md", "sources/cards/AGENTS.md"),
+    ("gaps.AGENTS.md", "gaps/AGENTS.md"),
 )
 
 # Every SEEDED path written once, verbatim, at init time only.
@@ -90,6 +91,7 @@ CLAUDE_NESTED_PATHS = ("sources/CLAUDE.md", "sources/cards/CLAUDE.md", "wiki/CLA
 # paths build_role_map() below folds in.
 MANAGED_STATIC_PATHS = (
     "sources/AGENTS.md", "wiki/AGENTS.md", "sources/cards/AGENTS.md",
+    "gaps/AGENTS.md", "gaps/gap-schema.json",
     "CLAUDE.md", "sources/CLAUDE.md", "sources/cards/CLAUDE.md", "wiki/CLAUDE.md",
 )
 TEMPLATE_STATIC_PATHS = ("AGENTS.md", "README.md")
@@ -454,6 +456,11 @@ def copy_managed_agents(library_root, target):
     templates_dir = library_root / "templates"
     for tmpl_name, out_rel in MANAGED_COPY_MAP:
         _copy_verbatim(templates_dir / tmpl_name, target / out_rel)
+    # gaps/gap-schema.json is MANAGED (not seeded) precisely so upgrade
+    # re-delivers it -- unlike sources/cards/card-schema.json, it is not
+    # per-instance-customised via --origins, so a verbatim copy is enough.
+    _copy_verbatim(templates_dir / "gap-schema.default.json",
+                   target / "gaps" / "gap-schema.json")
 
 
 def seed_starters(library_root, target, origins):

@@ -962,6 +962,15 @@ def provided_source_paths(init_mod, library_root):
         if (templates_dir / tmpl_name).is_file():
             provided.add(out_rel)
 
+    # mirrors copy_managed_agents()'s own hardcoded gap-schema.default.json
+    # -> gaps/gap-schema.json copy (a second, non-MANAGED_COPY_MAP source
+    # name, exactly like the AGENTS.root.md.tmpl/CLAUDE.root.tmpl cases
+    # below) -- without this, a library release that drops that template
+    # would go undetected here and instead crash overwrite_scratch() with
+    # an uncaught FileNotFoundError mid-copy.
+    if (templates_dir / "gap-schema.default.json").is_file():
+        provided.add("gaps/gap-schema.json")
+
     # mirrors render_root_templates()'s own hardcoded root template source
     # names (AGENTS.root.md.tmpl -> AGENTS.md, README.md.tmpl -> README.md).
     if (templates_dir / "AGENTS.root.md.tmpl").is_file():
