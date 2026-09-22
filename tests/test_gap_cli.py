@@ -56,8 +56,8 @@ class CliCase(unittest.TestCase):
         _git(self.root, "config", "user.name", "t")
         self.addCleanup(self._tmp.cleanup)
 
-    def run_cli(self, args, now=NOW):
-        return gap.main(args, root=self.root, now=now)
+    def run_cli(self, args, now=NOW, env=None):
+        return gap.main(args, root=self.root, now=now, env=env)
 
     @staticmethod
     @contextlib.contextmanager
@@ -216,10 +216,22 @@ class RenderAndList(CliCase):
         self.assertEqual(code, 0)
 
 
+def _isolated_env():
+    """The same isolation `_git()` gives its own git calls, threaded
+    through to `gap.commit()` -- so a host's global gitconfig
+    (commit.gpgsign=true with no usable key, an unusual core.hooksPath)
+    can never change whether these two commit-through-the-CLI tests
+    hold."""
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    return env
+
+
 class CommitBehaviour(CliCase):
     def test_add_makes_its_own_commit(self):
         _git(self.root, "commit", "-q", "--allow-empty", "-m", "chore: base")
-        self.assertEqual(self.run_cli(ADD_ARGS), 0)
+        self.assertEqual(self.run_cli(ADD_ARGS, env=_isolated_env()), 0)
         log = _git(self.root, "log", "--oneline").stdout
         self.assertIn("gap(gap-2024-01-15-001):", log)
 
@@ -234,7 +246,7 @@ class CommitBehaviour(CliCase):
         _git(self.root, "commit", "-q", "--allow-empty", "--no-verify",
             "-m", "chore: base")
         with self.quiet():
-            code = self.run_cli(ADD_ARGS)
+            code = self.run_cli(ADD_ARGS, env=_isolated_env())
         self.assertNotEqual(code, 0)
         self.assertEqual(len(self.records()), 1)
 

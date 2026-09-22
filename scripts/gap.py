@@ -102,20 +102,28 @@ def render(root):
         gap_ledger.render_view(records), encoding="utf-8")
 
 
-def commit(root, gap_id, summary):
+def commit(root, gap_id, summary, env=None):
     """Impure edge. One path-scoped commit per ledger operation, so an
     unrelated in-flight edit elsewhere in the wiki is never swept in.
 
     A hung git process must not hang this call forever, so both
     subprocess.run calls below are bounded (see _SUBPROCESS_TIMEOUT); a
     timeout is reported the same way a non-zero exit is -- the append has
-    already happened on disk either way, so this never loses the record."""
+    already happened on disk either way, so this never loses the record.
+
+    `env`, when given, is passed straight through to both subprocess.run
+    calls -- e.g. a test isolating GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM the
+    same way its own git calls already do, so a host's global gitconfig
+    (commit.gpgsign=true with no usable key, an unusual core.hooksPath)
+    can never change whether the test holds. `None` (the default) keeps
+    this call inheriting the caller's own environment exactly as before;
+    passing `env` never changes behaviour beyond that."""
     root = Path(root)
     paths = [gap_ledger.LEDGER_PATH, gap_ledger.VIEW_PATH]
     try:
         add = subprocess.run(["git", "add", "--"] + paths, cwd=str(root),
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             timeout=_SUBPROCESS_TIMEOUT)
+                             timeout=_SUBPROCESS_TIMEOUT, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 1, "git add failed: {}".format(exc)
     if add.returncode != 0:
@@ -124,7 +132,8 @@ def commit(root, gap_id, summary):
     try:
         done = subprocess.run(["git", "commit", "-m", message, "--"] + paths,
                               cwd=str(root), stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, timeout=_SUBPROCESS_TIMEOUT)
+                              stderr=subprocess.PIPE, timeout=_SUBPROCESS_TIMEOUT,
+                              env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 1, "git commit failed: {}".format(exc)
     return done.returncode, (done.stdout + done.stderr).decode("utf-8", "replace")
@@ -181,7 +190,7 @@ def _list_cell(value):
     return " ".join(str(value).split())
 
 
-def main(argv=None, root=None, now=None):
+def main(argv=None, root=None, now=None, env=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     root = Path(root) if root is not None else Path.cwd()
     now = now or datetime.datetime.now(datetime.timezone.utc).astimezone()
@@ -300,7 +309,7 @@ def main(argv=None, root=None, now=None):
 
     if args.no_commit:
         return EXIT_OK
-    code, output = commit(root, gap_id, summary)
+    code, output = commit(root, gap_id, summary, env=env)
     if code != 0:
         print("gap: the record was appended but the commit failed; the line "
               "is on disk and uncommitted.\n{}".format(output), file=sys.stderr)
