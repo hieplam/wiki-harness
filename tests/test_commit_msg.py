@@ -270,6 +270,67 @@ class RootFlagSchemaDriven(unittest.TestCase):
             self.assertNotIn("Traceback", bad_ingest_result.stderr)
 
 
+class RootFlagGapSchemaDriven(unittest.TestCase):
+    """main()'s --root edge reads <root>/gaps/gap-schema.json and threads
+    its id_pattern into validate(), mirroring RootFlagSchemaDriven above for
+    the card schema -- so an unreadable or malformed gap schema must not
+    block every commit either, only weaken the 'gap' ref check to its
+    default pattern."""
+
+    def run_cli(self, root, message):
+        with tempfile.TemporaryDirectory() as msg_dir:
+            msg_file = Path(msg_dir) / "COMMIT_EDITMSG"
+            msg_file.write_text(message, encoding="utf-8")
+            return subprocess.run(
+                [sys.executable, str(SCRIPT), "--root", str(root), str(msg_file)],
+                capture_output=True, text=True)
+
+    def test_gap_schema_file_with_invalid_utf8_falls_back_to_default_pattern(self):
+        """A gaps/gap-schema.json that fails to decode as UTF-8 must not
+        crash the commit-msg hook with an unhandled UnicodeDecodeError
+        propagating out of main() as a raw Python traceback -- that would
+        block EVERY commit, including an ordinary 'chore: tidy up' that
+        cites no gap id at all. It falls back to DEFAULT_GAP_ID_PATTERN
+        exactly like a missing schema file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "gaps").mkdir(parents=True)
+            (root / "gaps" / "gap-schema.json").write_bytes(
+                b"\xff\xfe\x00bad bytes not valid utf8 \x80\x81")
+            result = self.run_cli(root, "chore: tidy up")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_gap_schema_file_with_malformed_json_falls_back_to_default_pattern(self):
+        """load_gap_schema() already swallows json.JSONDecodeError and
+        returns (None, message) rather than raising, so this case must not
+        crash main() either -- it falls back to DEFAULT_GAP_ID_PATTERN
+        exactly like a missing schema file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "gaps").mkdir(parents=True)
+            (root / "gaps" / "gap-schema.json").write_text(
+                "{not valid json", encoding="utf-8")
+            result = self.run_cli(root, "chore: tidy up")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_customized_gap_schema_id_pattern_is_honored(self):
+        """A gap-schema.json that declares its own id_pattern must be the
+        source of the 'gap' ref check -- proving the pattern genuinely comes
+        from the schema, not from a literal in check_commit_msg.py."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "gaps").mkdir(parents=True)
+            (root / "gaps" / "gap-schema.json").write_text(
+                json.dumps({
+                    "types": {"gap": {}},
+                    "id_pattern": r"^G-\d{3}$",
+                }), encoding="utf-8")
+            result = self.run_cli(root, "gap(G-007): record a question")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
 class GapOp(unittest.TestCase):
     def test_a_well_formed_gap_subject_passes(self):
         self.assertEqual(

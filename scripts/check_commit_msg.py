@@ -85,8 +85,13 @@ def main(argv: list[str]) -> int:
             if gap_schema_file.is_file() else None
         gap_schema, _ = load_gap_schema(gap_text)
         gap_pattern = gap_id_pattern_from_schema(gap_schema)
-    except OSError:
-        # Same fail-soft posture as the card schema: an unreadable schema
+    except (OSError, ValueError):
+        # Same fail-soft posture as the card schema: OSError covers
+        # PermissionError / IsADirectoryError / FileNotFoundError, ValueError
+        # covers UnicodeDecodeError from the utf-8-sig decode above --
+        # load_gap_schema() already swallows json.JSONDecodeError internally
+        # and returns (None, message) rather than raising, so decoding is
+        # the only ValueError risk left at this call site. Either way this
         # must not block every commit, only weaken this one check to its
         # default pattern.
         gap_pattern = DEFAULT_GAP_ID_PATTERN
