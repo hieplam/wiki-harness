@@ -270,5 +270,30 @@ class RootFlagSchemaDriven(unittest.TestCase):
             self.assertNotIn("Traceback", bad_ingest_result.stderr)
 
 
+class GapOp(unittest.TestCase):
+    def test_a_well_formed_gap_subject_passes(self):
+        self.assertEqual(
+            validate("gap(gap-2024-01-15-001): record a question"), [])
+
+    def test_gap_without_a_ref_is_rejected(self):
+        self.assertTrue(validate("gap: record a question"))
+
+    def test_gap_with_a_card_id_ref_is_rejected(self):
+        self.assertTrue(
+            validate("gap(src-2024-01-15-001): record a question"))
+
+    def test_gap_with_a_malformed_id_is_rejected(self):
+        self.assertTrue(validate("gap(gap-1): record a question"))
+
+    def test_the_gap_pattern_is_injectable(self):
+        self.assertEqual(
+            validate("gap(G-7): x", gap_id_pattern=r"^G-\d$"), [])
+
+    def test_other_ops_still_work(self):
+        self.assertEqual(validate("chore: tidy"), [])
+        self.assertEqual(
+            validate("ingest(src-2024-01-15-001): file a source"), [])
+
+
 if __name__ == "__main__":
     unittest.main()
