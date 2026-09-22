@@ -308,6 +308,31 @@ class GatherAndRunAgainstRealGit(unittest.TestCase):
             self.assertIsNone(data)
             self.assertIsNotNone(error)
 
+    def test_git_bytes_on_unborn_head_is_not_an_error(self):
+        """A repository with `git init` but zero commits has no HEAD at
+        all: `git show HEAD:<path>` fails with "invalid object name
+        'HEAD'.", not any of the "path not in this revision" messages.
+        That is still the legitimate "nothing committed for this path yet"
+        case, not a git failure."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            data, error = gap_lint._git_bytes(root, "HEAD:gaps/knowledge-gaps.jsonl")
+            self.assertEqual(data, b"")
+            self.assertIsNone(error)
+
+    def test_run_on_unborn_head_repo_with_no_gaps_folder_returns_no_findings(self):
+        """The regression: init.py's dry_run_hooks runs the pre-commit
+        hook (which will call gap_lint.run() once Task 7 wires it in)
+        against a freshly staged, never-committed scaffold -- i.e. an
+        unborn HEAD. A wiki that has never touched gaps/ must not get a
+        spurious finding just because HEAD does not exist yet."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            (root / "README.md").write_text("hello\n", encoding="utf-8")
+            self.assertEqual(gap_lint.run(root), [])
+
     def test_staged_deletions_counts_removed_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

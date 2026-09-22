@@ -113,6 +113,14 @@ def _git_bytes(root, rev_path):
         return b"", None
     if "unknown revision" in stderr or "bad revision" in stderr:
         return b"", None
+    # An unborn HEAD (a repository with no commits yet) fails with this
+    # exact message, since every call here asks for "HEAD:<path>". That is
+    # still "nothing committed for this path yet", not a git failure --
+    # matched on the quoted 'HEAD' specifically, not a bare "invalid object
+    # name", so a genuinely corrupt HEAD (some other invalid object name)
+    # still fails closed instead of being read as "clean".
+    if "invalid object name 'HEAD'" in stderr:
+        return b"", None
     return None, stderr.strip() or "git show failed"
 
 
