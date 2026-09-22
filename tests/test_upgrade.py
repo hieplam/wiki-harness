@@ -2036,8 +2036,9 @@ class LibraryCheckoutFailsClosed(unittest.TestCase):
 def _strip_gaps_support(library_root):
     """Test-only mutation: reverts a fixture library checkout (built from
     THIS repo's real current sources by _make_library()) to its
-    pre-Task-8 shape -- no gaps.AGENTS.md/gap-schema.default.json template
-    sources, and no gaps/-aware lines in init.py -- so a wiki `_run_init`
+    pre-Task-8/10 shape -- no gaps.AGENTS.md/gap-schema.default.json template
+    sources, no gaps/-aware lines in init.py, and no gaps mentions in the
+    root AGENTS.md template -- so a wiki `_run_init`
     from it is a faithful stand-in for a wiki initialised by an OLDER
     wiki-harness release that never shipped gaps/ at all. Used only to
     prove upgrade.py genuinely DELIVERS the folder to such a wiki, rather
@@ -2045,6 +2046,23 @@ def _strip_gaps_support(library_root):
     the latter is drift, which upgrade correctly refuses without
     --adopt-drift, so it cannot stand in for "never had gaps/ "."""
     (library_root / "templates" / "gaps.AGENTS.md").unlink()
+    root_tmpl_path = library_root / "templates" / "AGENTS.root.md.tmpl"
+    root_tmpl_text = root_tmpl_path.read_text(encoding="utf-8")
+    for snippet in (
+        '| `gaps/` | Ledger of questions this wiki could not answer | '
+        'Ledger is **append-only**; view is generated | '
+        '[gaps/AGENTS.md](./gaps/AGENTS.md) |\n',
+        '| `gap` | Recording anything in the knowledge-gap ledger | '
+        'REQUIRED: the gap id |\n',
+    ):
+        assert snippet in root_tmpl_text, f"expected snippet not found: {snippet!r}"
+        root_tmpl_text = root_tmpl_text.replace(snippet, "", 1)
+    section_start = root_tmpl_text.index("## Workflow: Record a gap")
+    section_end = root_tmpl_text.index("## Workflow: Lint")
+    root_tmpl_text = root_tmpl_text[:section_start] + root_tmpl_text[section_end:]
+    assert "gaps/" not in root_tmpl_text
+    assert "gap.py" not in root_tmpl_text
+    root_tmpl_path.write_text(root_tmpl_text, encoding="utf-8")
     (library_root / "templates" / "gap-schema.default.json").unlink()
     init_text = (library_root / "init.py").read_text(encoding="utf-8")
     for snippet in (

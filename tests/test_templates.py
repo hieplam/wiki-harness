@@ -228,5 +228,26 @@ class SeededClaudeMdZeroFindings(unittest.TestCase):
         self.assertEqual(attributable, [])
 
 
+class RootTemplateDocumentsGaps(unittest.TestCase):
+    def setUp(self):
+        self.text = (ROOT / "templates" / "AGENTS.root.md.tmpl").read_text(
+            encoding="utf-8")
+
+    def test_layout_table_mentions_the_gaps_folder(self):
+        self.assertIn("gaps/", self.text)
+
+    def test_points_at_the_nested_rules_file(self):
+        self.assertIn("gaps/AGENTS.md", self.text)
+
+    def test_states_the_append_only_invariant(self):
+        self.assertIn("append-only", self.text.lower())
+
+    def test_states_that_status_is_derived(self):
+        self.assertIn("file order", self.text.lower())
+
+    def test_names_the_gap_commit_op(self):
+        self.assertIn("`gap`", self.text)
+
+
 if __name__ == "__main__":
     unittest.main()

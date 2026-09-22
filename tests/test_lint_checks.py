@@ -707,6 +707,7 @@ class LinksInsideCode(unittest.TestCase):
                 "sources/AGENTS.md": "# Rules for sources/\n",
                 "sources/cards/AGENTS.md": "# Rules for sources/cards/\n",
                 "sources/cards/card-schema.json": FIXTURE_SCHEMA,
+                "gaps/AGENTS.md": (TEMPLATE_ROOT / "gaps.AGENTS.md").read_text(encoding="utf-8"),
                 "VISION.md": "# Deferred work\n",
                 "index.md": (TEMPLATE_ROOT / "index.md.header.tmpl").read_text(encoding="utf-8"),
             }
