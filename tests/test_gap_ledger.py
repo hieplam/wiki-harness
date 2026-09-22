@@ -133,5 +133,91 @@ class ValidateRecords(unittest.TestCase):
         self.assertTrue(any("verdict" in m for _, m in errors))
 
 
+class FoldStatus(unittest.TestCase):
+    """The spec's normative rule: fold in FILE ORDER, never by 'at'."""
+
+    def fold(self, records):
+        return gap_ledger.fold_status([(i + 1, r) for i, r in enumerate(records)])
+
+    def measurement(self, verdict, at="2024-01-16T09:00:00+00:00"):
+        return {"type": "measurement", "gap": "gap-2024-01-15-001", "at": at,
+                "verdict": verdict, "wiki_answer": "text"}
+
+    def test_a_lone_gap_is_opened(self):
+        self.assertEqual(self.fold([valid_gap()]), {"gap-2024-01-15-001": "opened"})
+
+    def test_resolution_alone_does_not_change_status(self):
+        res = {"type": "resolution", "gap": "gap-2024-01-15-001",
+               "at": "2024-01-16T09:00:00+00:00", "card": "src-2024-01-16-001",
+               "wiki_page": "wiki/widget-assembly.md"}
+        self.assertEqual(self.fold([valid_gap(), res]),
+                         {"gap-2024-01-15-001": "opened"})
+
+    def test_measurement_answered_marks_answered(self):
+        self.assertEqual(self.fold([valid_gap(), self.measurement("answered")]),
+                         {"gap-2024-01-15-001": "answered"})
+
+    def test_still_missing_reopens_an_answered_gap(self):
+        records = [valid_gap(), self.measurement("answered"),
+                   self.measurement("still-missing")]
+        self.assertEqual(self.fold(records), {"gap-2024-01-15-001": "opened"})
+
+    def test_partial_reopens_an_answered_gap(self):
+        records = [valid_gap(), self.measurement("answered"),
+                   self.measurement("partial")]
+        self.assertEqual(self.fold(records), {"gap-2024-01-15-001": "opened"})
+
+    def test_ratification_marks_unrelated(self):
+        rat = {"type": "ratification", "gap": "gap-2024-01-15-001",
+               "at": "2024-01-17T09:00:00+00:00", "verdict": "unrelated",
+               "reason": "a general language question, not wiki knowledge"}
+        self.assertEqual(self.fold([valid_gap(), self.measurement("answered"), rat]),
+                         {"gap-2024-01-15-001": "unrelated"})
+
+    def test_fold_uses_file_order_not_timestamps(self):
+        """The whole point of the rule. The LAST LINE is 'still-missing' but
+        carries an EARLIER 'at' than the line above it. File order wins, so
+        the gap is opened; an 'at'-ordered fold would say answered."""
+        records = [
+            valid_gap(),
+            self.measurement("answered", at="2024-02-01T09:00:00+00:00"),
+            self.measurement("still-missing", at="2024-01-20T09:00:00+00:00"),
+        ]
+        self.assertEqual(self.fold(records), {"gap-2024-01-15-001": "opened"})
+
+    def test_independent_gaps_do_not_interfere(self):
+        other = valid_gap("gap-2024-01-15-002")
+        records = [valid_gap(), other, self.measurement("answered")]
+        self.assertEqual(self.fold(records), {"gap-2024-01-15-001": "answered",
+                                              "gap-2024-01-15-002": "opened"})
+
+
+class NextGapId(unittest.TestCase):
+    def test_first_of_the_day(self):
+        self.assertEqual(gap_ledger.next_gap_id([], "2024-01-15"),
+                         "gap-2024-01-15-001")
+
+    def test_nth_of_the_day(self):
+        existing = ["gap-2024-01-15-001", "gap-2024-01-15-002"]
+        self.assertEqual(gap_ledger.next_gap_id(existing, "2024-01-15"),
+                         "gap-2024-01-15-003")
+
+    def test_rolls_over_to_a_new_day(self):
+        existing = ["gap-2024-01-15-001", "gap-2024-01-15-002"]
+        self.assertEqual(gap_ledger.next_gap_id(existing, "2024-01-16"),
+                         "gap-2024-01-16-001")
+
+    def test_ignores_gaps_from_other_days_when_counting(self):
+        existing = ["gap-2024-01-14-009", "gap-2024-01-15-001"]
+        self.assertEqual(gap_ledger.next_gap_id(existing, "2024-01-15"),
+                         "gap-2024-01-15-002")
+
+    def test_fills_after_the_highest_not_the_count(self):
+        """A hand-deleted middle id must never cause a collision."""
+        existing = ["gap-2024-01-15-001", "gap-2024-01-15-007"]
+        self.assertEqual(gap_ledger.next_gap_id(existing, "2024-01-15"),
+                         "gap-2024-01-15-008")
+
+
 if __name__ == "__main__":
     unittest.main()

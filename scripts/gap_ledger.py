@@ -157,3 +157,62 @@ def validate_records(records, schema, id_pattern):
                     errors.append((lineno, "references unknown gap "
                                            "{!r}".format(ref)))
     return errors
+
+
+STATUS_OPENED = "opened"
+STATUS_ANSWERED = "answered"
+STATUS_UNRELATED = "unrelated"
+
+# How each record type moves a gap's status. A 'resolution' is intent, not
+# evidence, so it is deliberately absent: recording which card is MEANT to
+# answer a gap does not make the wiki able to answer it. Only a measurement
+# -- an actual re-run against the wiki -- is evidence.
+_VERDICT_STATUS = {
+    ("measurement", "answered"): STATUS_ANSWERED,
+    ("measurement", "partial"): STATUS_OPENED,
+    ("measurement", "still-missing"): STATUS_OPENED,
+    ("ratification", "unrelated"): STATUS_UNRELATED,
+}
+
+_ID_DATE_SEQ_RE = re.compile(r"^gap-(\d{4}-\d{2}-\d{2})-(\d{3})$")
+
+
+def fold_status(records):
+    """Pure. [(lineno, record)] in -> {gap id: status} out.
+
+    Walks the records in FILE ORDER -- the order they appear in the file --
+    and NOT in 'at' order. In an append-only log the append order is the
+    truth; 'at' is descriptive metadata and may legitimately be out of
+    order (a backfilled measurement, clock skew, a timezone mistake).
+    Every gap starts at 'opened'; the last record that carries a verdict
+    wins.
+    """
+    statuses = {}
+    for _lineno, record in records:
+        rtype = record.get("type")
+        if rtype == GAP_TYPE:
+            gid = record.get("id")
+            if isinstance(gid, str):
+                statuses.setdefault(gid, STATUS_OPENED)
+            continue
+        gid = record.get("gap")
+        if gid not in statuses:
+            continue
+        new_status = _VERDICT_STATUS.get((rtype, record.get("verdict")))
+        if new_status is not None:
+            statuses[gid] = new_status
+    return statuses
+
+
+def next_gap_id(existing_ids, today):
+    """Pure. Existing gap ids + a 'YYYY-MM-DD' string in -> the next id out.
+
+    Counts from the HIGHEST sequence already used today, never from how
+    many ids exist: a hand-deleted middle id must not cause a collision.
+    """
+    highest = 0
+    for gid in existing_ids:
+        match = _ID_DATE_SEQ_RE.match(gid or "")
+        if match and match.group(1) == today:
+            highest = max(highest, int(match.group(2)))
+    return "gap-{}-{:03d}".format(today, highest + 1)
