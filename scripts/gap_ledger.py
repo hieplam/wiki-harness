@@ -279,3 +279,28 @@ def render_view(records):
             _cell(notes.get(gid)),
         )) + " |")
     return "\n".join(lines) + "\n"
+
+
+def append_only_violation(head_bytes, work_bytes):
+    """Pure. Committed bytes + working bytes in -> a message, or None.
+
+    The ledger may only grow at the end, so the committed content must be a
+    byte PREFIX of the working content. The direction matters: HEAD must be
+    a prefix of WORKING, never the reverse. That single rule rejects every
+    way the file can be tampered with -- a deleted middle line, a deleted
+    last line, a truncation, a delete-and-rewrite, a reorder, or a single
+    edited byte -- while allowing an append. Because parse_ledger() requires
+    every line to end with a newline, a byte prefix can never split a line.
+    """
+    if head_bytes is None:
+        return None
+    if work_bytes is None:
+        return "the ledger is missing but exists in HEAD"
+    if work_bytes.startswith(head_bytes):
+        return None
+    if len(work_bytes) < len(head_bytes):
+        return ("the ledger shrank: it is append-only, so committed lines "
+                "may never be removed or truncated")
+    return ("the ledger diverges from its committed content: it is "
+            "append-only, so committed lines may never be edited, "
+            "reordered or replaced")
