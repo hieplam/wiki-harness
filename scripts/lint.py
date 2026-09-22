@@ -480,27 +480,6 @@ def git_changes(root):
     return parse_name_status(result.stdout)
 
 
-def _is_git_worktree(root):
-    """Impure edge. True when `root` is inside a real git work tree.
-
-    Mirrors hooks_finding()'s existing precedent below: a non-git root is
-    not a hypothetical here -- upgrade.py's run_scratch_lint() runs this
-    very lint.py against a disposable tempfile.mkdtemp() scratch copy with
-    no .git at all (by design; see upgrade.py's docstring), and test
-    fixtures do the same. gap_lint.run() fails closed on "git itself could
-    not answer", which is the right call for a real repository with a
-    corrupted or forged ref -- but "no repository was ever here" is not
-    that case: with no repository, there is no history for anything to
-    have been erased from. Gating the call here, rather than loosening
-    gap_lint's own fail-closed check, keeps that check's security
-    reasoning untouched and simply skips asking a question that a
-    scratch/fixture root can never meaningfully answer."""
-    result = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
-        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT)
-    return result.returncode == 0
-
-
 def hooks_finding(root):
     """In a git work tree, require core.hooksPath == .githooks so the
     commit-msg format check actually runs. Non-git roots (test fixtures)
@@ -621,7 +600,12 @@ def main(argv):
     args = parser.parse_args(argv)
     root = args.root
     files, enc = scan(root)
-    gap_findings = gap_lint.run(root) if _is_git_worktree(root) else []
+    # gap_lint.run() itself now decides -- via a filesystem-only check for
+    # a `.git` entry anywhere up the tree, never a git command -- whether
+    # `root` is genuinely not a repository (upgrade.py's scratch copy,
+    # bare test fixtures) or a real repository whose git state must be
+    # asked and, on failure, fail closed. See its docstring.
+    gap_findings = gap_lint.run(root)
     findings = run(files, git_changes(root), gap_findings=gap_findings) + enc
     findings += hooks_finding(root)
     findings += check_harness(read_harness_manifest(root))

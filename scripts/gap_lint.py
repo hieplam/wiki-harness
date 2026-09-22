@@ -328,6 +328,38 @@ def gather(root):
     )
 
 
+def _has_git_dir(root):
+    """Impure edge, but filesystem-only -- no git subprocess involved.
+
+    The one legitimate reason to skip the append-only check entirely is
+    "there is genuinely no repository here", e.g. upgrade.py's
+    run_scratch_lint() runs this very check against a disposable
+    tempfile.mkdtemp() copy that was never a repository at all (see its
+    docstring: it is copied with `ignore=shutil.ignore_patterns(".git")`).
+    That question must be answered by a plain filesystem fact, never by
+    asking git something that can fail identically for "never a
+    repository" and for "a real repository whose refs were tampered
+    with" -- `git rev-parse --is-inside-work-tree` is exactly that kind of
+    question, and a single `echo garbage > .git/HEAD` makes a real,
+    tampered repository answer it exactly like a scratch directory that
+    never had a `.git` anywhere, silently skipping the hardened check this
+    module exists to run. So: walk up from `root` looking for a `.git`
+    entry. `.git` may be a plain file, not a directory -- that is how git
+    lays out a worktree (a `.git` file containing `gitdir: <path>`) -- so
+    this checks existence only, never `.is_dir()`, or a real worktree
+    would be wrongly treated as "no repository here" and skip linting.
+
+    Finding `.git` anywhere up the tree, even a corrupted one, means every
+    other decision in this module must go through git and fail closed on
+    any error -- it is only the total ABSENCE of `.git` that is a safe,
+    structural "nothing to check"."""
+    current = Path(root).resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return True
+    return False
+
+
 def run(root):
     """Impure edge. The one entry point scripts/lint.py calls.
 
@@ -348,7 +380,17 @@ def run(root):
     adopted it, so its disappearance from the working tree is tampering,
     not non-adoption. Requiring git_error to be absent keeps this fail
     closed per V3: an "unknown" git state must never read as "never
-    adopted", i.e. as clean."""
+    adopted", i.e. as clean.
+
+    Before any of that: if there is no `.git` anywhere up the tree, this
+    is genuinely not a repository (upgrade.py's scratch copy, a bare test
+    fixture with no git history at all), and there is no history for
+    anything to have been erased from -- this is the ONLY case that
+    returns [] without ever asking git a question. Every other case,
+    including a repository whose git state cannot be read, goes through
+    gather()/check_gaps() and fails closed like everything below."""
+    if not _has_git_dir(root):
+        return []
     inputs = gather(root)
     never_adopted = (not inputs.ledger_text
                      and inputs.schema_text is None
