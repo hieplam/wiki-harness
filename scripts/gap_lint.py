@@ -108,6 +108,44 @@ def _run_git(root, args, timeout_label):
         return None, "{} timed out".format(timeout_label)
 
 
+_RepoState = namedtuple("_RepoState", "unborn head_resolves error")
+
+
+def _resolve_repo_state(root):
+    """Impure edge. Resolves, ONCE, the two structural git facts that both
+    `_git_bytes` and `_staged_deletions` independently need to decide
+    whether HEAD is safe to trust: "is this repository truly unborn" and,
+    if not, "does HEAD actually resolve to a commit". Both callers used to
+    ask git these same two questions themselves, doubling the only
+    call here (`git rev-list --all --count`) that scales with total
+    history size, for two answers guaranteed identical within one
+    `gather()` invocation. Resolving it once here and threading the
+    result through as an explicit parameter removes that duplication
+    without any module-level cache or other mutable global state.
+
+    Returns a `_RepoState`:
+    - `.error` set: git itself could not answer (missing, timed out, or
+      failed) -- `.unborn`/`.head_resolves` are meaningless in that case.
+      Fail closed: callers must surface `.error`, never read this as
+      "clean".
+    - `.error` is None and `.unborn` is True: `_commit_count` found zero
+      commits reachable from any ref -- genuinely unborn.
+    - `.error` is None and `.unborn` is False: history exists somewhere;
+      `.head_resolves` says whether HEAD itself names a real commit
+      (`_head_resolves`, decided purely by exit code -- see its docstring
+      for why that must never be stderr text).
+    """
+    count, error = _commit_count(root)
+    if error is not None:
+        return _RepoState(unborn=False, head_resolves=False, error=error)
+    if count == 0:
+        return _RepoState(unborn=True, head_resolves=False, error=None)
+    resolves, error = _head_resolves(root)
+    if error is not None:
+        return _RepoState(unborn=False, head_resolves=False, error=error)
+    return _RepoState(unborn=False, head_resolves=resolves, error=None)
+
+
 def _commit_count(root):
     """Impure edge. The number of commits reachable from ANY ref, or an
     error. This is the structural test for "truly unborn": a repository
@@ -158,9 +196,14 @@ def _path_in_head(root, path):
     return result.returncode == 0, None
 
 
-def _git_bytes(root, path):
+def _git_bytes(root, path, state):
     """Impure edge. (bytes or None, error or None) for the committed
     content of <path> at HEAD.
+
+    `state` is a `_RepoState` already resolved once by
+    `_resolve_repo_state` for this `gather()` call -- see its docstring.
+    This function makes no `_commit_count`/`_head_resolves` calls of its
+    own; it only judges the state it was given.
 
     Three states are possible, and each is decided by an exit code or an
     explicit count -- never by matching git's human-readable stderr text.
@@ -172,27 +215,23 @@ def _git_bytes(root, path):
     at refs/heads/main. Matching that string can never tell those two
     cases apart; only asking git structurally can.
 
-    1. The repository has no commits at all, anywhere (`_commit_count` is
-       0): genuinely unborn. Nothing is committed for any path yet;
-       (b"", None) is the truthful answer.
-    2. HEAD resolves to a real commit (`_head_resolves` is True), but the
-       path is not present in that commit's tree (`_path_in_head` is
-       False): the path has simply never been committed. Legitimate;
-       (b"", None).
-    3. Anything else -- commits exist somewhere but HEAD does not resolve
-       (a dangling or forged ref, or any other corruption), or any git
-       invocation itself failed or timed out. Fail closed: (None, error).
+    1. `state.error` is set: some git invocation behind the state failed
+       or timed out. Fail closed: (None, error).
+    2. `state.unborn` is True: the repository has no commits at all,
+       anywhere. Nothing is committed for any path yet; (b"", None) is
+       the truthful answer.
+    3. `state.head_resolves` is True, but the path is not present in that
+       commit's tree (`_path_in_head` is False): the path has simply
+       never been committed. Legitimate; (b"", None).
+    4. Anything else -- commits exist somewhere but HEAD does not resolve
+       (a dangling or forged ref, or any other corruption). Fail closed:
+       (None, error).
     """
-    count, error = _commit_count(root)
-    if error is not None:
-        return None, error
-    if count == 0:
+    if state.error is not None:
+        return None, state.error
+    if state.unborn:
         return b"", None
-
-    resolves, error = _head_resolves(root)
-    if error is not None:
-        return None, error
-    if not resolves:
+    if not state.head_resolves:
         return None, ("HEAD does not resolve to a commit even though the "
                       "repository has history -- refusing to treat a "
                       "dangling or forged HEAD as clean")
@@ -213,30 +252,29 @@ def _git_bytes(root, path):
     return result.stdout, None
 
 
-def _staged_deletions(root, path):
+def _staged_deletions(root, path, state):
     """Impure edge. Counts removal lines in the staged diff for one path.
+
+    `state` is the same `_RepoState` `_git_bytes` was given for this
+    `gather()` call -- resolved once by `_resolve_repo_state`, not
+    re-derived here.
 
     `git diff --cached` silently diffs against git's empty tree when HEAD
     does not resolve -- it never fails, it just reports every staged line
     as a pure insertion with zero deletions, which is precisely how the
     second "independent" mechanism was shown to share the same blind spot
     as `_git_bytes`. So this must not trust the numstat output at all
-    unless it has separately confirmed HEAD is in a state where "diff
+    unless `state` has already confirmed HEAD is in a state where "diff
     against HEAD" is a meaningful question: either the repository is truly
     unborn (nothing to diff against, so 0 is correct), or HEAD actually
-    resolves. Anything else -- history exists but HEAD does not resolve --
-    is an error, not a silent 0."""
-    count, error = _commit_count(root)
-    if error is not None:
-        return 0, error
-    if count > 0:
-        resolves, error = _head_resolves(root)
-        if error is not None:
-            return 0, error
-        if not resolves:
-            return 0, ("HEAD does not resolve to a commit even though the "
-                       "repository has history -- refusing to treat the "
-                       "staged diff as clean")
+    resolves. Anything else -- history exists but HEAD does not resolve,
+    or `state.error` is set -- is an error, not a silent 0."""
+    if state.error is not None:
+        return 0, state.error
+    if not state.unborn and not state.head_resolves:
+        return 0, ("HEAD does not resolve to a commit even though the "
+                   "repository has history -- refusing to treat the "
+                   "staged diff as clean")
 
     result, error = _run_git(
         root, ["git", "diff", "--cached", "--numstat", "--", path], "git diff")
@@ -265,8 +303,9 @@ def gather(root):
     """Impure edge. Builds the GapInputs check_gaps() judges."""
     root = Path(root)
     ledger = root / gap_ledger.LEDGER_PATH
-    head_bytes, git_error = _git_bytes(root, gap_ledger.LEDGER_PATH)
-    deleted, diff_error = _staged_deletions(root, gap_ledger.LEDGER_PATH)
+    state = _resolve_repo_state(root)
+    head_bytes, git_error = _git_bytes(root, gap_ledger.LEDGER_PATH, state)
+    deleted, diff_error = _staged_deletions(root, gap_ledger.LEDGER_PATH, state)
     try:
         work_bytes = ledger.read_bytes()
     except OSError:

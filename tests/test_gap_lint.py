@@ -289,22 +289,11 @@ class GatherAndRunAgainstRealGit(unittest.TestCase):
                 _git(root, "commit", "-q", "-m", "seed ledger").returncode, 0)
             self.assertEqual(gap_lint.run(root), [])
 
-    def test_git_bytes_path_not_yet_in_head_is_not_an_error(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _init_repo(root)
-            (root / "f.txt").write_text("x\n", encoding="utf-8")
-            self.assertEqual(_git(root, "add", "-A").returncode, 0)
-            self.assertEqual(
-                _git(root, "commit", "-q", "-m", "init").returncode, 0)
-            data, error = gap_lint._git_bytes(root, "gaps/knowledge-gaps.jsonl")
-            self.assertEqual(data, b"")
-            self.assertIsNone(error)
-
     def test_git_bytes_outside_a_git_repo_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            data, error = gap_lint._git_bytes(root, "gaps/knowledge-gaps.jsonl")
+            state = gap_lint._resolve_repo_state(root)
+            data, error = gap_lint._git_bytes(root, "gaps/knowledge-gaps.jsonl", state)
             self.assertIsNone(data)
             self.assertIsNotNone(error)
 
@@ -317,7 +306,8 @@ class GatherAndRunAgainstRealGit(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _init_repo(root)
-            data, error = gap_lint._git_bytes(root, "gaps/knowledge-gaps.jsonl")
+            state = gap_lint._resolve_repo_state(root)
+            data, error = gap_lint._git_bytes(root, "gaps/knowledge-gaps.jsonl", state)
             self.assertEqual(data, b"")
             self.assertIsNone(error)
 
@@ -350,8 +340,9 @@ class GatherAndRunAgainstRealGit(unittest.TestCase):
             ledger.write_text(ledger_text(gap_record("gap-2024-01-15-001")),
                               encoding="utf-8")
             self.assertEqual(_git(root, "add", "-A").returncode, 0)
+            state = gap_lint._resolve_repo_state(root)
             deleted, error = gap_lint._staged_deletions(
-                root, gap_ledger.LEDGER_PATH)
+                root, gap_ledger.LEDGER_PATH, state)
             self.assertIsNone(error)
             self.assertGreaterEqual(deleted, 1)
 
@@ -366,7 +357,8 @@ class GatherAndRunAgainstRealGit(unittest.TestCase):
             self.assertEqual(_git(root, "add", "-A").returncode, 0)
             self.assertEqual(
                 _git(root, "commit", "-q", "-m", "init").returncode, 0)
-            data, error = gap_lint._git_bytes(root, "gaps/knowledge-gaps.jsonl")
+            state = gap_lint._resolve_repo_state(root)
+            data, error = gap_lint._git_bytes(root, "gaps/knowledge-gaps.jsonl", state)
             self.assertEqual(data, b"")
             self.assertIsNone(error)
 
