@@ -229,7 +229,7 @@ VIEW_HEADER = (
     "\n"
 )
 
-_VIEW_COLUMNS = ("Gap", "Status", "Service", "Question", "Answering card", "Note")
+_VIEW_COLUMNS = ("Gap", "Status", "Service", "Topics", "Question", "Answering card", "Note")
 
 
 def _cell(value):
@@ -273,6 +273,7 @@ def render_view(records):
             _cell(gid),
             _cell(statuses.get(gid, STATUS_OPENED)),
             _cell(record.get("service")),
+            _cell(record.get("topics")),
             _cell(record.get("question")),
             _cell(cards.get(gid)),
             _cell(notes.get(gid)),

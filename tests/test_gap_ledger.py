@@ -243,15 +243,34 @@ class RenderView(unittest.TestCase):
         out = gap_ledger.render_view([(1, rec)])
         row = [ln for ln in out.splitlines() if "gap-2024-01-15-001" in ln][0]
         self.assertIn(r"\|", row)
-        # Six columns means seven delimiter pipes. The escaped pipe from the
-        # prose contributes to count("|") too, so subtract it back out.
-        self.assertEqual(row.count("|") - row.count(r"\|"), 7)
+        # Seven columns means eight delimiter pipes. The escaped pipe from
+        # the prose contributes to count("|") too, so subtract it back out.
+        self.assertEqual(row.count("|") - row.count(r"\|"), 8)
 
     def test_newlines_in_prose_do_not_break_the_table(self):
         rec = valid_gap()
         rec["question"] = "line one\nline two"
         out = gap_ledger.render_view([(1, rec)])
         self.assertIn("line one line two", out)
+
+    def test_crlf_and_bare_cr_in_prose_do_not_break_the_table(self):
+        rec = valid_gap()
+        rec["question"] = "line one\r\nline two\rline three"
+        out = gap_ledger.render_view([(1, rec)])
+        self.assertNotIn("\r\n", out)
+        self.assertNotIn("\r", out)
+        self.assertIn("line one line two line three", out)
+
+    def test_topics_are_rendered_as_a_comma_separated_cell(self):
+        rec = valid_gap()
+        rec["topics"] = ["concurrency", "goroutines"]
+        out = gap_ledger.render_view([(1, rec)])
+        row = [ln for ln in out.splitlines() if "gap-2024-01-15-001" in ln][0]
+        self.assertIn("concurrency, goroutines", row)
+
+    def test_absent_resolution_and_ratification_render_empty_not_none(self):
+        out = gap_ledger.render_view([(1, valid_gap())])
+        self.assertNotIn("None", out)
 
     def test_resolution_card_is_shown_for_an_answered_gap(self):
         res = {"type": "resolution", "gap": "gap-2024-01-15-001",
