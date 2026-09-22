@@ -304,3 +304,40 @@ def append_only_violation(head_bytes, work_bytes):
     return ("the ledger diverges from its committed content: it is "
             "append-only, so committed lines may never be edited, "
             "reordered or replaced")
+
+
+# Only the free-prose fields. Machine fields ('at', 'session', 'id') are
+# full of digits by design, and flagging them would make every record warn
+# -- a warning that always fires is noise, and noise gets ignored.
+PROSE_KEYS = ("context", "prompt_verbatim", "question", "wiki_answer",
+              "answer_given", "reason")
+
+# The domain's final label is required to be alphabetic (a TLD shape, e.g.
+# '.com', '.io'), not just "word characters". Without that, a routine
+# pip-style version pin quoted in prose -- 'examplepkg@1.2.3' -- has an
+# '@' followed by dotted "word" segments and reads as an email under a
+# looser pattern, which would turn ordinary tooling questions into noise.
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}")
+_LONG_DIGITS_RE = re.compile(r"\d{8,}")
+
+
+def pii_warnings(record):
+    """Pure. A record in -> a list of human-readable warnings out.
+
+    ADVISORY ONLY. A private wiki is expected to hold its organisation's
+    knowledge; it is not a place for personal data about individuals. This
+    flags the two shapes that are cheap to detect and never blocks, because
+    a false positive must never cost a recorded gap.
+    """
+    warnings = []
+    for key in PROSE_KEYS:
+        value = record.get(key)
+        if not isinstance(value, str):
+            continue
+        if _EMAIL_RE.search(value):
+            warnings.append("{!r} contains what looks like an email "
+                            "address".format(key))
+        if _LONG_DIGITS_RE.search(value):
+            warnings.append("{!r} contains a long run of digits that may be "
+                            "an identifier".format(key))
+    return warnings

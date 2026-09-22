@@ -291,5 +291,45 @@ class RenderView(unittest.TestCase):
         self.assertIn("general language question", out)
 
 
+class PiiWarnings(unittest.TestCase):
+    def test_clean_record_warns_nothing(self):
+        self.assertEqual(gap_ledger.pii_warnings(valid_gap()), [])
+
+    def test_an_email_address_is_flagged(self):
+        rec = valid_gap()
+        rec["context"] = "raised by someone@example.com"
+        self.assertTrue(gap_ledger.pii_warnings(rec))
+
+    def test_a_long_digit_run_is_flagged(self):
+        rec = valid_gap()
+        rec["prompt_verbatim"] = "why did account 1234567890123 fail"
+        self.assertTrue(gap_ledger.pii_warnings(rec))
+
+    def test_short_numbers_are_not_flagged(self):
+        rec = valid_gap()
+        rec["prompt_verbatim"] = "what does error 404 mean"
+        self.assertEqual(gap_ledger.pii_warnings(rec), [])
+
+    def test_the_timestamp_is_never_flagged(self):
+        """'at' is a machine field full of digits; flagging it would make
+        every single record warn, and a warning that always fires is noise."""
+        self.assertEqual(gap_ledger.pii_warnings(valid_gap()), [])
+
+    def test_non_prose_fields_are_not_scanned(self):
+        rec = valid_gap()
+        rec["session"] = "1234567890123456"
+        self.assertEqual(gap_ledger.pii_warnings(rec), [])
+
+    def test_a_package_version_pin_is_not_flagged_as_an_email(self):
+        """'name@1.2.3' is common pip-style version-pin prose, not an email:
+        its final segment is digits, not a TLD-shaped word. A regex that
+        cannot tell the two apart would warn on routine tooling questions,
+        and a warning that fires on ordinary prose is noise that gets
+        ignored."""
+        rec = valid_gap()
+        rec["context"] = "why does examplepkg@1.2.3 fail to install"
+        self.assertEqual(gap_ledger.pii_warnings(rec), [])
+
+
 if __name__ == "__main__":
     unittest.main()

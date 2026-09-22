@@ -292,6 +292,10 @@ def main(argv=None, root=None, now=None):
               file=sys.stderr)
         return EXIT_INVALID
 
+    for warning in gap_ledger.pii_warnings(record):
+        print("gap: warning: {} — this wiki records what the team knows, "
+              "not data about individuals.".format(warning), file=sys.stderr)
+
     append_record(root, record)
 
     if args.no_commit:

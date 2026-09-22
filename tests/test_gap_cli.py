@@ -239,5 +239,15 @@ class CommitBehaviour(CliCase):
         self.assertEqual(len(self.records()), 1)
 
 
+class PiiIsAdvisoryOnly(CliCase):
+    def test_a_record_with_an_email_still_writes_and_exits_zero(self):
+        args = [a for a in ADD_ARGS]
+        args[args.index("--context") + 1] = "raised by someone@example.com"
+        with self.quiet():
+            code = self.run_cli(args + ["--no-commit"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.records()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
