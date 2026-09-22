@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,6 +15,24 @@ import gap_ledger  # noqa: E402
 import gap_lint  # noqa: E402
 
 SCHEMA_TEXT = (ROOT / "templates" / "gap-schema.default.json").read_text(encoding="utf-8")
+
+
+def _git(root, *args):
+    """Isolated exactly like init.py's/test_init.py's own _git() helper: the
+    host's global/system gitconfig (commit.gpgsign=true with no usable key,
+    an unusual default branch name, etc.) must never change whether these
+    assertions hold."""
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    return subprocess.run(["git", "-C", str(root), *args],
+                          capture_output=True, text=True, env=env)
+
+
+def _init_repo(root):
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "hunter@example.com")
+    _git(root, "config", "user.name", "Hunter")
 
 
 def gap_record(gid="gap-2024-01-15-001"):
@@ -193,6 +214,121 @@ class L7ViewSync(unittest.TestCase):
         found = inputs(ledger_text=text, work_bytes=text.encode(),
                        view_text=gap_ledger.render_view(records))
         self.assertEqual(gap_lint.check_gaps(found), [])
+
+
+class RunDeleteGapsFolderRegression(unittest.TestCase):
+    """Finding 1 (Critical): the observed attack is an agent deleting the
+    WHOLE gaps/ folder (ledger + schema together), not just rewriting the
+    ledger. run()'s old guard -- 'no ledger text AND no schema text' -- reads
+    that as 'never adopted' and returns [] with no findings at all, silently
+    discarding both the tampered-history evidence and any git error. This
+    test commits a ledger, deletes gaps/ entirely from the working tree, and
+    asserts run() still reports the append-only violation. It must FAIL
+    against the pre-fix guard and PASS after the HEAD-based fix."""
+
+    def test_deleting_ledger_and_schema_is_still_caught_by_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            gaps_dir = root / "gaps"
+            gaps_dir.mkdir()
+            text = ledger_text(gap_record())
+            (gaps_dir / "knowledge-gaps.jsonl").write_text(text, encoding="utf-8")
+            (gaps_dir / "gap-schema.json").write_text(SCHEMA_TEXT, encoding="utf-8")
+            records, _ = gap_ledger.parse_ledger(text)
+            (gaps_dir / "KNOWLEDGE_GAP.md").write_text(
+                gap_ledger.render_view(records), encoding="utf-8")
+            add = _git(root, "add", "-A")
+            self.assertEqual(add.returncode, 0, add.stderr)
+            commit = _git(root, "commit", "-q", "-m", "seed ledger")
+            self.assertEqual(commit.returncode, 0, commit.stderr)
+
+            # The attack: delete the whole gaps/ folder from the working tree
+            # (not staged -- run() judges the working tree against HEAD).
+            for name in ("knowledge-gaps.jsonl", "gap-schema.json", "KNOWLEDGE_GAP.md"):
+                (gaps_dir / name).unlink()
+
+            findings = gap_lint.run(root)
+            self.assertNotEqual(findings, [],
+                "run() must not return [] once a ledger has been committed "
+                "and then deleted -- that silently discards the tampering")
+            self.assertTrue(any(f.code == "GAP_APPEND" for f in findings))
+
+
+class GatherAndRunAgainstRealGit(unittest.TestCase):
+    """Finding 2: exercise the impure edge (gather/run/_git_bytes/
+    _staged_deletions) against a real git repository, not just the pure
+    check_gaps() the rest of this file drives."""
+
+    def test_never_adopted_repo_returns_no_findings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            (root / "README.md").write_text("hello\n", encoding="utf-8")
+            self.assertEqual(_git(root, "add", "-A").returncode, 0)
+            self.assertEqual(
+                _git(root, "commit", "-q", "-m", "init").returncode, 0)
+            self.assertEqual(gap_lint.run(root), [])
+
+    def test_untampered_committed_ledger_returns_no_findings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            (root / "sources" / "cards").mkdir(parents=True)
+            (root / "wiki").mkdir()
+            gaps_dir = root / "gaps"
+            gaps_dir.mkdir()
+            text = ledger_text(gap_record())
+            (gaps_dir / "knowledge-gaps.jsonl").write_text(text, encoding="utf-8")
+            (gaps_dir / "gap-schema.json").write_text(SCHEMA_TEXT, encoding="utf-8")
+            records, _ = gap_ledger.parse_ledger(text)
+            (gaps_dir / "KNOWLEDGE_GAP.md").write_text(
+                gap_ledger.render_view(records), encoding="utf-8")
+            self.assertEqual(_git(root, "add", "-A").returncode, 0)
+            self.assertEqual(
+                _git(root, "commit", "-q", "-m", "seed ledger").returncode, 0)
+            self.assertEqual(gap_lint.run(root), [])
+
+    def test_git_bytes_path_not_yet_in_head_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            (root / "f.txt").write_text("x\n", encoding="utf-8")
+            self.assertEqual(_git(root, "add", "-A").returncode, 0)
+            self.assertEqual(
+                _git(root, "commit", "-q", "-m", "init").returncode, 0)
+            data, error = gap_lint._git_bytes(root, "HEAD:gaps/knowledge-gaps.jsonl")
+            self.assertEqual(data, b"")
+            self.assertIsNone(error)
+
+    def test_git_bytes_outside_a_git_repo_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data, error = gap_lint._git_bytes(root, "HEAD:gaps/knowledge-gaps.jsonl")
+            self.assertIsNone(data)
+            self.assertIsNotNone(error)
+
+    def test_staged_deletions_counts_removed_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            gaps_dir = root / "gaps"
+            gaps_dir.mkdir()
+            ledger = gaps_dir / "knowledge-gaps.jsonl"
+            ledger.write_text(
+                ledger_text(gap_record("gap-2024-01-15-001"),
+                            gap_record("gap-2024-01-15-002")),
+                encoding="utf-8")
+            self.assertEqual(_git(root, "add", "-A").returncode, 0)
+            self.assertEqual(
+                _git(root, "commit", "-q", "-m", "seed").returncode, 0)
+            ledger.write_text(ledger_text(gap_record("gap-2024-01-15-001")),
+                              encoding="utf-8")
+            self.assertEqual(_git(root, "add", "-A").returncode, 0)
+            deleted, error = gap_lint._staged_deletions(
+                root, gap_ledger.LEDGER_PATH)
+            self.assertIsNone(error)
+            self.assertGreaterEqual(deleted, 1)
 
 
 if __name__ == "__main__":

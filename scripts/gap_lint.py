@@ -176,10 +176,29 @@ def gather(root):
 def run(root):
     """Impure edge. The one entry point scripts/lint.py calls.
 
-    A wiki with neither a ledger nor a gap schema has not adopted the
-    feature and is clean -- that is the pre-upgrade state, and it must not
-    produce findings."""
+    Whether a wiki adopted the ledger feature is a question about HISTORY,
+    not about the working tree: the working tree is exactly what an
+    attacker controls. A wiki that never adopted the feature has no ledger
+    or schema in the working tree AND nothing recorded for the ledger in
+    HEAD, and git could actually be asked -- that combination is the only
+    safe "clean, nothing to check" state.
+
+    Checking only the working tree (the old guard: no ledger text and no
+    schema text) cannot distinguish "never adopted" from "adopted, then
+    deleted": an agent that deletes the whole gaps/ folder -- ledger and
+    schema together, not just the ledger -- makes both working-tree checks
+    true even though HEAD still holds a committed ledger, so the old guard
+    returned [] and silently discarded the tampering. Requiring head_bytes
+    to also be empty closes that: a ledger present in HEAD means the wiki
+    adopted it, so its disappearance from the working tree is tampering,
+    not non-adoption. Requiring git_error to be absent keeps this fail
+    closed per V3: an "unknown" git state must never read as "never
+    adopted", i.e. as clean."""
     inputs = gather(root)
-    if not inputs.ledger_text and inputs.schema_text is None:
+    never_adopted = (not inputs.ledger_text
+                     and inputs.schema_text is None
+                     and not inputs.head_bytes
+                     and not inputs.git_error)
+    if never_adopted:
         return []
     return check_gaps(inputs)
