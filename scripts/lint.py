@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from card_frontmatter_lint import (  # noqa: E402  (needs the sys.path line above)
     RULES_FILES, SCHEMA_PATH, Finding, card_id_pattern_from_schema,
     card_id_scan_pattern, check_card, load_schema, parse_frontmatter, resolve)
+import gap_lint  # noqa: E402  (needs the sys.path line above)
 from manifest import diff_manifest, hash_tree, is_valid_role, read_manifest  # noqa: E402
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
@@ -164,7 +165,7 @@ SUBPROCESS_TIMEOUT = 30
 # per-filename, because the harness only ever vendors recipes.md into
 # sources/cards/ (see init.py's step 8).
 RULES_CONTAINERS = {
-    "AGENTS.md": ("", "wiki/", "sources/", "sources/cards/"),
+    "AGENTS.md": ("", "wiki/", "sources/", "sources/cards/", "gaps/"),
     "CLAUDE.md": ("", "wiki/", "sources/", "sources/cards/"),
     "recipes.md": ("sources/cards/",),
 }
@@ -189,9 +190,16 @@ def is_rules_file(path):
     return prefix in containers
 
 
+# Generated, deliberately not listed in index.md, and not wiki content:
+# the ledger view is rendered from gaps/knowledge-gaps.jsonl. Excluded from
+# _wiki_pages so it is never judged as an orphan page, while still being
+# read by scan() so its links are checked.
+GENERATED_PAGES = frozenset({"gaps/KNOWLEDGE_GAP.md"})
+
+
 def _wiki_pages(files):
     return [p for p in files if p.startswith("wiki/") and p.endswith(".md")
-            and not is_rules_file(p)]
+            and not is_rules_file(p) and p not in GENERATED_PAGES]
 
 
 def _cards(files):
@@ -383,11 +391,15 @@ def check_harness(manifest_state):
     return findings
 
 
-def run(files, changes):
+def run(files, changes, gap_findings=()):
     """Loads the schema once here so check_card_citations() can be
     schema-driven; check_cards() still loads it a second time itself, since
     it is the one that must independently report a CARD_SCHEMA finding when
-    the schema is missing or malformed."""
+    the schema is missing or malformed.
+
+    `gap_findings` is pre-gathered by the caller (the impure edge) via
+    gap_lint.run(root) -- this function stays a pure decision function that
+    only folds findings it is handed, never gathering its own."""
     schema, _ = load_schema(files.get(SCHEMA_PATH))
     findings = []
     for check in (check_broken_links, check_orphans):
@@ -396,6 +408,7 @@ def run(files, changes):
     for check in (check_cards, check_frontmatter, check_index_sync):
         findings += check(files)
     findings += check_raw_immutability(changes)
+    findings += list(gap_findings)
     return findings
 
 
@@ -433,7 +446,8 @@ def scan(root):
     encoding_findings = []
     for pattern in ("index.md", "AGENTS.md", "VISION.md", "sources/AGENTS.md",
                     "sources/cards/card-schema.json", "sources/cards/recipes.md",
-                    "wiki/**/*.md", "sources/cards/*.md"):
+                    "wiki/**/*.md", "sources/cards/*.md",
+                    "gaps/AGENTS.md", "gaps/KNOWLEDGE_GAP.md"):
         for f in root.glob(pattern):
             if f.is_file():
                 rel = f.relative_to(root).as_posix()
@@ -464,6 +478,27 @@ def git_changes(root):
     if result.returncode != 0:
         return []
     return parse_name_status(result.stdout)
+
+
+def _is_git_worktree(root):
+    """Impure edge. True when `root` is inside a real git work tree.
+
+    Mirrors hooks_finding()'s existing precedent below: a non-git root is
+    not a hypothetical here -- upgrade.py's run_scratch_lint() runs this
+    very lint.py against a disposable tempfile.mkdtemp() scratch copy with
+    no .git at all (by design; see upgrade.py's docstring), and test
+    fixtures do the same. gap_lint.run() fails closed on "git itself could
+    not answer", which is the right call for a real repository with a
+    corrupted or forged ref -- but "no repository was ever here" is not
+    that case: with no repository, there is no history for anything to
+    have been erased from. Gating the call here, rather than loosening
+    gap_lint's own fail-closed check, keeps that check's security
+    reasoning untouched and simply skips asking a question that a
+    scratch/fixture root can never meaningfully answer."""
+    result = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT)
+    return result.returncode == 0
 
 
 def hooks_finding(root):
@@ -586,7 +621,8 @@ def main(argv):
     args = parser.parse_args(argv)
     root = args.root
     files, enc = scan(root)
-    findings = run(files, git_changes(root)) + enc
+    gap_findings = gap_lint.run(root) if _is_git_worktree(root) else []
+    findings = run(files, git_changes(root), gap_findings=gap_findings) + enc
     findings += hooks_finding(root)
     findings += check_harness(read_harness_manifest(root))
     for f in sorted(findings):

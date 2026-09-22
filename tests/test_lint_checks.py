@@ -658,5 +658,30 @@ class LinksInsideCode(unittest.TestCase):
             self.assertNotRegex(result.stdout, r"(?m)^(ERROR|WARN) LINK ")
 
 
+class GapsWiredIntoLint(unittest.TestCase):
+    def test_scan_picks_up_the_gaps_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "gaps").mkdir()
+            (root / "gaps" / "AGENTS.md").write_text("# rules\n", encoding="utf-8")
+            (root / "gaps" / "KNOWLEDGE_GAP.md").write_text("# view\n", encoding="utf-8")
+            files, _ = lint.scan(root)
+            self.assertIn("gaps/AGENTS.md", files)
+            self.assertIn("gaps/KNOWLEDGE_GAP.md", files)
+
+    def test_gaps_agents_md_is_a_rules_file(self):
+        self.assertTrue(lint.is_rules_file("gaps/AGENTS.md"))
+
+    def test_the_generated_view_is_never_an_orphan(self):
+        files = {"index.md": "# index\n", "gaps/KNOWLEDGE_GAP.md": "# view\n"}
+        self.assertEqual(
+            [f for f in lint.check_orphans(files) if "gaps/" in f.path], [])
+
+    def test_gap_findings_are_folded_into_run(self):
+        finding = lint.Finding("ERROR", "GAP", "gaps/knowledge-gaps.jsonl", "boom")
+        out = lint.run({"index.md": "# index\n"}, [], gap_findings=[finding])
+        self.assertIn(finding, out)
+
+
 if __name__ == "__main__":
     unittest.main()
