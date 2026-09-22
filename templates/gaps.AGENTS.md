@@ -7,7 +7,7 @@ wiki learns what it is missing instead of forgetting every miss.
 |---|---|---|
 | `knowledge-gaps.jsonl` | The ledger. One JSON record per line. | **Append-only** — never edit, reorder or delete a line |
 | `KNOWLEDGE_GAP.md` | A generated, human-readable view | Regenerated wholesale; never hand-edit |
-| `gap-schema.json` | The ONLY definition of record keys | Change under a `schema:` commit |
+| `gap-schema.json` | The single definition of record keys | **MANAGED** — every `upgrade` re-delivers the library's default verbatim; a local edit is drift |
 
 ## Never write to the ledger by hand
 
@@ -57,10 +57,24 @@ The last record wins. A gap with no records after it is `opened`.
 There is no `status` field anywhere in the ledger, and adding one would be a schema
 change, not a record. `scripts/gap_ledger.py` implements this fold; nothing else may.
 
+## Widening the schema
+
+`gap-schema.json` is **MANAGED**, not seeded: every `wiki-harness upgrade` re-delivers the
+library's own default verbatim, and a plain hand-edit is reported as drift and refused. If
+this wiki genuinely needs a wider record shape (a new key, enum, or type), first run
+`upgrade --adopt-drift gaps/gap-schema.json`, then edit the file. That command deliberately
+**forks this file from the library**: this wiki's `gap-schema.json` will no longer be
+overwritten by future `upgrade` runs, and any schema improvement the library ships later has
+to be re-applied here by hand. Do this only when the wider shape is genuinely needed, and
+document why in the commit.
+
 ## Append-only is enforced, not requested
 
-`scripts/lint.py` blocks a commit when the committed content is not a byte prefix of the
-working file, and independently when the staged diff removes any line. A deleted line, a
-reordered line, a single edited byte, a truncation, and deleting the file to rewrite it
-are all rejected. If you need to correct a record, **append a correcting record** — that
-is what the event types are for.
+`scripts/lint.py` blocks a commit when the previously committed (HEAD) content is not a
+byte prefix of the STAGED content — what will actually land in the next commit, not
+merely what sits in the working file — and independently when the staged diff removes
+any line. The working
+tree is checked too, so tampering is caught even before it is staged. A deleted line, a
+reordered line, a single edited byte, a truncation, and deleting the file to rewrite it are
+all rejected, whether performed against the working file or staged directly. If you need to
+correct a record, **append a correcting record** — that is what the event types are for.
