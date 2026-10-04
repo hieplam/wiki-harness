@@ -2416,3 +2416,796 @@ git commit -m "fix(commit-msg): find the wiki from the script's own location" -m
 ```
 
 ---
+
+### Task 9: The HOOKS proof — lint passes only when the wiki's checks really run (G3, S3)
+
+Splits `hooks_finding` into an edge (`hooks_facts`) and a pure decision (`check_hooks`), adds
+the in-gate exemption, the standalone "hook files present and executable" rule, and the
+in-host proof of spec §5.3 including the five manager config files of ruling S3. Lands before
+the commit gate (Task 10) so an in-host fixture whose hooks point at `wiki/.githooks` can commit.
+
+**Files**
+- Modify: `scripts/lint.py` (`hooks_finding` → `HooksFacts`, `check_hooks`, `hooks_facts`, `hooks_finding`; `main`; module docstring)
+- Create: `tests/test_lint_hooks.py`
+- Modify: `tests/test_harness_e2e.py` (`HooksFindingPositivePath`: the fixture gains the two executable hook files — REFUTED in advance, Global Constraint 9)
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_lint_hooks.py`:
+
+```python
+"""lint's HOOKS finding: it passes only when the wiki's checks really run (G3, S3)."""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "scripts"))
+import wiki_fixtures as wf  # noqa: E402
+from lint import HooksFacts, check_hooks, hooks_finding  # noqa: E402
+
+SIDE_PRE = '"$(git rev-parse --show-toplevel)/wiki/.githooks/pre-commit" || exit 1\n'
+SIDE_MSG = '"$(git rev-parse --show-toplevel)/wiki/.githooks/commit-msg" "$1" || exit 1\n'
+
+
+def _facts(layout, **kw):
+    base = dict(layout=layout, wiki_rel="wiki", hooks_path=None, hooks_dir_is_wiki_hooks=False,
+                hook_texts={}, parent_hook_texts={}, manager_texts=[], repo_hooks_dir=None)
+    base.update(kw)
+    return HooksFacts(**base)
+
+
+def _exe(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _messages(findings):
+    return [f.message for f in findings if f.code == "HOOKS"]
+
+
+class Pure(unittest.TestCase):
+    def test_no_work_tree_and_inside_the_gate_say_nothing(self):
+        self.assertEqual(check_hooks(None, False), [])
+        self.assertEqual(check_hooks(_facts("in-host"), True), [])
+
+    def test_standalone_unset_keeps_the_1x_message(self):
+        self.assertEqual(_messages(check_hooks(_facts("standalone", wiki_rel="."), False)),
+                         ["commit hook not active - run: git config core.hooksPath .githooks"])
+
+    def test_standalone_with_a_missing_hook_file(self):
+        facts = _facts("standalone", wiki_rel=".", hooks_path=".githooks",
+                       hook_texts={"pre-commit": "x"})
+        self.assertEqual(_messages(check_hooks(facts, False)),
+                         ["core.hooksPath is .githooks but .githooks/commit-msg is missing or "
+                          "not executable - run: git checkout -- .githooks"])
+
+    def test_standalone_wired(self):
+        facts = _facts("standalone", wiki_rel=".", hooks_path=".githooks",
+                       hook_texts={"pre-commit": "x", "commit-msg": "x"})
+        self.assertEqual(check_hooks(facts, False), [])
+
+
+class InHost(unittest.TestCase):
+    def test_wired_by_init_is_proven(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_in_host_wiki(Path(tmp) / "host")
+            self.assertEqual(hooks_finding(root / "wiki"), [])
+
+    def test_unset_names_the_wiki_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_in_host_wiki(Path(tmp) / "host", wire=False)
+            self.assertEqual(_messages(hooks_finding(root / "wiki")),
+                             ["the wiki's pre-commit and commit-msg check(s) do not run on commits - "
+                              "run: git config core.hooksPath wiki/.githooks"])
+
+    def test_a_hooks_path_naming_a_missing_folder_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_in_host_wiki(Path(tmp) / "host")
+            wf.git(root, "config", "core.hooksPath", ".githooks")
+            self.assertEqual(len(_messages(hooks_finding(root / "wiki"))), 1)
+
+    def test_husky_hooks_that_call_the_wiki_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_in_host_wiki(Path(tmp) / "host")
+            _exe(root / ".husky" / "pre-commit", "#!/bin/sh\nnpm test\n" + SIDE_PRE)
+            self.assertEqual(len(_messages(hooks_finding(root / "wiki"))), 0)  # still wiki/.githooks
+            wf.git(root, "config", "core.hooksPath", ".husky")
+            self.assertEqual(_messages(hooks_finding(root / "wiki")),
+                             ["the wiki's commit-msg check(s) do not run on commits - add the line in "
+                              ".husky/commit-msg.wiki-harness to .husky/commit-msg"])
+            _exe(root / ".husky" / "commit-msg", "#!/bin/sh\n" + SIDE_MSG)
+            self.assertEqual(hooks_finding(root / "wiki"), [])
+
+    def test_husky_nine_stubs_read_through_to_the_editable_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_in_host_wiki(Path(tmp) / "host")
+            for hook, line in (("pre-commit", SIDE_PRE), ("commit-msg", SIDE_MSG)):
+                _exe(root / ".husky" / "_" / hook, '#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n')
+                (root / ".husky" / hook).write_text(line, encoding="utf-8")
+            wf.git(root, "config", "core.hooksPath", ".husky/_")
+            self.assertEqual(hooks_finding(root / "wiki"), [])
+
+    def test_manager_configs_prove_the_hooks(self):
+        for name in (".pre-commit-config.yaml", "lefthook.yml", "lefthook.yaml",
+                     ".lefthook.yml", ".lefthook.yaml"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = wf.build_in_host_wiki(Path(tmp) / "host", wire=False)
+                _exe(root / ".git" / "hooks" / "pre-commit", "#!/bin/sh\nexit 0\n")
+                self.assertEqual(len(_messages(hooks_finding(root / "wiki"))), 1)
+                (root / name).write_text("x:\n  run: wiki/.githooks/pre-commit\n"
+                                         "y:\n  run: wiki/.githooks/commit-msg {1}\n", encoding="utf-8")
+                self.assertEqual(hooks_finding(root / "wiki"), [])
+
+    def test_inside_the_gate_lint_does_not_ask(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_in_host_wiki(Path(tmp) / "host", wire=False)
+            env = wf.git_env()
+            env["WIKI_HARNESS_GATE"] = "pre-commit"
+            result = subprocess.run([sys.executable, "wiki/scripts/lint.py"], cwd=root,
+                                    capture_output=True, text=True, env=env, timeout=300)
+            self.assertNotIn("ERROR HOOKS", result.stdout)
+
+
+class StandaloneIntegration(unittest.TestCase):
+    def test_wired_then_a_hook_loses_its_executable_bit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_standalone_wiki(Path(tmp) / "consumer")
+            self.assertEqual(hooks_finding(root), [])
+            os.chmod(root / ".githooks" / "commit-msg", 0o644)
+            self.assertEqual(len(_messages(hooks_finding(root))), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_lint_hooks -q
+```
+
+Expected: `ImportError: cannot import name 'HooksFacts' from 'lint'`, exit 1.
+
+- [ ] **Step 3: Replace `hooks_finding` in `scripts/lint.py`** — add `import os` and
+  `from collections import namedtuple` is already imported; add the import below beside the
+  other `sys.path`-dependent imports, put `HooksFacts`, `STANDALONE_HOOKS_MESSAGE` and
+  `check_hooks` in the pure section (above `# ---- impure edges below this line ----`), and the
+  three edges below it where `hooks_finding` was:
+
+```python
+from repo_layout import (  # noqa: E402  (needs the sys.path line above)
+    GATE_ENV, HOOK_NAMES, MANAGER_CONFIG_FILES, STANDALONE, classify_layout, hooks_message,
+    side_files_dir, unproven_hooks, wiki_hooks_rel)
+```
+
+```python
+# hooks_facts()'s return value: what git will run on a commit, gathered once.
+HooksFacts = namedtuple(
+    "HooksFacts",
+    "layout wiki_rel hooks_path hooks_dir_is_wiki_hooks hook_texts parent_hook_texts "
+    "manager_texts repo_hooks_dir")
+
+STANDALONE_HOOKS_MESSAGE = "commit hook not active - run: git config core.hooksPath .githooks"
+
+
+def check_hooks(facts, in_gate):
+    """Pure. G3: HOOKS is an ERROR until the wiki's checks really run on commits; a config
+    string alone never satisfies it (spec 5.3). `facts` is None outside a git work tree.
+    `in_gate` is True when commit_gate.py runs this lint from the pre-commit hook -- the
+    running hook is the proof, so nothing is asked. A standalone wiki keeps the 1.x rule and
+    message, plus: the two hook files must exist and be executable."""
+    if facts is None or in_gate:
+        return []
+    if facts.layout == STANDALONE:
+        if facts.hooks_path != ".githooks":
+            return [Finding("ERROR", "HOOKS", ".githooks", STANDALONE_HOOKS_MESSAGE)]
+        missing = [hook for hook in HOOK_NAMES if hook not in facts.hook_texts]
+        if missing:
+            names = " and ".join(f".githooks/{hook}" for hook in missing)
+            verb = "is" if len(missing) == 1 else "are"
+            return [Finding("ERROR", "HOOKS", ".githooks",
+                            f"core.hooksPath is .githooks but {names} {verb} missing or not "
+                            "executable - run: git checkout -- .githooks")]
+        return []
+    missing = unproven_hooks(facts.wiki_rel, facts.hooks_dir_is_wiki_hooks, facts.hook_texts,
+                             facts.parent_hook_texts, facts.manager_texts)
+    if not missing:
+        return []
+    return [Finding("ERROR", "HOOKS", ".githooks",
+                    hooks_message(facts.wiki_rel, facts.repo_hooks_dir, missing))]
+```
+
+```python
+def _hook_texts(directory, require_executable=True):
+    """Impure edge. {hook: text} for each HOOK_NAMES file in `directory` that exists, is
+    executable when `require_executable`, and can be read; an unreadable hook proves nothing."""
+    texts = {}
+    for hook in HOOK_NAMES:
+        path = directory / hook
+        if not path.is_file() or (require_executable and not os.access(path, os.X_OK)):
+            continue
+        try:
+            texts[hook] = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+    return texts
+
+
+def hooks_facts(root):
+    """Impure edge. What git will run on a commit in the repository that holds `root`, or
+    None outside a git work tree (bare test fixtures, upgrade's scratch copy). Host git
+    config is deliberately NOT isolated here: the question is what git will actually run,
+    and the host's config is part of that answer (spec 5.3)."""
+    root = Path(root)
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                              text=True, timeout=SUBPROCESS_TIMEOUT)
+
+    if git("rev-parse", "--is-inside-work-tree").returncode != 0:
+        return None
+    top = Path(git("rev-parse", "--show-toplevel").stdout.strip()).resolve()
+    wiki = root.resolve()
+    layout = classify_layout(wiki, top)
+    hooks_path = git("config", "--get", "core.hooksPath").stdout.strip() or None
+    # --git-path honours core.hooksPath and prints a path relative to the -C directory.
+    hooks_dir = (root / git("rev-parse", "--git-path", "hooks").stdout.strip()).resolve()
+    hook_texts = _hook_texts(hooks_dir)
+    parent_texts = {}
+    if hooks_dir.name == "_":
+        parent_texts = {hook: text for hook, text in _hook_texts(hooks_dir.parent, False).items()
+                        if hook in hook_texts}
+    manager_texts = []
+    for name in MANAGER_CONFIG_FILES:
+        try:
+            manager_texts.append((top / name).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    wiki_rel = "." if layout == STANDALONE else wiki.relative_to(top).as_posix()
+    repo_hooks_dir = None
+    if (hooks_path is not None and hooks_dir.is_relative_to(top)
+            and not hooks_dir.is_relative_to(top / ".git")):
+        candidate = side_files_dir(hooks_dir.relative_to(top).as_posix())
+        if candidate != wiki_hooks_rel(wiki_rel):
+            repo_hooks_dir = candidate
+    return HooksFacts(layout, wiki_rel, hooks_path,
+                      hooks_dir == (wiki / ".githooks").resolve(), hook_texts, parent_texts,
+                      manager_texts, repo_hooks_dir)
+
+
+def hooks_finding(root, in_gate=False):
+    """Impure edge: hooks_facts() judged by the pure check_hooks()."""
+    return check_hooks(hooks_facts(root), in_gate)
+```
+
+In `main`, replace `findings += hooks_finding(root)` with:
+
+```python
+    # Set only by scripts/commit_gate.py when the pre-commit hook runs this lint.
+    in_gate = os.environ.get(GATE_ENV) == "pre-commit"
+    findings += hooks_finding(root, in_gate=in_gate)
+```
+
+`tests/test_harness_e2e.py` `HooksFindingPositivePath`: before the assertion, add
+
+```python
+            for hook in ("pre-commit", "commit-msg"):
+                path = root / ".githooks" / hook
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#!/bin/sh\n", encoding="utf-8")
+                path.chmod(0o755)
+```
+
+- [ ] **Step 4: Run the tests and the ratchet lines**
+
+```bash
+python3 -m unittest tests.test_lint_hooks tests.test_harness_e2e tests.test_lint_cli tests.test_harness_integrity -q
+python3 tools/e2e_in_host.py --only G3.1 --only G3.2 --only G3.3
+```
+
+Expected: `OK`; `TOTAL 3/3`, exit 0.
+
+#### Verify
+
+- **Goal:** G3 ("lint never passes because a config string matches"; both D4 cases readable) and
+  ruling S3 (the five manager config files).
+- **Red:** `python3 -m unittest tests.test_lint_hooks -q` → `ImportError: cannot import name 'HooksFacts' from 'lint'`, exit 1.
+- **Green:** `python3 -m unittest tests.test_lint_hooks tests.test_harness_e2e tests.test_lint_cli tests.test_harness_integrity -q` → `OK`, exit 0; `python3 tools/e2e_in_host.py --only G3.1 --only G3.2 --only G3.3` → `TOTAL 3/3`, exit 0.
+- **Stub check:** a `check_hooks` returning `[]` fails every unset/missing-folder test; one
+  comparing only the config string fails `test_a_hooks_path_naming_a_missing_folder_is_reported`
+  and `test_wired_then_a_hook_loses_its_executable_bit`.
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_lint_hooks -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/lint.py tests/test_lint_hooks.py tests/test_harness_e2e.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "fix(lint): report HOOKS until the wiki's checks really run on commits" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 9/26'
+```
+
+---
+
+### Task 10: The commit gate — `scripts/commit_gate.py` and hooks that find it (G2, K3, S1)
+
+**Files**
+- Create: `scripts/commit_gate.py`
+- Modify: `githooks/pre-commit`, `githooks/commit-msg` (keep mode 755)
+- Create: `tests/test_commit_gate.py`
+- Modify: `tests/test_lint_cli.py` (`PreCommitHook`: the two expected hook texts — REFUTED in advance)
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_commit_gate.py`:
+
+```python
+"""The commit gate: the wiki's rules judge exactly the commits that touch the wiki (K3, S1)."""
+from __future__ import annotations
+
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "scripts"))
+import wiki_fixtures as wf  # noqa: E402
+import commit_gate as cg  # noqa: E402
+
+PAGE = "---\ntitle: Widget tips\ntopics: [widgets]\n---\nTighten gently.\n"
+
+
+def _facts(standalone=False, staged=(), index_matches_head=False, head=()):
+    return cg.GitFacts(standalone, tuple(staged), index_matches_head, tuple(head))
+
+
+class Decision(unittest.TestCase):
+    def test_standalone_is_always_touched(self):
+        self.assertTrue(cg.wiki_is_touched(_facts(standalone=True)))
+
+    def test_a_staged_wiki_path_touches(self):
+        self.assertTrue(cg.wiki_is_touched(_facts(staged=["index.md"])))
+
+    def test_a_host_only_commit_does_not(self):
+        self.assertFalse(cg.wiki_is_touched(_facts(staged=[], index_matches_head=False, head=["x.md"])))
+
+    def test_a_reword_of_a_wiki_commit_does(self):
+        self.assertTrue(cg.wiki_is_touched(_facts(index_matches_head=True, head=["index.md"])))
+
+    def test_an_empty_commit_after_a_host_commit_does_not(self):
+        self.assertFalse(cg.wiki_is_touched(_facts(index_matches_head=True, head=[])))
+
+
+def _commit(root, message, *extra):
+    return wf.git(root, "commit", "-q", "-m", message, *extra)
+
+
+def _add_raw(root, rel):
+    (root / rel).write_text("raw v1\n", encoding="utf-8")
+    wf.git(root, "add", rel)
+    wf.git(root, "commit", "-q", "--no-verify", "-m", "chore: raw")
+
+
+class InHostThroughRealHooks(unittest.TestCase):
+    def test_the_rules_apply_to_wiki_commits_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_in_host_wiki(Path(tmp) / "host")
+            _add_raw(root, "wiki/sources/raw/a.txt")
+            (root / "wiki/sources/raw/a.txt").write_text("tampered\n", encoding="utf-8")
+            wf.git(root, "add", "wiki/sources/raw/a.txt")
+            raw = _commit(root, "lint: tamper")
+            self.assertNotEqual(raw.returncode, 0)
+            self.assertIn("ERROR RAW sources/raw/a.txt", raw.stdout + raw.stderr)
+            wf.git(root, "reset", "-q", "--hard", "HEAD")
+
+            (root / "wiki/wiki/widget-tips.md").write_text(PAGE, encoding="utf-8")
+            with (root / "wiki/index.md").open("a", encoding="utf-8") as handle:
+                handle.write("\n## Widgets\n- [Widget tips](./wiki/widget-tips.md)\n")
+            wf.git(root, "add", "wiki")
+            free = _commit(root, "add a page")
+            self.assertNotEqual(free.returncode, 0)
+            self.assertIn("commit-msg:", free.stdout + free.stderr)
+            self.assertEqual(_commit(root, "lint: add a page").returncode, 0)
+
+            reword = wf.git(root, "commit", "-q", "--amend", "-m", "reword it freely")
+            self.assertNotEqual(reword.returncode, 0)
+            self.assertIn("commit-msg:", reword.stdout + reword.stderr)
+
+            (root / "src/app.py").write_text("print('changed')\n", encoding="utf-8")
+            wf.git(root, "add", "src/app.py")
+            host = _commit(root, "Change the app, host style")
+            self.assertEqual(host.returncode, 0, host.stdout + host.stderr)
+            self.assertNotIn("lint:", host.stdout + host.stderr)
+
+    def test_gap_from_the_root_commits_only_the_gap_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_in_host_wiki(Path(tmp) / "host")
+            (root / "src/other.py").write_text("X = 1\n", encoding="utf-8")
+            wf.git(root, "add", "src/other.py")
+            add = subprocess.run(
+                [sys.executable, "wiki/scripts/gap.py", "add", "--service", "acme", "--session", "s",
+                 "--context", "c", "--prompt", "p", "--question", "q", "--wiki-answer", "none",
+                 "--answer-given", "none", "--topics", "widgets"],
+                cwd=root, capture_output=True, text=True, env=wf.git_env(), timeout=300)
+            self.assertEqual(add.returncode, 0, add.stdout + add.stderr)
+            self.assertIn("src/other.py", wf.git(root, "diff", "--cached", "--name-only").stdout)
+            changed = wf.git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").stdout.split()
+            self.assertEqual(sorted(changed), ["wiki/gaps/KNOWLEDGE_GAP.md", "wiki/gaps/knowledge-gaps.jsonl"])
+
+
+class StandaloneThroughRealHooks(unittest.TestCase):
+    def test_every_commit_is_still_judged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_standalone_wiki(Path(tmp) / "consumer")
+            _add_raw(root, "sources/raw/a.txt")
+            (root / "sources/raw/a.txt").write_text("tampered\n", encoding="utf-8")
+            wf.git(root, "add", "sources/raw/a.txt")
+            self.assertNotEqual(_commit(root, "lint: tamper").returncode, 0)
+            wf.git(root, "reset", "-q", "--hard", "HEAD")
+            self.assertNotEqual(_commit(root, "free form", "--allow-empty").returncode, 0)
+            empty = _commit(root, "lint: empty", "--allow-empty")
+            self.assertEqual(empty.returncode, 0)
+            self.assertIn("lint:", empty.stdout + empty.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_commit_gate -q
+```
+
+Expected: `ModuleNotFoundError: No module named 'commit_gate'`, exit 1.
+
+- [ ] **Step 3: Write `scripts/commit_gate.py`**
+
+```python
+#!/usr/bin/env python3
+"""The wiki's commit gate: git runs it through .githooks/pre-commit and .githooks/commit-msg.
+
+A commit is judged by the wiki's rules (lint, the commit convention) only when it touches the
+wiki folder (card call K3). A wiki that IS its repository -- the standalone layout every 1.x
+wiki has -- is touched by every commit, so its hooks behave exactly as before.
+
+Pure core: wiki_is_touched().
+Impure edges: _git(), git_facts(), run_check(), main().
+Python 3 stdlib only.
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from collections import namedtuple
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from repo_layout import GATE_ENV  # noqa: E402  (needs the sys.path line above)
+
+WIKI_ROOT = Path(__file__).resolve().parent.parent
+GIT_TIMEOUT = 30
+CHECK_TIMEOUT = 600
+USAGE = "usage: commit_gate.py pre-commit | commit-msg MESSAGE_FILE"
+
+# is_standalone: the wiki root is the repository's top level.
+# staged_wiki_paths: staged paths under the wiki folder (relative to it).
+# index_matches_head: nothing at all is staged against HEAD (a reword, or --allow-empty).
+# head_wiki_paths: the paths under the wiki folder that HEAD itself changed.
+GitFacts = namedtuple("GitFacts", "is_standalone staged_wiki_paths index_matches_head head_wiki_paths")
+
+
+def wiki_is_touched(facts):
+    """Pure. True when the commit being made touches the wiki folder."""
+    if facts.is_standalone:
+        return True
+    if facts.staged_wiki_paths:
+        return True
+    # A reword (`git commit --amend` with nothing newly staged) replaces HEAD with the same
+    # tree; when HEAD touched the wiki folder, the replacement does too (ruling S1). This
+    # over-checks `git commit --allow-empty` right after a wiki commit, by design.
+    return facts.index_matches_head and bool(facts.head_wiki_paths)
+
+
+# ---- impure edges below this line ----
+
+def _git(*args):
+    """Impure edge. Reads repository state only, in the environment git gave the hook (its
+    GIT_INDEX_FILE included), so a partial commit's temporary index is what is judged."""
+    return subprocess.run(["git", "-C", str(WIKI_ROOT), *args], capture_output=True,
+                          text=True, timeout=GIT_TIMEOUT)
+
+
+def git_facts():
+    """Impure edge. None when git cannot answer; the caller then runs the checks (fail closed)."""
+    try:
+        top = _git("rev-parse", "--show-toplevel")
+        staged = _git("diff", "--cached", "--name-only", "--no-renames", "--relative")
+        # No pathspec: the whole index against HEAD, even from a subdirectory.
+        whole = _git("diff", "--cached", "--quiet")
+        head = _git("diff-tree", "--no-commit-id", "--name-only", "-r", "--root",
+                    "--relative", "HEAD")
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if top.returncode != 0 or staged.returncode != 0 or whole.returncode not in (0, 1):
+        return None
+    return GitFacts(
+        is_standalone=Path(top.stdout.strip()).resolve() == WIKI_ROOT.resolve(),
+        staged_wiki_paths=tuple(staged.stdout.splitlines()),
+        index_matches_head=whole.returncode == 0,
+        # An unborn HEAD has no paths; diff-tree then fails and that is the answer.
+        head_wiki_paths=tuple(head.stdout.splitlines()) if head.returncode == 0 else (),
+    )
+
+
+def run_check(hook, args):
+    """Impure edge. Runs lint.py (pre-commit, with GATE_ENV set) or check_commit_msg.py."""
+    env = dict(os.environ)
+    if hook == "pre-commit":
+        env[GATE_ENV] = "pre-commit"
+        command = [sys.executable, str(WIKI_ROOT / "scripts" / "lint.py")]
+    else:
+        command = [sys.executable, str(WIKI_ROOT / "scripts" / "check_commit_msg.py"), *args]
+    try:
+        return subprocess.run(command, env=env, timeout=CHECK_TIMEOUT).returncode
+    except subprocess.TimeoutExpired:
+        print(f"{hook}: the wiki's check did not finish within {CHECK_TIMEOUT} s", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"{hook}: the wiki's check could not start: {exc}", file=sys.stderr)
+        return 1
+
+
+def main(argv):
+    if not argv or argv[0] not in ("pre-commit", "commit-msg") or \
+            (argv[0] == "pre-commit" and len(argv) != 1) or \
+            (argv[0] == "commit-msg" and len(argv) != 2):
+        print(USAGE, file=sys.stderr)
+        return 2
+    facts = git_facts()
+    if facts is not None and not wiki_is_touched(facts):
+        return 0
+    return run_check(argv[0], argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+```
+
+`githooks/pre-commit`:
+
+```sh
+#!/bin/sh
+# Runs the wiki's checks when this commit touches the wiki folder (scripts/commit_gate.py).
+exec python3 "$(dirname "$0")/../scripts/commit_gate.py" pre-commit
+```
+
+`githooks/commit-msg`:
+
+```sh
+#!/bin/sh
+# Checks the commit message when this commit touches the wiki folder (scripts/commit_gate.py).
+exec python3 "$(dirname "$0")/../scripts/commit_gate.py" commit-msg "$1"
+```
+
+`tests/test_lint_cli.py` `PreCommitHook`: the two `assertEqual(hook.read_text(…), …)` expected
+strings become exactly the two files above; the executable and existence assertions stay.
+
+- [ ] **Step 4: Run the tests and the ratchet lines**
+
+```bash
+python3 -m unittest tests.test_commit_gate tests.test_lint_cli tests.test_gap_cli tests.test_genericity -q
+python3 tools/e2e_in_host.py --only G2 --only G6.W1 --only G6.W3
+```
+
+Expected: `OK`; the ratchet prints `PASS` for G2.1–G2.8 and G6.W1, G6.W3 (on the hand-built
+shape, init still being 1.x): `TOTAL 10/10`, exit 0.
+
+#### Verify
+
+- **Goal:** G2 (raw edit refused in-host; wiki convention on every wiki-touching commit, a reword
+  included per S1; a commit touching nothing in `wiki/` never judged) and G9's "hooks behave the
+  same" for standalone.
+- **Red:** `python3 -m unittest tests.test_commit_gate -q` → `ModuleNotFoundError: No module named 'commit_gate'`, exit 1.
+- **Green:** `python3 -m unittest tests.test_commit_gate tests.test_lint_cli tests.test_gap_cli tests.test_genericity -q` → `OK`, exit 0; `python3 tools/e2e_in_host.py --only G2 --only G6.W1 --only G6.W3` → `TOTAL 10/10`, exit 0.
+- **Stub check:** a gate that always exits 0 lets the raw edit through (`test_the_rules_apply_to_wiki_commits_only` fails); one that always runs the checks refuses the host commit; one without the reword clause lets the amend through.
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_commit_gate -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/commit_gate.py githooks/pre-commit githooks/commit-msg tests/test_commit_gate.py tests/test_lint_cli.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "feat(hooks): judge only the commits that touch the wiki folder" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 10/26'
+```
+
+---
+
+### Task 11: The manifest's optional `bridge` section (D5)
+
+**Files**
+- Modify: `scripts/manifest.py` (`compute_manifest`, new pure `validated_entries`)
+- Modify: `scripts/lint.py` (`_manifest_shape_error` validates `bridge` when present)
+- Create: `tests/test_manifest_bridge.py`
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_manifest_bridge.py`:
+
+```python
+"""The manifest's optional bridge section: additive, validated, absent by default (D5)."""
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+from manifest import compute_manifest  # noqa: E402
+from lint import _manifest_shape_error  # noqa: E402
+
+FILES = {"scripts/lint.py": {"role": "managed", "sha256": "a" * 64}}
+KEYS_1X = ["library", "harness_version", "source_ref", "source_commit", "source_url",
+           "initialised_at", "vars", "files"]
+
+
+def _make(bridge=None):
+    kwargs = {} if bridge is None else {"bridge": bridge}
+    return compute_manifest(FILES, {}, "u", "2.0.0", "v2.0.0", "0" * 40,
+                            initialised_at="2026-10-05", **kwargs)
+
+
+class Compute(unittest.TestCase):
+    def test_without_a_bridge_the_shape_is_the_1x_shape(self):
+        self.assertEqual(list(_make()), KEYS_1X)
+
+    def test_the_bridge_is_the_last_key_sorted(self):
+        manifest = _make({"WIKI.md": {"role": "template", "sha256": "b" * 64},
+                          ".claude/skills/ask-wiki/SKILL.md": {"role": "template", "sha256": "c" * 64}})
+        self.assertEqual(list(manifest), KEYS_1X + ["bridge"])
+        self.assertEqual(list(manifest["bridge"]), [".claude/skills/ask-wiki/SKILL.md", "WIKI.md"])
+
+    def test_an_unknown_bridge_role_is_refused(self):
+        with self.assertRaises(ValueError):
+            _make({"WIKI.md": {"role": "seeded", "sha256": "b" * 64}})
+
+
+class Shape(unittest.TestCase):
+    def test_a_valid_bridge_passes(self):
+        self.assertIsNone(_manifest_shape_error(_make({"WIKI.md": {"role": "template", "sha256": "b" * 64}})))
+
+    def test_a_non_object_bridge(self):
+        manifest = _make()
+        manifest["bridge"] = []
+        self.assertEqual(_manifest_shape_error(manifest), "'bridge' is not an object")
+
+    def test_an_escaping_bridge_path(self):
+        manifest = _make({"../x.md": {"role": "template", "sha256": "b" * 64}})
+        self.assertEqual(_manifest_shape_error(manifest), "bridge entry '../x.md' escapes the repository root")
+
+    def test_a_bridge_path_inside_git(self):
+        manifest = _make({".git/hooks/pre-commit": {"role": "managed", "sha256": "b" * 64}})
+        self.assertEqual(_manifest_shape_error(manifest), "bridge entry '.git/hooks/pre-commit' is inside .git")
+
+    def test_files_messages_are_unchanged(self):
+        manifest = _make()
+        manifest["files"]["/abs"] = {"role": "managed", "sha256": "x"}
+        self.assertEqual(_manifest_shape_error(manifest), "files entry '/abs' escapes the wiki root")
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_manifest_bridge -q
+```
+
+Expected: `TypeError: compute_manifest() got an unexpected keyword argument 'bridge'` (errors in
+the bridge tests), exit 1.
+
+- [ ] **Step 3: Implement** — `scripts/manifest.py`:
+
+```python
+def validated_entries(hashes):
+    """Pure. {path: {"role", "sha256"}} sorted by path; raises ValueError on a role that is
+    not one of VALID_ROLES (persisting one would corrupt the ledger every later read uses)."""
+    entries = {}
+    for path in sorted(hashes):
+        entry = hashes[path]
+        role = entry["role"]
+        if not is_valid_role(role):
+            raise ValueError(f"unknown role {role!r} for path {path!r}")
+        entries[path] = {"role": role, "sha256": entry["sha256"]}
+    return entries
+
+
+def compute_manifest(hashes, vars, source_url, harness_version, source_ref,
+                     source_commit, *, initialised_at, bridge=None):
+    """Pure. (existing docstring) ... `bridge`, when given, is the same kind of map for the
+    files the harness writes OUTSIDE the wiki folder, keyed relative to the repository root
+    (card D5); it becomes the last key. Without it the manifest is exactly the 1.x shape."""
+    manifest = {
+        "library": LIBRARY,
+        "harness_version": harness_version,
+        "source_ref": source_ref,
+        "source_commit": source_commit,
+        "source_url": source_url,
+        "initialised_at": initialised_at,
+        "vars": dict(vars),
+        "files": validated_entries(hashes),
+    }
+    if bridge is not None:
+        manifest["bridge"] = validated_entries(bridge)
+    return manifest
+```
+
+`scripts/lint.py` `_manifest_shape_error`: after the `files` loop and before `return None`:
+
+```python
+    bridge = manifest.get("bridge")
+    if bridge is not None:
+        if not isinstance(bridge, dict):
+            return "'bridge' is not an object"
+        for path, entry in bridge.items():
+            if not isinstance(entry, dict) or "role" not in entry or "sha256" not in entry:
+                return f"bridge entry {path!r} is missing 'role' or 'sha256'"
+            role = entry["role"]
+            if not isinstance(role, str) or not is_valid_role(role):
+                return f"bridge entry {path!r} has unknown role {role!r}"
+            parts = PurePosixPath(path).parts
+            if PurePosixPath(path).is_absolute() or ".." in parts:
+                return f"bridge entry {path!r} escapes the repository root"
+            if parts and parts[0] == ".git":
+                return f"bridge entry {path!r} is inside .git"
+```
+
+- [ ] **Step 4: Run the tests**
+
+```bash
+python3 -m unittest tests.test_manifest_bridge tests.test_manifest tests.test_harness_integrity -q
+```
+
+Expected: `OK`.
+
+#### Verify
+
+- **Goal:** D5's "new optional manifest section (an additive data shape)" — and nothing else in
+  the manifest changes (G9: a manifest without a bridge is byte-for-byte the 1.x shape).
+- **Red:** `python3 -m unittest tests.test_manifest_bridge -q` → `TypeError: compute_manifest() got an unexpected keyword argument 'bridge'`, exit 1.
+- **Green:** `python3 -m unittest tests.test_manifest_bridge tests.test_manifest tests.test_harness_integrity -q` → `OK`, exit 0.
+- **Stub check:** accepting `bridge` without validating it fails
+  `test_an_unknown_bridge_role_is_refused` and the three shape tests; always writing the key fails
+  `test_without_a_bridge_the_shape_is_the_1x_shape`.
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_manifest_bridge -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/manifest.py scripts/lint.py tests/test_manifest_bridge.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "feat(manifest): add the optional bridge section" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 11/26'
+```
+
+---
