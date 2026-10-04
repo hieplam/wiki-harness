@@ -192,7 +192,10 @@ def _list_cell(value):
 
 def main(argv=None, root=None, now=None, env=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    root = Path(root) if root is not None else Path.cwd()
+    # The wiki root is the folder above this script, never the working
+    # directory: a caller may run `python3 wiki/scripts/gap.py` from a
+    # parent repository that holds the wiki as a subfolder.
+    root = Path(root) if root is not None else Path(__file__).resolve().parent.parent
     now = now or datetime.datetime.now(datetime.timezone.utc).astimezone()
 
     parser = argparse.ArgumentParser(

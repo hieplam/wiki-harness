@@ -261,5 +261,40 @@ class PiiIsAdvisoryOnly(CliCase):
         self.assertEqual(len(self.records()), 1)
 
 
+class RootIsTheWikiNotTheWorkingDirectory(unittest.TestCase):
+    """The shape a real caller types: an agent whose session is open in a
+    PARENT repository that holds the wiki as a subfolder runs
+    `python3 wiki/scripts/gap.py add ...` from that parent. gap.py must
+    find the wiki from its own location -- like lint.py's --root default --
+    not from the working directory, or it refuses with `gap schema is
+    missing` and the gap is never recorded."""
+
+    def test_add_from_a_parent_directory_writes_into_the_wiki(self):
+        init_py = ROOT / "init.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            target = parent / "wiki"
+            init_result = subprocess.run(
+                [sys.executable, str(init_py), str(target),
+                 "--wiki-title", "Sample Wiki", "--org-name", "Sample Org",
+                 "--content-language", "English", "--repo-name", "sample-wiki",
+                 "--non-interactive"],
+                capture_output=True, text=True, timeout=120)
+            self.assertEqual(init_result.returncode, 0, init_result.stderr)
+            _git(target, "config", "user.email", "t@example.invalid")
+            _git(target, "config", "user.name", "t")
+
+            add = subprocess.run(
+                [sys.executable, "wiki/scripts/gap.py"] + ADD_ARGS,
+                cwd=str(parent), capture_output=True, text=True,
+                env=_isolated_env(), timeout=60)
+
+            self.assertEqual(add.returncode, 0, add.stdout + add.stderr)
+            self.assertTrue((target / gap_ledger.LEDGER_PATH).is_file())
+            self.assertFalse((parent / "gaps").exists())
+            log = _git(target, "log", "--oneline").stdout
+            self.assertIn("gap(gap-", log)
+
+
 if __name__ == "__main__":
     unittest.main()
