@@ -1413,3 +1413,1006 @@ git commit -m "test(e2e): add the upgrade and release scenarios and record the i
 ```
 
 ---
+
+### Task 4: `scripts/repo_layout.py` — the layout, side-file and hooks decisions (pure)
+
+One new vendored module holding every decision about where a wiki sits in its repository
+(spec §3, §5.2, §5.3, §5.6). Nothing calls it yet.
+
+**Files**
+- Create: `scripts/repo_layout.py`
+- Create: `tests/test_repo_layout.py`
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_repo_layout.py`:
+
+```python
+"""repo_layout.py: pure decisions about where a wiki sits in its repository."""
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path, PurePosixPath
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import repo_layout as rl  # noqa: E402
+
+P = PurePosixPath
+
+
+class ClassifyLayout(unittest.TestCase):
+    def test_no_work_tree(self):
+        self.assertIsNone(rl.classify_layout(P("/r/wiki"), None))
+
+    def test_standalone(self):
+        self.assertEqual(rl.classify_layout(P("/r"), P("/r")), rl.STANDALONE)
+
+    def test_in_host(self):
+        self.assertEqual(rl.classify_layout(P("/r/wiki"), P("/r")), rl.IN_HOST)
+
+    def test_other_folders_are_subfolders(self):
+        self.assertEqual(rl.classify_layout(P("/r/docs/kb"), P("/r")), rl.SUBFOLDER)
+        self.assertEqual(rl.classify_layout(P("/r/kb"), P("/r")), rl.SUBFOLDER)
+        self.assertEqual(rl.classify_layout(P("/r/x/wiki"), P("/r")), rl.SUBFOLDER)
+
+
+class SidePath(unittest.TestCase):
+    def test_marker_goes_before_the_last_suffix(self):
+        self.assertEqual(rl.side_path(".claude/skills/ask-wiki/SKILL.md"),
+                         ".claude/skills/ask-wiki/SKILL.wiki-harness.md")
+        self.assertEqual(rl.side_path("WIKI.md"), "WIKI.wiki-harness.md")
+
+    def test_marker_is_appended_without_a_suffix(self):
+        self.assertEqual(rl.side_path(".husky/pre-commit"), ".husky/pre-commit.wiki-harness")
+        self.assertEqual(rl.side_path(".gitignore"), ".gitignore.wiki-harness")
+
+
+class PlanHooks(unittest.TestCase):
+    def test_nothing_configured_and_no_hooks_wires(self):
+        self.assertEqual(rl.plan_hooks(None, None, ()), rl.HooksPlan(rl.WIRE, None))
+
+    def test_already_pointing_at_the_wiki_hooks(self):
+        self.assertEqual(rl.plan_hooks("wiki/.githooks", "wiki/.githooks", ()),
+                         rl.HooksPlan(rl.ALREADY_WIRED, "wiki/.githooks"))
+
+    def test_a_repo_hooks_dir_gets_side_files(self):
+        self.assertEqual(rl.plan_hooks(".husky", ".husky", ()),
+                         rl.HooksPlan(rl.SIDE_FILES, ".husky"))
+
+    def test_husky_nine_side_files_go_beside_the_editable_hook(self):
+        self.assertEqual(rl.plan_hooks(".husky/_", ".husky/_", ()),
+                         rl.HooksPlan(rl.SIDE_FILES, ".husky"))
+
+    def test_hooks_in_the_git_dir_are_print_only(self):
+        self.assertEqual(rl.plan_hooks(None, None, ("pre-commit",)),
+                         rl.HooksPlan(rl.PRINT_ONLY, None))
+
+    def test_a_hooks_path_outside_the_work_tree_is_print_only(self):
+        self.assertEqual(rl.plan_hooks("/home/me/hooks", None, ()),
+                         rl.HooksPlan(rl.PRINT_ONLY, None))
+
+
+class UnprovenHooks(unittest.TestCase):
+    def test_the_wiki_hooks_dir_proves_both(self):
+        texts = {"pre-commit": "x", "commit-msg": "x"}
+        self.assertEqual(rl.unproven_hooks("wiki", True, texts, {}, []), [])
+
+    def test_a_merged_side_line_proves_its_hook(self):
+        texts = {"pre-commit": '#!/bin/sh\n"$(git rev-parse --show-toplevel)/wiki/.githooks/pre-commit" || exit 1\n'}
+        self.assertEqual(rl.unproven_hooks("wiki", False, texts, {}, []), ["commit-msg"])
+
+    def test_a_comment_proves_nothing(self):
+        texts = {"pre-commit": "# note: wiki/.githooks/pre-commit\n",
+                 "commit-msg": "  # wiki/.githooks/commit-msg\n"}
+        self.assertEqual(rl.unproven_hooks("wiki", False, texts, {}, []),
+                         ["pre-commit", "commit-msg"])
+
+    def test_calling_the_scripts_directly_proves_them(self):
+        texts = {"pre-commit": 'python3 "$root/wiki/scripts/lint.py" || exit 1\n',
+                 "commit-msg": 'exec python3 "$root/wiki/scripts/check_commit_msg.py" --root x "$1"\n'}
+        self.assertEqual(rl.unproven_hooks("wiki", False, texts, {}, []), [])
+
+    def test_the_gate_script_alone_proves_neither(self):
+        texts = {"pre-commit": "python3 wiki/scripts/commit_gate.py pre-commit\n"}
+        self.assertEqual(rl.unproven_hooks("wiki", False, texts, {}, []),
+                         ["pre-commit", "commit-msg"])
+
+    def test_husky_parent_hook_counts(self):
+        parent = {"pre-commit": "wiki/.githooks/pre-commit\n", "commit-msg": "wiki/.githooks/commit-msg \"$1\"\n"}
+        self.assertEqual(rl.unproven_hooks("wiki", False, {"pre-commit": ". h", "commit-msg": ". h"},
+                                           parent, []), [])
+
+    def test_a_manager_config_counts(self):
+        config = "      - id: w\n        entry: wiki/.githooks/pre-commit\n        entry: wiki/.githooks/commit-msg\n"
+        self.assertEqual(rl.unproven_hooks("wiki", False, {}, {}, [config]), [])
+
+    def test_a_commented_manager_line_counts_for_nothing(self):
+        config = "# entry: wiki/.githooks/pre-commit\n"
+        self.assertEqual(rl.unproven_hooks("wiki", False, {}, {}, [config]),
+                         ["pre-commit", "commit-msg"])
+
+
+class Messages(unittest.TestCase):
+    def test_without_a_repo_hooks_dir_the_fix_is_the_config(self):
+        self.assertEqual(
+            rl.hooks_message("wiki", None, ["pre-commit", "commit-msg"]),
+            "the wiki's pre-commit and commit-msg check(s) do not run on commits - "
+            "run: git config core.hooksPath wiki/.githooks")
+
+    def test_with_a_repo_hooks_dir_the_fix_is_the_merge(self):
+        self.assertEqual(
+            rl.hooks_message("wiki", ".husky", ["pre-commit"]),
+            "the wiki's pre-commit check(s) do not run on commits - "
+            "add the line in .husky/pre-commit.wiki-harness to .husky/pre-commit")
+
+    def test_the_link_line_carries_the_token(self):
+        self.assertIn(rl.BRIDGE_LINK_TOKEN, rl.BRIDGE_LINK_LINE)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_repo_layout -q
+```
+
+Expected: `ModuleNotFoundError: No module named 'repo_layout'`, exit 1.
+
+- [ ] **Step 3: Write `scripts/repo_layout.py`**
+
+```python
+#!/usr/bin/env python3
+"""Where a wiki sits in its git repository, and what that means for its commit hooks.
+
+A wiki folder is in one of three layouts (classify_layout): it IS the repository
+("standalone" -- every 1.x wiki), it is the repository's top-level `wiki/` folder
+("in-host" -- what init produces since 2.0), or it is some other folder of a repository
+("subfolder" -- hand-made setups only).
+
+Pure: every function here takes already-gathered data and returns a value; nothing
+reads a file, runs git or reads the environment. lint.py, commit_gate.py, init.py and
+upgrade.py gather the facts at their own edges and ask these functions what to do.
+Pure core: classify_layout(), side_path(), side_files_dir(), wiki_hooks_rel(),
+plan_hooks(), proof_tokens(), calls_any(), unproven_hooks(), hooks_message().
+Impure edges: none.
+
+Python 3 stdlib only.
+"""
+from __future__ import annotations
+
+from collections import namedtuple
+from pathlib import PurePosixPath
+
+WIKI_FOLDER = "wiki"
+SIDE_MARKER = "wiki-harness"
+HOOK_NAMES = ("pre-commit", "commit-msg")
+# Set by commit_gate.py when it runs lint.py: the pre-commit gate is running, which
+# proves the hooks are wired, so lint does not ask (spec 5.3).
+GATE_ENV = "WIKI_HARNESS_GATE"
+BRIDGE_LINK_TOKEN = "@WIKI.md"
+BRIDGE_LINK_LINE = ("Wiki: before you answer a question about this project's domain or "
+                    "change anything under `wiki/`, read @WIKI.md.")
+# Hook managers whose config, at the repository root, may run the wiki's hooks (ruling S3).
+MANAGER_CONFIG_FILES = (".pre-commit-config.yaml", "lefthook.yml", "lefthook.yaml",
+                        ".lefthook.yml", ".lefthook.yaml")
+
+STANDALONE = "standalone"
+IN_HOST = "in-host"
+SUBFOLDER = "subfolder"
+
+WIRE = "wire"                     # set core.hooksPath to the wiki's own .githooks
+SIDE_FILES = "side-files"         # write <dir>/<hook>.wiki-harness beside the repo's hooks
+ALREADY_WIRED = "already-wired"   # core.hooksPath already names the wiki's .githooks
+PRINT_ONLY = "print-only"         # the repo's hooks live outside its work tree: write nothing
+HooksPlan = namedtuple("HooksPlan", "action hooks_dir")
+
+
+def classify_layout(wiki_root, top_level):
+    """Pure. `wiki_root` and `top_level` are resolved absolute paths; `top_level` is None
+    when the wiki is not inside a git work tree (then the answer is None)."""
+    if top_level is None:
+        return None
+    if wiki_root == top_level:
+        return STANDALONE
+    if wiki_root.parent == top_level and wiki_root.name == WIKI_FOLDER:
+        return IN_HOST
+    return SUBFOLDER
+
+
+def side_path(path):
+    """Pure. The D4 side-file name for a repo-relative POSIX path: the marker goes before
+    the last suffix (`SKILL.md` -> `SKILL.wiki-harness.md`), or at the end when there is
+    none (`pre-commit` -> `pre-commit.wiki-harness`)."""
+    p = PurePosixPath(path)
+    if p.suffix:
+        return str(p.with_name(f"{p.stem}.{SIDE_MARKER}{p.suffix}"))
+    return str(p.with_name(f"{p.name}.{SIDE_MARKER}"))
+
+
+def side_files_dir(hooks_dir_rel):
+    """Pure. Where the side files go for a repo-relative hooks dir. Husky 9 points
+    core.hooksPath at its generated `.husky/_` stubs (ignored by git); the hook a person
+    edits is the same-named file one level up, so the side files go there."""
+    p = PurePosixPath(hooks_dir_rel)
+    return str(p.parent) if p.name == "_" else str(p)
+
+
+def wiki_hooks_rel(wiki_rel):
+    """Pure. The wiki's own hooks folder, relative to the repository top level."""
+    return f"{wiki_rel}/.githooks"
+
+
+def plan_hooks(configured_hooks_path, configured_dir_rel, default_dir_hooks, wiki_rel=WIKI_FOLDER):
+    """Pure. D4 (spec 5.2). `configured_hooks_path` is the repo's own core.hooksPath value
+    or None when unset; `configured_dir_rel` is that value resolved against the top level
+    and expressed relative to it, or None when it lies outside the work tree or inside
+    .git; `default_dir_hooks` names the HOOK_NAMES files present in $GIT_DIR/hooks."""
+    if configured_hooks_path is None and not default_dir_hooks:
+        return HooksPlan(WIRE, None)
+    if configured_hooks_path is not None and configured_dir_rel == wiki_hooks_rel(wiki_rel):
+        return HooksPlan(ALREADY_WIRED, configured_dir_rel)
+    if configured_hooks_path is not None and configured_dir_rel is not None:
+        return HooksPlan(SIDE_FILES, side_files_dir(configured_dir_rel))
+    return HooksPlan(PRINT_ONLY, None)
+
+
+def proof_tokens(wiki_rel, hook):
+    """Pure. Strings whose presence on a non-comment line proves `hook` runs the wiki's
+    check. commit_gate.py is deliberately not one: one line naming it could be either
+    hook, and proving both from it would under-check."""
+    direct = "lint.py" if hook == "pre-commit" else "check_commit_msg.py"
+    return (f"{wiki_rel}/.githooks/{hook}", f"{wiki_rel}/scripts/{direct}")
+
+
+def calls_any(text, tokens):
+    """Pure. True when a line of `text` that is not a `#` comment contains a token."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if any(token in stripped for token in tokens):
+            return True
+    return False
+
+
+def unproven_hooks(wiki_rel, hooks_dir_is_wiki_hooks, hook_texts, parent_hook_texts, manager_texts):
+    """Pure. G3: the HOOK_NAMES not proven to run the wiki's checks (spec 5.3).
+    `hook_texts`: {hook: text} for each hook file in the effective hooks dir that exists
+    and is executable; `parent_hook_texts`: the same-named files one level up when that
+    dir is husky's `_`; `manager_texts`: the texts of the MANAGER_CONFIG_FILES present at
+    the repository root."""
+    missing = []
+    for hook in HOOK_NAMES:
+        if hooks_dir_is_wiki_hooks and hook in hook_texts:
+            continue
+        tokens = proof_tokens(wiki_rel, hook)
+        texts = [hook_texts.get(hook), parent_hook_texts.get(hook), *manager_texts]
+        if any(text is not None and calls_any(text, tokens) for text in texts):
+            continue
+        missing.append(hook)
+    return missing
+
+
+def hooks_message(wiki_rel, repo_hooks_dir, missing):
+    """Pure. The HOOKS finding text for an in-host or subfolder wiki. `repo_hooks_dir` is
+    the repo's own hooks dir (relative to the top level) when it has one inside the work
+    tree; then the fix is the merge, never the config, which would switch those hooks off."""
+    names = " and ".join(missing)
+    if repo_hooks_dir is None:
+        fix = f"run: git config core.hooksPath {wiki_hooks_rel(wiki_rel)}"
+    else:
+        fix = ", ".join(f"add the line in {repo_hooks_dir}/{hook}.{SIDE_MARKER} to "
+                        f"{repo_hooks_dir}/{hook}" for hook in missing)
+    return f"the wiki's {names} check(s) do not run on commits - {fix}"
+```
+
+- [ ] **Step 4: Run the tests**
+
+```bash
+python3 -m unittest tests.test_repo_layout tests.test_genericity tests.test_build_release -q
+```
+
+Expected: `OK` (the genericity sweep and the payload test both cover the new `scripts/*.py`).
+
+#### Verify
+
+- **Goal:** the decisions behind G3 (hooks proof, S3 manager configs), D4 (`plan_hooks`), K11
+  (`side_path`) and the layout model (spec §3) exist as tested pure functions.
+- **Red:** `python3 -m unittest tests.test_repo_layout -q` → `ModuleNotFoundError: No module named 'repo_layout'`, exit 1.
+- **Green:** `python3 -m unittest tests.test_repo_layout tests.test_genericity tests.test_build_release -q` → `OK`, exit 0.
+- **Stub check:** a `classify_layout` that always returns `"standalone"`, an `unproven_hooks`
+  that returns `[]`, or a `side_path` that returns its input each fail named tests above
+  (`test_in_host`, `test_a_comment_proves_nothing`, `test_marker_goes_before_the_last_suffix`).
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_repo_layout -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/repo_layout.py tests/test_repo_layout.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "feat(scripts): add repo_layout, the pure layout and hooks decisions" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 4/26'
+```
+
+---
+
+### Task 5: `init.scaffold_wiki` and the test fixtures that build wikis as repositories hold them
+
+Extracts init's wiki-writing steps into one function (no behaviour change), adds
+`tests/wiki_fixtures.py`, and moves every test that needs a standalone wiki off `init.py`
+before Task 13 changes what `init` produces. Assertions in the moved tests do not change
+(G9 Verify).
+
+**Files**
+- Modify: `init.py` (add `scaffold_wiki`; `main` calls it for steps 4–10)
+- Create: `tests/wiki_fixtures.py`
+- Create: `tests/test_wiki_fixtures.py`
+- Modify: `tests/test_upgrade.py` (`_run_init` body only, and one import)
+- Modify: `tests/test_gap_cli.py` (`test_add_from_a_parent_directory_writes_into_the_wiki`: the fixture lines only)
+- Modify: `tests/test_lint_checks.py` (`test_markdown_link_in_a_recorded_question_does_not_block_lint`: the fixture lines only)
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_wiki_fixtures.py`:
+
+```python
+"""The fixtures that build wikis the way repositories hold them (tests/wiki_fixtures.py)."""
+from __future__ import annotations
+
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import wiki_fixtures as wf  # noqa: E402
+
+
+class StandaloneFixture(unittest.TestCase):
+    def test_a_1x_consumer_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_standalone_wiki(Path(tmp) / "consumer")
+            self.assertEqual(wf.git(root, "config", "--get", "core.hooksPath").stdout.strip(), ".githooks")
+            top = Path(wf.git(root, "rev-parse", "--show-toplevel").stdout.strip()).resolve()
+            self.assertEqual(top, root.resolve())
+            self.assertTrue((root / ".wiki-harness-manifest.json").is_file())
+            self.assertIn("chore: scaffold from wiki-harness v",
+                          wf.git(root, "log", "-1", "--format=%s").stdout)
+            lint = subprocess.run([sys.executable, "scripts/lint.py"], cwd=root,
+                                  capture_output=True, text=True, env=wf.git_env(), timeout=300)
+            self.assertEqual(lint.returncode, 0, lint.stdout)
+
+
+class InHostFixture(unittest.TestCase):
+    def test_the_wiki_is_a_folder_of_the_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_in_host_wiki(Path(tmp) / "host")
+            self.assertTrue((root / "wiki" / ".wiki-harness-manifest.json").is_file())
+            self.assertFalse((root / "wiki" / ".git").exists())
+            self.assertTrue((root / "src" / "app.py").is_file())
+            self.assertEqual(wf.git(root, "config", "--get", "core.hooksPath").stdout.strip(),
+                             "wiki/.githooks")
+            self.assertEqual(wf.git(root, "status", "--porcelain").stdout, "")
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_wiki_fixtures -q
+```
+
+Expected: `ModuleNotFoundError: No module named 'wiki_fixtures'`, exit 1.
+
+- [ ] **Step 3: Add `scaffold_wiki` to `init.py`** — above `read_version`, and make `main` call
+  it in place of its seven step-4-to-10 lines:
+
+```python
+def scaffold_wiki(library_root, wiki_root, values, origins):
+    """Steps 4-10: write every wiki-folder file, then its manifest, into `wiki_root` (which
+    must exist). Returns (scripts_paths, hooks_paths). The repository around the wiki,
+    its config and its commit belong to the caller."""
+    create_gitkeeps(wiki_root)                                       # step 4
+    scripts_paths = copy_scripts(library_root, wiki_root)             # step 5
+    hooks_paths = copy_hooks(library_root, wiki_root)                 # step 5
+    render_root_templates(library_root, wiki_root, values)            # step 6
+    copy_managed_agents(library_root, wiki_root)                      # step 7
+    seed_starters(library_root, wiki_root, origins)                   # step 8
+    seed_claude_stubs(library_root, wiki_root)                        # step 9
+    write_manifest_file(library_root, wiki_root, values,              # step 10
+                        scripts_paths, hooks_paths)
+    return scripts_paths, hooks_paths
+```
+
+In `main`, steps 4–10 become `scaffold_wiki(library_root, target, values, origins)`. Add
+`scaffold_wiki()` to the module docstring's list of impure edges.
+
+- [ ] **Step 4: Write `tests/wiki_fixtures.py`**
+
+```python
+"""Test fixtures: wikis built the way real repositories hold them.
+
+build_standalone_wiki() reproduces a 1.x consumer's shape -- the wiki root IS the
+repository, core.hooksPath .githooks, the placeholder identity 1.x init wrote into the
+repo config, one scaffold commit made through the wiki's own hooks. Since 2.0 init never
+produces this shape (card D3), but every 1.x wiki still has it (D6), so the lint, upgrade
+and hook tests that need it build it here instead of running init.py.
+
+build_in_host_wiki() builds the 2.0 layout for script-level tests: a repository with code,
+the wiki folder at wiki/, core.hooksPath wiki/.githooks, one commit.
+
+Both write the wiki through the library's own init.scaffold_wiki(), so the wiki's files
+are exactly what init writes. Impure by nature; every git call isolates host config and
+is bounded.
+"""
+from __future__ import annotations
+
+import importlib.util
+import os
+import subprocess
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+VALUES = {"wiki_title": "Sample Wiki", "org_name": "Sample Org",
+          "content_language": "English", "repo_name": "sample-wiki"}
+IDENTITY = {"GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}
+
+
+def git_env(identity=True):
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    if identity:
+        env.update(IDENTITY)
+    return env
+
+
+def git(root, *args, identity=True):
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                          env=git_env(identity), timeout=120)
+
+
+def load_init(library_root=ROOT):
+    path = Path(library_root) / "init.py"
+    spec = importlib.util.spec_from_file_location(f"wiki_fixture_init_{abs(hash(str(path)))}", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def build_standalone_wiki(target, library_root=ROOT, values=None, origins=("session",)):
+    """A 1.x consumer's standalone wiki at `target`."""
+    target = Path(target)
+    library_root = Path(library_root)
+    init_mod = load_init(library_root)
+    values = init_mod.apply_defaults(dict(values or VALUES), target.resolve().name)
+    target.mkdir(parents=True, exist_ok=True)
+    git(target, "init", "-q")
+    git(target, "config", "user.email", "init@wiki-harness.invalid")
+    git(target, "config", "user.name", "wiki-harness init")
+    init_mod.scaffold_wiki(library_root, target, values, list(origins))
+    git(target, "config", "core.hooksPath", ".githooks")
+    git(target, "add", "-A")
+    subject = f"chore: scaffold from wiki-harness v{init_mod.read_version(library_root)}"
+    done = git(target, "commit", "-q", "-m", subject, identity=False)
+    if done.returncode != 0:
+        raise RuntimeError(f"standalone fixture commit failed: {done.stdout}{done.stderr}")
+    return target
+
+
+def build_in_host_wiki(root, library_root=ROOT, values=None, wire=True):
+    """A repository with code and the wiki folder at wiki/."""
+    root = Path(root)
+    library_root = Path(library_root)
+    root.mkdir(parents=True, exist_ok=True)
+    git(root, "init", "-q")
+    (root / "src").mkdir(exist_ok=True)
+    (root / "src" / "app.py").write_text('print("app")\n', encoding="utf-8")
+    git(root, "add", "src/app.py")
+    git(root, "commit", "-q", "-m", "feat: host code")
+    init_mod = load_init(library_root)
+    values = init_mod.apply_defaults(dict(values or VALUES), root.resolve().name)
+    (root / "wiki").mkdir()
+    init_mod.scaffold_wiki(library_root, root / "wiki", values, ["session"])
+    if wire:
+        git(root, "config", "core.hooksPath", "wiki/.githooks")
+    git(root, "add", "wiki")
+    done = git(root, "commit", "-q", "--no-verify", "-m", "chore: scaffold the wiki folder", "--", "wiki")
+    if done.returncode != 0:
+        raise RuntimeError(f"in-host fixture commit failed: {done.stdout}{done.stderr}")
+    return root
+```
+
+- [ ] **Step 5: Move the standalone fixtures off `init.py`**
+
+`tests/test_upgrade.py`: add `sys.path.insert(0, str(Path(__file__).resolve().parent))` and
+`import wiki_fixtures  # noqa: E402` beside the existing imports, and replace the body of
+`_run_init` (and only its body) with:
+
+```python
+def _run_init(library_root, target, answers=INIT_ANSWERS):
+    """A standalone wiki exactly as a 1.x consumer has it (tests/wiki_fixtures.py); since
+    2.0, init.py itself only produces the in-host layout."""
+    try:
+        wiki_fixtures.build_standalone_wiki(target, library_root, answers)
+    except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
+        return subprocess.CompletedProcess([], 1, "", str(exc))
+    return subprocess.CompletedProcess([], 0, "", "")
+```
+
+`tests/test_gap_cli.py` `test_add_from_a_parent_directory_writes_into_the_wiki` and
+`tests/test_lint_checks.py` `test_markdown_link_in_a_recorded_question_does_not_block_lint`:
+replace the `init_result = subprocess.run([... init_py ...])` statement and its
+`assertEqual(init_result.returncode, 0, …)` line with
+`wiki_fixtures.build_standalone_wiki(target)` (plus the same two import lines). Every other line
+of both tests stays as it is.
+
+- [ ] **Step 6: Run the tests** (the `test_upgrade` run is long on a slow machine; run it in the
+  background and wait)
+
+```bash
+python3 -m unittest tests.test_wiki_fixtures tests.test_gap_cli tests.test_lint_checks tests.test_init -q
+python3 -m unittest tests.test_upgrade -q
+```
+
+Expected: both print `OK`.
+
+#### Verify
+
+- **Goal:** G9's precondition — every lint/upgrade/hook test that needs a standalone wiki gets
+  the 1.x consumer's shape from a fixture, with unchanged assertions, before `init` changes
+  (card "Known environment facts": "a test that needs a standalone wiki must build it the way a
+  real 1.x consumer has it").
+- **Red:** `python3 -m unittest tests.test_wiki_fixtures -q` → `ModuleNotFoundError: No module named 'wiki_fixtures'`, exit 1.
+- **Green:** `python3 -m unittest tests.test_wiki_fixtures tests.test_gap_cli tests.test_lint_checks tests.test_init -q` → `OK`, exit 0; `python3 -m unittest tests.test_upgrade -q` → `OK`, exit 0; `git diff main -- tests/test_upgrade.py` touches only `_run_init` and the imports.
+- **Stub check:** a `build_standalone_wiki` that skipped `scaffold_wiki` leaves no manifest and
+  fails `test_a_1x_consumer_shape`; one that skipped the hooks config fails its
+  `core.hooksPath` assertion; `test_upgrade`'s 58 tests exercise it for real.
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_wiki_fixtures tests.test_gap_cli -q
+```
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add init.py tests/wiki_fixtures.py tests/test_wiki_fixtures.py tests/test_upgrade.py tests/test_gap_cli.py tests/test_lint_checks.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "test(fixtures): build standalone and in-host wikis without init.py" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 5/26'
+```
+
+---
+
+### Task 6: Raw immutability in-host — `git diff --relative`
+
+Fixes spec §1.2 (the card's Blocker). Standalone output is unchanged: `--relative` from the top
+level is the identity.
+
+**Files**
+- Modify: `scripts/lint.py:490-492` (`git_changes`)
+- Create: `tests/test_in_host_raw.py`
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_in_host_raw.py`:
+
+```python
+"""RAW in the in-host layout, with the standalone control (spec 1.2)."""
+from __future__ import annotations
+
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "scripts"))
+import wiki_fixtures as wf  # noqa: E402
+from lint import check_raw_immutability, git_changes  # noqa: E402
+
+
+def _add_raw(repo, rel):
+    path = Path(repo) / rel
+    path.write_text("raw v1\n", encoding="utf-8")
+    wf.git(repo, "add", rel)
+    wf.git(repo, "commit", "-q", "--no-verify", "-m", "chore: raw")
+
+
+class InHostRaw(unittest.TestCase):
+    def test_a_staged_edit_is_seen_wiki_relative_and_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_in_host_wiki(Path(tmp) / "host")
+            _add_raw(root, "wiki/sources/raw/a.txt")
+            (root / "wiki/sources/raw/a.txt").write_text("raw v2\n", encoding="utf-8")
+            wf.git(root, "add", "wiki/sources/raw/a.txt")
+            changes = git_changes(root / "wiki")
+            self.assertEqual(changes, [("M", "sources/raw/a.txt")])
+            self.assertEqual([f.code for f in check_raw_immutability(changes)], ["RAW"])
+
+    def test_moving_a_raw_file_out_of_the_wiki_is_a_delete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_in_host_wiki(Path(tmp) / "host")
+            _add_raw(root, "wiki/sources/raw/a.txt")
+            wf.git(root, "mv", "wiki/sources/raw/a.txt", "src/a.txt")
+            self.assertEqual(git_changes(root / "wiki"), [("D", "sources/raw/a.txt")])
+
+    def test_lint_from_the_repo_root_reports_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_in_host_wiki(Path(tmp) / "host")
+            _add_raw(root, "wiki/sources/raw/a.txt")
+            (root / "wiki/sources/raw/a.txt").write_text("raw v2\n", encoding="utf-8")
+            wf.git(root, "add", "wiki/sources/raw/a.txt")
+            result = subprocess.run([sys.executable, "wiki/scripts/lint.py"], cwd=root,
+                                    capture_output=True, text=True, env=wf.git_env(), timeout=300)
+            self.assertIn("ERROR RAW sources/raw/a.txt: raw source changed (git status M)", result.stdout)
+
+
+class StandaloneControl(unittest.TestCase):
+    def test_the_standalone_report_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_standalone_wiki(Path(tmp) / "consumer")
+            _add_raw(root, "sources/raw/a.txt")
+            (root / "sources/raw/a.txt").write_text("raw v2\n", encoding="utf-8")
+            wf.git(root, "add", "sources/raw/a.txt")
+            self.assertEqual(git_changes(root), [("M", "sources/raw/a.txt")])
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_in_host_raw -q
+```
+
+Expected: 3 failures, e.g. `[('M', 'wiki/sources/raw/a.txt')] != [('M', 'sources/raw/a.txt')]`;
+`StandaloneControl` passes. Exit 1.
+
+- [ ] **Step 3: Change `git_changes`** — the argv gains `--relative`, and the docstring says why:
+
+```python
+    result = subprocess.run(
+        ["git", "-C", str(root), "diff", "--cached", "--name-status", "--relative"],
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT)
+```
+
+Docstring addition: "`--relative` makes the paths relative to the wiki root and drops changes
+outside it. Without it git prints top-level-relative paths, and in a repository that keeps the
+wiki in a folder every `sources/raw/` change read as `wiki/sources/raw/…` and slipped past the
+check (#46 7a)."
+
+- [ ] **Step 4: Run the tests**
+
+```bash
+python3 -m unittest tests.test_in_host_raw tests.test_harness_e2e tests.test_lint_cli -q
+python3 tools/e2e_in_host.py --only G2.1 --only G6.W1
+```
+
+Expected: `OK`; the ratchet lines stay FAIL until the gate (Task 10) lets a commit reach lint —
+this task's proof is the unit test.
+
+#### Verify
+
+- **Goal:** G2 ("a staged edit, delete or rename of an existing raw file is refused" in-host) and
+  H5 (the standalone RAW finding fires in-host on the equivalent input).
+- **Red:** `python3 -m unittest tests.test_in_host_raw -q` → `FAILED (failures=3)`, first diff `[('M', 'wiki/sources/raw/a.txt')] != [('M', 'sources/raw/a.txt')]`.
+- **Green:** `python3 -m unittest tests.test_in_host_raw tests.test_harness_e2e tests.test_lint_cli -q` → `OK`, exit 0.
+- **Stub check:** without `--relative` the in-host tests fail exactly as in Red; dropping RAW
+  findings would fail `test_lint_from_the_repo_root_reports_it`.
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_in_host_raw -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/lint.py tests/test_in_host_raw.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "fix(lint): read staged changes relative to the wiki root" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 6/26'
+```
+
+---
+
+### Task 7: The gap ledger's append-only check in-host — `HEAD:./` and `:0:./`
+
+Fixes spec §1.4 (found by E2 P7). Every revision path in `scripts/gap_lint.py` becomes
+`./`-prefixed, which git resolves against `cwd=<wiki root>` in every layout.
+
+**Files**
+- Modify: `scripts/gap_lint.py` (`_path_in_head`, `_git_bytes`, `_path_staged`, `_staged_bytes`)
+- Create: `tests/test_in_host_gap_lint.py`
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_in_host_gap_lint.py`:
+
+```python
+"""The gap ledger stays append-only when the wiki is a folder of its repository (spec 1.4)."""
+from __future__ import annotations
+
+import datetime
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "scripts"))
+import wiki_fixtures as wf  # noqa: E402
+import gap  # noqa: E402
+import gap_lint  # noqa: E402
+
+NOW = datetime.datetime(2026, 10, 5, 9, 0, tzinfo=datetime.timezone.utc)
+ADD = ["add", "--no-commit", "--service", "acme", "--session", "s1", "--context", "c",
+       "--prompt", "p", "--question", "what torque", "--wiki-answer", "none",
+       "--answer-given", "none", "--topics", "widgets"]
+
+
+def _wiki_with_a_committed_gap(tmp):
+    root = wf.build_in_host_wiki(Path(tmp) / "host")
+    assert gap.main(ADD, root=root / "wiki", now=NOW) == 0
+    wf.git(root, "add", "wiki/gaps")
+    wf.git(root, "commit", "-q", "--no-verify", "-m", "gap(gap-2026-10-05-001): record")
+    return root
+
+
+def _codes(findings):
+    return sorted({f.code for f in findings})
+
+
+class InHostLedger(unittest.TestCase):
+    def test_an_unstaged_edit_of_a_committed_line_is_caught(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _wiki_with_a_committed_gap(tmp)
+            ledger = root / "wiki/gaps/knowledge-gaps.jsonl"
+            ledger.write_text(ledger.read_text(encoding="utf-8").replace("what torque", "WHAT TORQUE"),
+                              encoding="utf-8")
+            findings = gap_lint.run(root / "wiki")
+            self.assertTrue(any(f.code == "GAP_APPEND" and "diverges" in f.message for f in findings),
+                            findings)
+
+    def test_deleting_the_whole_gaps_folder_is_caught(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _wiki_with_a_committed_gap(tmp)
+            wf.git(root, "rm", "-q", "-r", "wiki/gaps")
+            self.assertIn("GAP_APPEND", _codes(gap_lint.run(root / "wiki")))
+
+
+class StandaloneControl(unittest.TestCase):
+    def test_the_same_deletion_is_caught_standalone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_standalone_wiki(Path(tmp) / "consumer")
+            assert gap.main(ADD, root=root, now=NOW) == 0
+            wf.git(root, "add", "gaps")
+            wf.git(root, "commit", "-q", "--no-verify", "-m", "gap(gap-2026-10-05-001): record")
+            wf.git(root, "rm", "-q", "-r", "gaps")
+            self.assertIn("GAP_APPEND", _codes(gap_lint.run(root)))
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_in_host_gap_lint -q
+```
+
+Expected: both `InHostLedger` tests fail (no `GAP_APPEND`); the standalone control passes. Exit 1.
+
+- [ ] **Step 3: Prefix the four revision paths** — in `scripts/gap_lint.py`:
+
+```python
+    result, error = _run_git(root, ["git", "cat-file", "-e", "HEAD:./{}".format(path)],
+                             "git cat-file")
+```
+```python
+    result, error = _run_git(root, ["git", "show", "HEAD:./{}".format(path)],
+                             "git show")
+```
+```python
+    result, error = _run_git(root, ["git", "cat-file", "-e", ":0:./{}".format(path)],
+                             "git cat-file")
+```
+```python
+    result, error = _run_git(root, ["git", "cat-file", "blob", ":0:./{}".format(path)],
+                             "git cat-file")
+```
+
+and one sentence in `_git_bytes`'s docstring: "`HEAD:<path>` resolves from the repository's top
+level, not the working directory; the `./` prefix resolves it from `cwd=root`, the wiki root,
+so the same call reads the ledger whether the wiki is the repository or a folder of it."
+
+- [ ] **Step 4: Run the tests**
+
+```bash
+python3 -m unittest tests.test_in_host_gap_lint tests.test_gap_lint -q
+```
+
+Expected: `OK`.
+
+#### Verify
+
+- **Goal:** H5 — the gap ledger's `GAP_APPEND` check fires in-host on the input that fires it on
+  a standalone wiki (spec §1.4).
+- **Red:** `python3 -m unittest tests.test_in_host_gap_lint -q` → `FAILED (failures=2)`.
+- **Green:** `python3 -m unittest tests.test_in_host_gap_lint tests.test_gap_lint -q` → `OK`, exit 0.
+- **Stub check:** leaving any one of the four lookups unprefixed keeps one of the two in-host
+  tests red (the working-tree comparison needs `HEAD:./`, the deletion needs the `never_adopted`
+  guard to see committed bytes).
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_in_host_gap_lint -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/gap_lint.py tests/test_in_host_gap_lint.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "fix(gaps): resolve the ledger's committed and staged bytes from the wiki root" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 7/26'
+```
+
+---
+
+### Task 8: `check_commit_msg.py` finds the wiki from its own location (K2, G4)
+
+**Files**
+- Modify: `scripts/check_commit_msg.py` (`main`, module docstring)
+- Create: `tests/test_commit_msg_root.py`
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_commit_msg_root.py`:
+
+```python
+"""check_commit_msg.py gives the same verdict from any working directory (K2, G4)."""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _wiki(tmp):
+    wiki = Path(tmp) / "repo" / "wiki"
+    shutil.copytree(ROOT / "scripts", wiki / "scripts",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    schema = json.loads((ROOT / "templates" / "card-schema.default.json").read_text(encoding="utf-8"))
+    schema["keys"]["id"]["pattern"] = r"^doc-\d{3}$"
+    (wiki / "sources" / "cards").mkdir(parents=True)
+    (wiki / "sources" / "cards" / "card-schema.json").write_text(json.dumps(schema), encoding="utf-8")
+    msg = Path(tmp) / "msg.txt"
+    msg.write_text("ingest(doc-001): file a doc\n", encoding="utf-8")
+    elsewhere = Path(tmp) / "elsewhere"
+    elsewhere.mkdir()
+    return wiki, msg, elsewhere
+
+
+def _run(script, msg, cwd, *extra):
+    return subprocess.run([sys.executable, str(script), *extra, str(msg)], cwd=str(cwd),
+                          capture_output=True, text=True, timeout=60)
+
+
+class RootFromOwnLocation(unittest.TestCase):
+    def test_relative_script_paths_from_three_places(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wiki, msg, elsewhere = _wiki(tmp)
+            for cwd in (wiki.parent, wiki, elsewhere):
+                script = os.path.relpath(wiki / "scripts" / "check_commit_msg.py", cwd)
+                result = _run(script, msg, cwd)
+                self.assertEqual(result.returncode, 0, f"{cwd}: {result.stderr}")
+
+    def test_absolute_script_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wiki, msg, elsewhere = _wiki(tmp)
+            self.assertEqual(_run(wiki / "scripts" / "check_commit_msg.py", msg, elsewhere).returncode, 0)
+
+    def test_an_explicit_root_still_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wiki, msg, elsewhere = _wiki(tmp)
+            result = _run(wiki / "scripts" / "check_commit_msg.py", msg, elsewhere, "--root", str(elsewhere))
+            self.assertEqual(result.returncode, 1)
+
+
+class FailsClosed(unittest.TestCase):
+    def test_root_without_a_value_is_a_usage_error_not_a_traceback(self):
+        result = subprocess.run([sys.executable, str(ROOT / "scripts" / "check_commit_msg.py"), "--root"],
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("usage:", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_commit_msg_root -q
+```
+
+Expected: `FAILED (failures=3)` — the repo-root and elsewhere runs exit 1, the absolute run exits
+1, and `--root` with no value prints an `IndexError` traceback.
+
+- [ ] **Step 3: Rewrite the argument handling of `main`** (everything from `schema_file = …` down
+  stays as it is; add `import argparse`):
+
+```python
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        prog="check_commit_msg.py",
+        description="Validate a commit message against the wiki's commit convention.")
+    parser.add_argument("msg_file", help="the message file git hands the commit-msg hook")
+    parser.add_argument(
+        "--root", type=Path, default=Path(__file__).resolve().parent.parent,
+        help="wiki root (default: the wiki this script sits in)")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    root = args.root
+    msg_file = args.msg_file
+    schema_file = root / SCHEMA_PATH
+```
+
+Module docstring: "the card schema's id.pattern (sources/cards/card-schema.json under --root,
+default: the wiki this script sits in)" and the same for the gap schema. `parse_args` is an
+impure-adjacent edge; list it beside `main`.
+
+- [ ] **Step 4: Run the tests**
+
+```bash
+python3 -m unittest tests.test_commit_msg_root tests.test_commit_msg -q
+python3 tools/e2e_in_host.py --only G4
+```
+
+Expected: `OK`; the ratchet prints `PASS G4.4 …` (now 4/4 on the hand-built shape).
+
+#### Verify
+
+- **Goal:** G4 ("every shipped script gives the same result from any working directory") and K2.
+- **Red:** `python3 -m unittest tests.test_commit_msg_root -q` → `FAILED (failures=3)`.
+- **Green:** `python3 -m unittest tests.test_commit_msg_root tests.test_commit_msg -q` → `OK`, exit 0; `python3 tools/e2e_in_host.py --only G4` → `TOTAL 4/4`, exit 0.
+- **Stub check:** keeping `Path.cwd()` fails both relative-path tests from the repo root and
+  elsewhere; a hand-rolled `--root` parser fails the usage test.
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_commit_msg_root -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/check_commit_msg.py tests/test_commit_msg_root.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "fix(commit-msg): find the wiki from the script's own location" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 8/26'
+```
+
+---
