@@ -219,8 +219,7 @@ def wiki_is_touched(is_standalone, staged_wiki_paths, index_matches_head, head_w
     if staged_wiki_paths:
         return True
     # A reword (`git commit --amend` with nothing newly staged) replaces HEAD with the same
-    # tree; when HEAD touched the wiki folder, the replacement does too (NEEDS_DIRECTION N1,
-    # recommended option B).
+    # tree; when HEAD touched the wiki folder, the replacement does too (ruling S1, option B).
     return index_matches_head and bool(head_wiki_paths)
 ```
 
@@ -255,7 +254,8 @@ install, §5.8) gather with host config isolated:
 | --- | --- | --- |
 | no `core.hooksPath` in the repo's own config, and `$GIT_DIR/hooks` holds no `pre-commit` / `commit-msg` file | `wire` | `git config core.hooksPath wiki/.githooks` — `init` only (§5.7); `upgrade` never writes git config and prints this command instead |
 | `core.hooksPath` set, resolving to a directory inside the work tree (not inside `.git`) | `side-files` | `<hooks dir>/pre-commit.wiki-harness` and `<hooks dir>/commit-msg.wiki-harness` (MANAGED bridge entries), never the hooks themselves; the directory is created if absent |
-| anything else: real hooks in `$GIT_DIR/hooks`, or a `core.hooksPath` outside the work tree | `print-only` | nothing; the summary prints the two lines to add to the existing hooks (NEEDS_DIRECTION N2, recommended option A) |
+| `core.hooksPath` already resolves to `wiki/.githooks` (an `upgrade` of a wiki that is already wired) | `already-wired` | nothing |
+| anything else: real hooks in `$GIT_DIR/hooks`, or a `core.hooksPath` outside the work tree | `print-only` | nothing; the summary prints the two lines to add to the existing hooks (ruling S2: `$GIT_DIR/hooks` is untracked and outside the footprint; an absolute path outside the work tree is outside the repo root, H4) |
 
 The side file is a one-line delegator, MANAGED (verbatim from `templates/bridge/`):
 
@@ -289,22 +289,36 @@ value shadows it for that repo. Recorded as a known limitation in the README, no
   is missing or not executable - run: git checkout -- .githooks`. A real 1.x consumer has both
   (E4), so its findings are unchanged (G9).
 - `"in-host"` / `"subfolder"`: the effective hooks directory is `git rev-parse --git-path hooks`
-  (honours `core.hooksPath`; cwd-relative, resolved against the `-C` directory). A hook name is
-  proven when either (a) the effective directory resolves to `<wiki root>/.githooks` and that
-  hook file is executable, or (b) the effective hook file is executable and one of its lines
-  that is not a `#` comment contains a proof token for that hook: `<rel>/.githooks/<name>`,
-  `<rel>/scripts/commit_gate.py`, and `<rel>/scripts/lint.py` (pre-commit) or
-  `<rel>/scripts/check_commit_msg.py` (commit-msg), where `<rel>` is the wiki folder relative to
-  the top level (`wiki` in-host). Husky ≥ 9 keeps its stubs in `.husky/_/`; when the effective
-  directory's name is `_`, the same-named file in its parent counts too. granado-espada's hooks
-  (`python3 "$root/wiki/scripts/lint.py"`, `…/check_commit_msg.py`) are proven by (b) — G11.
-  Any unproven hook gives one finding:
-  `ERROR HOOKS .githooks: the wiki's <names> check(s) do not run on commits - run: git config core.hooksPath <rel>/.githooks, or add the line in <hooks dir>/<name>.wiki-harness to <hooks dir>/<name>`.
+  (honours `core.hooksPath`; cwd-relative, resolved against the `-C` directory). Proof tokens are
+  per hook, where `<rel>` is the wiki folder relative to the top level (`wiki` in-host):
+  pre-commit — `<rel>/.githooks/pre-commit`, `<rel>/scripts/lint.py`; commit-msg —
+  `<rel>/.githooks/commit-msg`, `<rel>/scripts/check_commit_msg.py`. (`commit_gate.py` is not a
+  token: one line naming it could be either hook, and proving both from it would under-check.)
+  A hook name is proven when any of these holds:
+  (a) the effective directory resolves to `<wiki root>/.githooks` and that hook file is
+  executable;
+  (b) the effective hook file is executable and one of its lines that is not a `#` comment
+  contains a token for that hook — husky ≥ 9 keeps its stubs in `.husky/_/`, so when the
+  effective directory's name is `_` (and the stub is executable) the same-named file in its parent
+  counts too;
+  (c) (ruling S3) a hook manager's config file at the repo root — `.pre-commit-config.yaml`,
+  `lefthook.yml`, `lefthook.yaml`, `.lefthook.yml`, `.lefthook.yaml` — has a token for that hook on
+  a line that is not a `#` comment. This is a file read only: lint does not ask whether the
+  manager is installed.
+  granado-espada's hooks (`python3 "$root/wiki/scripts/lint.py"`, `…/check_commit_msg.py`) are
+  proven by (b) — G11. Any unproven hook gives one finding, in one of two forms:
+  with no hooks directory of the repo's own (git's default `$GIT_DIR/hooks`, or a path outside the
+  work tree) —
+  `ERROR HOOKS .githooks: the wiki's <names> check(s) do not run on commits - run: git config core.hooksPath <rel>/.githooks`;
+  with the repo's own hooks directory `<dir>` inside the work tree —
+  `ERROR HOOKS .githooks: the wiki's <names> check(s) do not run on commits - add the line in <dir>/<name>.wiki-harness to <dir>/<name>`
+  (one clause per unproven hook, joined by `, `; never the `git config` alternative, which would
+  switch the repo's own hooks off).
 - Not a work tree: no finding (unchanged).
 
-Hook managers that keep the call in a config file (pre-commit framework, lefthook) cannot be
-proven by (a) or (b): their commits work (the in-gate exemption), but a manual lint run stays red.
-NEEDS_DIRECTION N3 asks whether that is acceptable.
+Any other hook manager (one whose call lives somewhere (a)–(c) do not read) keeps `ERROR HOOKS`
+on a manual lint run while its commits still work through the in-gate exemption; the README and
+`docs/known-limitations.md` document it (ruling S3).
 
 `lint.py` keeps reading `core.hooksPath` without isolating host config: the question is what git
 will actually run, and the host config is part of that answer. Tests isolate it themselves.
@@ -591,8 +605,9 @@ The facts `c3-210` (init) and `c3-211` (upgrade) quote the CLI surface; `c3-101`
 `c3-110` (hooks), `c3-201` (manifest) and the template facts describe behaviour this card
 changes. The model cannot be validated or changed with the installed tooling (c3x 11.0.0 and
 9.9.1 both report broken seals and `repair` / `migrate` / `import --force` refuse before
-resealing — report "C3 probe"). NEEDS_DIRECTION N4; the plan's governance task (Task 24) is
-written for the recommended option.
+resealing — report "C3 probe"). Ruling S4: no `.c3/` edits in this card; the governance task lists
+the pending fact deltas for `c3-210`, `c3-211`, `c3-101`, `c3-110`, `c3-201` and the template
+facts in `docs/known-limitations.md`; the Shaman files the follow-up issue after merge.
 
 ## 6. Scope fence
 
@@ -602,9 +617,8 @@ unsupported, not supported; branch and merge policy not enforced; Python 3.9 std
 change to granado-espada or Cabal.
 
 Also out, by this spec: no `--host`/`--no-git`/layout flag on `init` (there is one layout); no
-upgrade path that converts standalone to in-host; no support for hook managers' config files in
-the HOOKS proof (N3); no change to `bin/wiki-harness` or `install.sh` (they pass arguments
-through; `wiki-harness init <target>` still reads correctly).
+upgrade path that converts standalone to in-host; no change to `bin/wiki-harness` or
+`install.sh` (they pass arguments through; `wiki-harness init <target>` still reads correctly).
 
 ## 7. Testing strategy and the ratchet
 
@@ -632,8 +646,8 @@ Checks (ids are stable; the plan's tasks name them):
 | Goal | Checks |
 | --- | --- |
 | G1 | for each of {codebase, empty} × {relative, absolute} (`cd <parent> && init <name>`, `init <abs>`, and `cd <root> && init .` for the codebase): G1.1 exit 0; G1.2 `<root>/wiki/index.md` exists, `<root>/wiki/.git` does not; G1.3 no mode-160000 entry in `git ls-files -s`; G1.4 every non-footprint path byte-identical in worktree and index (the codebase has an unrelated dirty file and an unrelated staged file); G1.5 `git config --local --list` differs only by `core.hookspath=wiki/.githooks`; G1.6 the init commit changes only footprint paths; G1.7 one init through the built R1 payload (no `.git` in the library) |
-| G2 | in-host, wired: G2.1 staged edit of an existing raw file refused with `ERROR RAW sources/raw/`; G2.2 staged delete refused; G2.3 rename of a raw file out of `wiki/` refused; G2.4 wiki-touching commit with a free-form subject refused; G2.5 same with `lint: …` subject accepted; G2.6 host-only commit with a free-form subject accepted and no lint output; G2.7 standalone control (raw edit refused); G2.8 a reword amend of a wiki commit to a free-form subject refused (N1) |
-| G3 | G3.1 in-host with `core.hooksPath` unset: lint exit 1 with `ERROR HOOKS`; G3.2 wired: lint exit 0; G3.3 `core.hooksPath` naming a missing folder: `ERROR HOOKS`; G3.4 husky codebase: `.husky/pre-commit` byte-identical, both side files present, `ERROR HOOKS`; G3.5 husky after merging the side-file lines: lint exit 0 and a raw edit commit refused |
+| G2 | in-host, wired: G2.1 staged edit of an existing raw file refused with `ERROR RAW sources/raw/`; G2.2 staged delete refused; G2.3 rename of a raw file out of `wiki/` refused; G2.4 wiki-touching commit with a free-form subject refused; G2.5 same with `lint: …` subject accepted; G2.6 host-only commit with a free-form subject accepted and no lint output; G2.7 standalone control (raw edit refused); G2.8 a reword amend of a wiki commit to a free-form subject refused (S1) |
+| G3 | G3.1 in-host with `core.hooksPath` unset: lint exit 1 with `ERROR HOOKS`; G3.2 wired: lint exit 0; G3.3 `core.hooksPath` naming a missing folder: `ERROR HOOKS`; G3.4 husky codebase: `.husky/pre-commit` byte-identical, both side files present, `ERROR HOOKS`; G3.5 husky after merging the side-file lines: lint exit 0 and a raw edit commit refused; G3.6 (S3) a pre-commit-framework repo (`.git/hooks/pre-commit` present, so `print-only`): `ERROR HOOKS` until `.pre-commit-config.yaml` carries local hooks with entries `wiki/.githooks/pre-commit` and `wiki/.githooks/commit-msg`, then lint exit 0; G3.7 (S3) the same with `lefthook.yml` |
 | G4 | each of `lint.py`, `card_frontmatter_lint.py <card>`, `gap.py list`, `check_commit_msg.py <msg>` run from the root, `wiki/` and an unrelated directory with a relative script path: identical stdout, stderr and exit code (G4.1–G4.4) |
 | G5 | in-host from R1 with an unrelated dirty file and an unrelated staged file: G5.1 `upgrade --check` names v2.0.1; G5.2 `upgrade wiki --to v2.0.1 --apply --commit --library-path <R2>` exit 0; G5.3 non-footprint worktree and index byte-identical; G5.4 the upgrade commit changes only footprint paths and the unrelated staged file is still staged; G5.5 `wiki/wiki/AGENTS.md` carries R2's change and the manifest says 2.0.1 |
 | G6 | mechanical, one per granado workaround the harness owns: G6.W1 = G2.1; G6.W2 = G3.2; G6.W3 = G2.6; G6.W4 = G4; G6.W5 `WIKI.md` and both skills exist, are committed, and `WIKI.md` maps `wiki/wiki/`; G6.W6 `WIKI.md` names branch policy as the repository's rule. The headless agent run (`--agent`, opt-in) is §7.3 |
@@ -666,9 +680,10 @@ contract, which this MAJOR release changes; its tests are rewritten to the in-ho
 the same intents, and the plan lists every changed assertion and its reason (brief-contracts
 rule 2: fence by intent).
 
-The full suite took 2h00m wall-clock / 590 s CPU on the planning machine (exit 0). Task Done
-commands therefore run targeted modules; the whole suite runs once in the background before the
-PR, and in CI.
+The full suite took 2h00m wall-clock / 590 s CPU on the planning machine (exit 0); CI runs it in
+77–96 s. Ruling S6: no task's Done block runs the full suite — Done commands run targeted
+modules; the pre-PR whole-suite run is a background run (the harness caps a foreground Bash call
+at 10 minutes), and CI is the authoritative full run.
 
 ### 7.3 The G6 oracle: a headless agent session
 
@@ -704,7 +719,8 @@ and is not deterministic); its transcripts go into the PR evidence.
 | Risk | Mitigation |
 | --- | --- |
 | A host's own hooks reject `init`'s scaffold commit | `init` exits 1 with the scaffold on disk, uncommitted, inside the footprint only (1.x failure shape); the summary says how to commit by hand |
-| The HOOKS proof misses a valid wiring shape (false red) | over-check by design (G3); in-gate exemption keeps commits working; N3 |
+| The HOOKS proof misses a valid wiring shape (false red) | over-check by design (G3); the in-gate exemption keeps commits working; plain hook files, husky ≥ 9 and the pre-commit / lefthook config files are read (S3); any other manager is documented |
+| The S3 config-file proof passes while the manager is not installed in a clone | accepted by ruling S3 (a file read, no install check); documented in `docs/known-limitations.md` |
 | The amend rule over-checks `--allow-empty` right after a wiki commit | accepted over-check (Oracle) |
 | `upgrade` loads the target release's `init` module while `repo_layout` / `manifest` are already imported from the running release (Python's module cache) | pre-existing pattern for `manifest`; both modules keep backward-compatible signatures; noted in `upgrade.py`'s docstring |
 | Host `.gitignore` ignores `.claude/` | refused before any write, with the rule and the negation to add (§5.6) |
@@ -714,7 +730,7 @@ Rollback: the release is one squash commit; reverting it on `main` restores 1.4.
 new `init`s. Wikis initialised by 2.0 keep working with 2.0 scripts (vendored); a 1.x `upgrade`
 cannot downgrade them without `--allow-downgrade` (compatibility-policy §5).
 
-## 10. How-level decisions taken here (the Shaman may veto any)
+## 10. How-level decisions taken here (accepted, ruling S5)
 
 1. One pure layout classifier; correctness checks use layout-neutral git forms; only messages,
    HOOKS proof, BRIDGE and footprint scoping branch on layout (§3).
@@ -734,19 +750,23 @@ cannot downgrade them without `--allow-downgrade` (compatibility-policy §5).
 10. The PR merges by squash with an explicit squash body (§5.11); the tribe block's
     `gh pr merge --merge` is refused by this repository.
 
-## 11. Open questions (NEEDS_DIRECTION, one per item; full text in the planner's report)
+## 11. Rulings (Shaman, recorded in the card's "Amendments from plan review")
 
-- **N1** — the commit gate cannot see a reword (`git commit --amend` with nothing staged). The
-  plan builds the recommended option B (§5.1); option A drops `index_matches_head` and accepts the
-  hole; the residual hole under B (an amend that adds only non-wiki changes to a wiki commit and
-  rewrites its message) is documented in `docs/known-limitations.md`.
-- **N2** — D4 when the repo's hooks live outside the work tree (`$GIT_DIR/hooks` with real hooks,
-  or an absolute `core.hooksPath`): the plan builds option A, `print-only`.
-- **N3** — hook managers lint cannot read (pre-commit framework, lefthook): the plan builds the
-  recommended option (ERROR stays; commits work through the in-gate exemption; documented).
-- **N4** — the C3 model cannot be restored with the installed c3x: the plan's Task 24 is written
-  for the recommended option (land the 2.0 fact deltas as a pending record in
-  `docs/known-limitations.md` and a follow-up card; no `.c3/` edits in this card).
+- **S1** (commit gate and reword amends): option B, as §5.1 builds it. The residual hole — an
+  amend that adds only non-wiki changes to a wiki commit and rewrites its message — is documented
+  in `docs/known-limitations.md`.
+- **S2** (hooks outside the work tree): option A, `print-only` (§5.2).
+- **S3** (hook managers with config files): the HOOKS proof also reads a proof token from
+  `.pre-commit-config.yaml`, `lefthook.yml`, `lefthook.yaml`, `.lefthook.yml` and `.lefthook.yaml`
+  at the repo root (§5.3 (c)); E2E checks G3.6 and G3.7; any other manager keeps `ERROR HOOKS`,
+  documented.
+- **S4** (C3): no `.c3/` edits; the pending fact deltas go in `docs/known-limitations.md` (§5.12);
+  the Shaman files the follow-up issue after merge.
+- **S5**: the How decisions of §10 are accepted.
+- **S6**: no task's Done block runs the full suite; the pre-PR whole-suite run is a background
+  run; CI is the authoritative full run (§7.2).
+- **S7**: the plan copies the `tribe` block verbatim, and its delivery task names the squash
+  merge of §5.11 explicitly.
 
 ## 12. Experiments this spec rests on
 
