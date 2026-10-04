@@ -14,6 +14,13 @@ MAJOR), and anything a consumer must act on before running `upgrade` belongs in 
 Entries up to and including v1.2.0 were hand-written under the older §8, which required an
 explicit release type and a prose **Compatibility** field. They are kept exactly as published.
 
+## [1.4.1](https://github.com/hieplam/wiki-harness/compare/v1.4.0...v1.4.1) (2026-10-04)
+
+
+### Bug Fixes
+
+* **gaps:** resolve the wiki root from gap.py's own location ([#47](https://github.com/hieplam/wiki-harness/issues/47)) ([f777bde](https://github.com/hieplam/wiki-harness/commit/f777bde20e121b320990e31105c99765098cf3ee))
+
 ## [1.4.0](https://github.com/hieplam/wiki-harness/compare/v1.3.1...v1.4.0) (2026-09-22)
 
 
