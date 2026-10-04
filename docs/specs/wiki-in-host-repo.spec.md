@@ -597,7 +597,9 @@ overwrite) — a content change, not a structure change (G9), named in the relea
   `feat(init)!: init scaffolds the wiki as a folder of its repository, with a bridge for the agent at the root`,
   and the squash body is given explicitly with `gh pr merge --squash --subject … --body-file …`
   so its last paragraph is the `BREAKING CHANGE:` footer (the PR description itself still ends
-  with the attribution line). Footer text is in the plan (Task 23).
+  with the attribution line). Footer text is in the plan; the plan's delivery task names this
+  squash merge explicitly (ruling S7), because the copied `tribe` block says `gh pr merge --merge`,
+  which this repository refuses.
 
 ### 5.12 C3
 
