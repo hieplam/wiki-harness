@@ -6528,14 +6528,14 @@ run `debt-backfill.ts`.
   the PR body.
 - **Red:** not applicable — the gate reads the finished branch and its Tracker reports, so there
   is no code here to go red.
-- **Green:** `bun "<gaps-dir>/gap-gate.ts" --repo "$PWD" --home "$RUNNER_CAMPAIGN_HOME" --card "$RUNNER_CARD_ID" --base "$RUNNER_BASE_SHA" --head HEAD` → exit 0, and `<campaign home>/reports/<card id>-gap-gate.md` ends with the `gap-gate v1` stamp line.
+- **Green:** `bun "/Users/home/repos/tribe/plugins/tribe/scripts/gaps/gap-gate.ts" --repo "$PWD" --home "$RUNNER_CAMPAIGN_HOME" --card "$RUNNER_CARD_ID" --base "$RUNNER_BASE_SHA" --head HEAD` → exit 0, and `<campaign home>/reports/<card id>-gap-gate.md` ends with the `gap-gate v1` stamp line.
 - **Stub check:** a PR body without the stamp fails `verify-shipped`'s stamp check; a skipped
   gate leaves no `<card id>-gap-gate.md` to paste.
 
 #### Done
 
 ```bash
-bun "<gaps-dir>/gap-gate.ts" --repo "$PWD" --home "$RUNNER_CAMPAIGN_HOME" --card "$RUNNER_CARD_ID" --base "$RUNNER_BASE_SHA" --head HEAD
+bun "/Users/home/repos/tribe/plugins/tribe/scripts/gaps/gap-gate.ts" --repo "$PWD" --home "$RUNNER_CAMPAIGN_HOME" --card "$RUNNER_CARD_ID" --base "$RUNNER_BASE_SHA" --head HEAD
 ```
 
 - [ ] **Step 1: Commit**
