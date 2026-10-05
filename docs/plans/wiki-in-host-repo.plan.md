@@ -4159,11 +4159,11 @@ Pure core:
 BRIDGE_TEMPLATES = "bridge"
 ROOT_LINK_TEMPLATE = "root-link.md.tmpl"
 SEEDED_ROOT_FILES = ("AGENTS.md", "CLAUDE.md")
-BRIDGE_CLOBBER_MESSAGE = ("init refuses: {path} and {side} both exist and wiki-harness did not "
-                          "write them; it never overwrites a file it did not create")
-BRIDGE_IGNORED_MESSAGE = ("init refuses: {path} would be ignored by git ({rule}); a bridge that "
-                          "is not committed does not travel with the repository. Add a negation "
-                          "such as !{folder}/ to that ignore file, then re-run init.")
+BRIDGE_CLOBBER_MESSAGE = ("{command} refuses: {path} and {side} both exist and wiki-harness did "
+                          "not write them; it never overwrites a file it did not create")
+BRIDGE_IGNORED_MESSAGE = ("{command} refuses: {path} would be ignored by git ({rule}); a bridge "
+                          "that is not committed does not travel with the repository. Add a "
+                          "negation such as !{folder}/ to that ignore file, then re-run {command}.")
 
 # One file of the bridge (spec 5.6): its logical name, canonical repo-relative path, manifest
 # role, source under templates/bridge/, whether it is rendered, and whether a repo-owned
@@ -4191,11 +4191,11 @@ def recorded_logicals(files, recorded_paths):
     return owned
 
 
-def plan_bridge(files, recorded, present):
+def plan_bridge(files, recorded, present, command="init"):
     """Pure. K11 and H3: where each bridge file goes. A recorded file stays where it was
     recorded (sticky); otherwise its canonical path when nothing is there; otherwise its side
-    path (when allowed) when nothing is there; otherwise a refusal. `present` is the set of
-    repo-relative paths that exist. Returns (writes, refusal)."""
+    path (when allowed) when nothing is there; otherwise a refusal naming `command`.
+    `present` is the set of repo-relative paths that exist. Returns (writes, refusal)."""
     writes = []
     for f in files:
         if f.logical in recorded:
@@ -4206,7 +4206,7 @@ def plan_bridge(files, recorded, present):
             path = side_path(f.canonical)
         else:
             side = side_path(f.canonical) if f.allow_side else f.canonical
-            return [], BRIDGE_CLOBBER_MESSAGE.format(path=f.canonical, side=side)
+            return [], BRIDGE_CLOBBER_MESSAGE.format(command=command, path=f.canonical, side=side)
         writes.append(BridgeWrite(f.logical, path, f.role, f.source, f.rendered))
     return writes, None
 
@@ -4303,7 +4303,8 @@ plan and check, then write after `scaffold_wiki`:
             print(refusal, file=sys.stderr)
         for path, rule in ignored:
             folder = PurePosixPath(path).parts[0]
-            print(BRIDGE_IGNORED_MESSAGE.format(path=path, rule=rule, folder=folder), file=sys.stderr)
+            print(BRIDGE_IGNORED_MESSAGE.format(command="init", path=path, rule=rule, folder=folder),
+                  file=sys.stderr)
         return 2
 ```
 
@@ -5067,6 +5068,743 @@ python3 -m unittest tests.test_manual_path_base -q
 ```bash
 git add templates/AGENTS.root.md.tmpl templates/README.md.tmpl templates/gaps.AGENTS.md tests/test_manual_path_base.py docs/plans/wiki-in-host-repo.plan.md
 git commit -m "feat(templates): state the manual's path base and a layout-neutral hooks setup" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 18/26'
+```
+
+---
+
+### Task 19: `upgrade` writes only its footprint in a host repository (G5, H1, K6)
+
+**Files**
+- Modify: `upgrade.py` (pure `footprint_pathspecs`, `dirty_tree_message`; `format_dirty_tree(…, checkout_target=".")`; `format_drift_abort(…, checkout_prefix="")`; edges `_repo_git`, `detect_layout`; `git_status_porcelain`, `git_add_all`, `git_commit`, `git_reset_index`, `git_checkout_dot`, `git_clean_untracked` gain `top=None, pathspecs=None`; `run_upgrade`; docstring)
+- Create: `tests/test_upgrade_in_host.py`
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_upgrade_in_host.py`:
+
+```python
+"""upgrade in a host repository touches only the wiki's footprint (G5, H1, K6)."""
+from __future__ import annotations
+
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROOT))
+import wiki_fixtures as wf  # noqa: E402
+import upgrade as upgrade_module  # noqa: E402
+from test_upgrade import _make_library, _release_v1_1  # noqa: E402
+
+
+def _upgrade(cwd, *args):
+    return subprocess.run([sys.executable, str(ROOT / "upgrade.py"), *args], cwd=str(cwd),
+                          capture_output=True, text=True, env=wf.git_env(), timeout=900)
+
+
+def _host(tmp):
+    tmp = Path(tmp).resolve()
+    v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+    v110 = _release_v1_1(v100, tmp / "lib-v1.1.0")
+    root = wf.build_in_host_wiki(tmp / "host", library_root=v100)
+    with (root / "src" / "app.py").open("a", encoding="utf-8") as handle:
+        handle.write("# unrelated uncommitted edit\n")
+    (root / "src" / "staged.py").write_text("S = 1\n", encoding="utf-8")
+    wf.git(root, "add", "src/staged.py")
+    return root, v110
+
+
+class Pure(unittest.TestCase):
+    def test_standalone_keeps_the_1x_calls(self):
+        self.assertIsNone(upgrade_module.footprint_pathspecs("standalone", ".", ["WIKI.md"]))
+
+    def test_in_host_pathspecs(self):
+        self.assertEqual(upgrade_module.footprint_pathspecs("in-host", "wiki", ["WIKI.md", ".claude/x"]),
+                         ["wiki", ".claude/x", "WIKI.md"])
+
+    def test_the_dirty_remedy_is_scoped(self):
+        self.assertIn("`git checkout -- wiki`", upgrade_module.dirty_tree_message("wiki"))
+        self.assertEqual(upgrade_module.dirty_tree_message("."), upgrade_module.DIRTY_TREE_MESSAGE)
+
+
+class InHost(unittest.TestCase):
+    def test_apply_and_commit_with_unrelated_changes_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, v110 = _host(tmp)
+            before_app = (root / "src" / "app.py").read_bytes()
+            before_index = [l for l in wf.git(root, "ls-files", "-s").stdout.splitlines() if "\tsrc/" in l]
+            result = _upgrade(root, "wiki", "--to", "v1.1.0", "--apply", "--commit",
+                              "--library-path", str(v110))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((root / "src" / "app.py").read_bytes(), before_app)
+            after_index = [l for l in wf.git(root, "ls-files", "-s").stdout.splitlines() if "\tsrc/" in l]
+            self.assertEqual(after_index, before_index)
+            self.assertIn("src/staged.py", wf.git(root, "diff", "--cached", "--name-only").stdout)
+            changed = wf.git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").stdout.split()
+            self.assertTrue(changed and all(p.startswith("wiki/") for p in changed), changed)
+
+    def test_an_absolute_target_from_elsewhere(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, v110 = _host(tmp)
+            result = _upgrade(Path(tmp), str(root / "wiki"), "--to", "v1.1.0", "--apply",
+                              "--library-path", str(v110))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_dirty_wiki_file_still_blocks_with_a_scoped_remedy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, v110 = _host(tmp)
+            with (root / "wiki" / "VISION.md").open("a", encoding="utf-8") as handle:
+                handle.write("dirty\n")
+            result = _upgrade(root, "wiki", "--to", "v1.1.0", "--apply", "--library-path", str(v110))
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("`git checkout -- wiki`", result.stderr)
+            self.assertNotIn("`git checkout -- .`", result.stderr)
+            self.assertIn("wiki/VISION.md", result.stderr)
+            self.assertNotIn("src/app.py", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_upgrade_in_host -q
+```
+
+Expected: `AttributeError: module 'upgrade' has no attribute 'footprint_pathspecs'` and the
+in-host runs exiting 2 (`Dirty paths:` listing `src/app.py`), exit 1.
+
+- [ ] **Step 3: Implement in `upgrade.py`** (`from repo_layout import IN_HOST, STANDALONE, SUBFOLDER, classify_layout`)
+
+Pure:
+
+```python
+def footprint_pathspecs(layout, wiki_rel, bridge_paths):
+    """Pure. The pathspecs, relative to the top level, that bound every git write an upgrade
+    makes in a host repository (H1, K6). None for a standalone wiki: the wiki IS the
+    repository there, and every call stays exactly the 1.x call (G9)."""
+    if layout in (None, STANDALONE):
+        return None
+    return [wiki_rel] + sorted(bridge_paths)
+
+
+def dirty_tree_message(checkout_target):
+    """Pure. DIRTY_TREE_MESSAGE with its remedy scoped to the wiki: `git checkout -- .` typed
+    at a repository's root would discard every uncommitted change in it, not only the wiki's."""
+    return DIRTY_TREE_MESSAGE.replace("`git checkout -- .`", f"`git checkout -- {checkout_target}`")
+```
+
+`format_dirty_tree(porcelain_output, checkout_target=".")` starts its lines with
+`dirty_tree_message(checkout_target)`. `format_drift_abort(blocking, recorded, actual,
+harness_version, checkout_prefix="")` writes `git checkout -- {checkout_prefix}{drift.path}`
+(the `--adopt-drift {drift.path}` part is unchanged). Edges:
+
+```python
+def _repo_git(root, *args):
+    """Impure edge. A read-only git question about the consumer repository, host config
+    isolated."""
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                          env=env, timeout=120)
+
+
+def detect_layout(target):
+    """Impure edge. (layout, resolved top level) for the wiki at `target`, or (None, None)
+    outside a work tree."""
+    target = Path(target).resolve()
+    shown = _repo_git(target, "rev-parse", "--show-toplevel")
+    if shown.returncode != 0 or not shown.stdout.strip():
+        return None, None
+    top = Path(shown.stdout.strip()).resolve()
+    return classify_layout(target, top), top
+
+
+def git_status_porcelain(target, top=None, pathspecs=None):
+    """Impure edge. `git status --porcelain`, over the whole repository (the 1.x call, used
+    for a standalone wiki) or over the footprint's pathspecs from the top level."""
+    if pathspecs is None:
+        args = ["git", "-C", str(target), "status", "--porcelain"]
+    else:
+        args = ["git", "-C", str(top), "status", "--porcelain", "--", *pathspecs]
+    return subprocess.run(args, capture_output=True, text=True, timeout=120).stdout
+```
+
+The four write edges follow the same rule — the 1.x argv when `pathspecs is None`, otherwise run
+at `top` and limited to the pathspecs:
+
+```python
+def git_add_all(target, top=None, pathspecs=None):
+    args = (["git", "-C", str(target), "add", "-A"] if pathspecs is None
+            else ["git", "-C", str(top), "add", "-A", "--", *pathspecs])
+    subprocess.run(args, capture_output=True, text=True, timeout=120)
+
+
+def git_commit(target, subject, top=None, pathspecs=None):
+    args = (["git", "-C", str(target), "commit", "-m", subject] if pathspecs is None
+            else ["git", "-C", str(top), "commit", "-m", subject, "--", *pathspecs])
+    result = subprocess.run(args, capture_output=True, text=True, timeout=120)
+    return result.returncode == 0, result.stdout + result.stderr
+
+
+def git_reset_index(target, top=None, pathspecs=None):
+    args = (["git", "-C", str(target), "reset", "-q"] if pathspecs is None
+            else ["git", "-C", str(top), "reset", "-q", "--", *pathspecs])
+    subprocess.run(args, capture_output=True, text=True, timeout=120)
+
+
+def git_checkout_dot(target, top=None, pathspecs=None):
+    if pathspecs is None:
+        subprocess.run(["git", "-C", str(target), "checkout", "--", "."],
+                       capture_output=True, text=True, timeout=120)
+        return
+    # `git checkout -- <path>` refuses the whole call when one path is untracked, so only
+    # the tracked footprint paths are restored here; git_clean_untracked() removes the rest.
+    tracked = [p for p in pathspecs
+               if subprocess.run(["git", "-C", str(top), "ls-files", "--", p], capture_output=True,
+                                 text=True, timeout=120).stdout.strip()]
+    if tracked:
+        subprocess.run(["git", "-C", str(top), "checkout", "--", *tracked],
+                       capture_output=True, text=True, timeout=120)
+
+
+def git_clean_untracked(target, top=None, pathspecs=None):
+    args = (["git", "-C", str(target), "clean", "-fd"] if pathspecs is None
+            else ["git", "-C", str(top), "clean", "-fd", "--", *pathspecs])
+    subprocess.run(args, capture_output=True, text=True, timeout=120)
+```
+
+`run_upgrade`, right after the `--adopt` peek and before the clean-tree check:
+
+```python
+    layout, top = detect_layout(target)
+    in_host_like = layout in (IN_HOST, SUBFOLDER)
+    wiki_rel = Path(target).resolve().relative_to(top).as_posix() if in_host_like else "."
+    peek = classify_manifest(manifest_path)
+    old_bridge = peek.manifest.get("bridge") if peek.kind == "ok" else None
+    old_bridge = old_bridge if isinstance(old_bridge, dict) else {}
+    pathspecs = footprint_pathspecs(layout, wiki_rel, list(old_bridge))
+    checkout_target = "." if pathspecs is None else wiki_rel
+    porcelain = git_status_porcelain(target, top, pathspecs)
+    if not is_clean_tree(porcelain):
+        print(format_dirty_tree(porcelain, checkout_target), file=sys.stderr)
+        return 2
+```
+
+`format_drift_abort(…)` gets `checkout_prefix="" if pathspecs is None else wiki_rel + "/"`; the
+new manifest carries the recorded bridge forward unchanged until Task 20 maintains it:
+
+```python
+    try:
+        new_manifest = compute_manifest(
+            new_files, values, manifest.get("source_url", ""), new_harness_version,
+            new_source_ref, new_source_commit,
+            initialised_at=manifest.get("initialised_at", ""),
+            bridge=old_bridge or None)
+    except ValueError as exc:
+        print(f"upgrade: the manifest's bridge section cannot be carried forward: {exc}",
+              file=sys.stderr)
+        return 1
+```
+
+and the `--commit` block passes `top, pathspecs` to `git_add_all`, `git_commit`,
+`git_reset_index`, `git_checkout_dot` and `git_clean_untracked`. Every new edge goes into the
+module docstring's edge list, with one paragraph: "In a host repository every git write is
+bounded by the footprint's pathspecs (card H1, K6); a standalone wiki keeps every 1.x call."
+
+- [ ] **Step 4: Run the tests and the ratchet lines** (run `tests.test_upgrade` in the background)
+
+```bash
+python3 -m unittest tests.test_upgrade_in_host -q
+python3 -m unittest tests.test_upgrade -q
+python3 tools/e2e_in_host.py --only G5
+```
+
+Expected: `OK`, `OK`; `TOTAL 5/5`, exit 0.
+
+#### Verify
+
+- **Goal:** G5 (`--check` and `--apply` work on an in-host wiki and change only its footprint,
+  with unrelated dirty and staged files present), H1, and G9 (every standalone call unchanged —
+  `tests.test_upgrade` green with unchanged assertions).
+- **Red:** `python3 -m unittest tests.test_upgrade_in_host -q` → `AttributeError: module 'upgrade' has no attribute 'footprint_pathspecs'`, exit 1.
+- **Green:** `python3 -m unittest tests.test_upgrade_in_host -q` → `OK`, exit 0; `python3 -m unittest tests.test_upgrade -q` → `OK`, exit 0; `python3 tools/e2e_in_host.py --only G5` → `TOTAL 5/5`, exit 0.
+- **Stub check:** a whole-repo status keeps exit 2 on `src/app.py`; a whole-repo `git add -A`
+  commits `src/staged.py` and fails the `diff-tree` assertion (E1b showed it staging the repo).
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_upgrade_in_host -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add upgrade.py tests/test_upgrade_in_host.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "fix(upgrade): bound every git write to the wiki's footprint in a host repository" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 19/26'
+```
+
+---
+
+### Task 20: `upgrade` keeps the bridge in step (G7, G11, D4, K11, H3)
+
+**Files**
+- Modify: `init.py` (pure `recorded_side_hooks`)
+- Modify: `upgrade.py` (pure `bridge_drifts`, `merge_bridge_entries`, `BridgePlan`; `format_drift_abort` gains bridge lines; `format_pending_report` gains bridge paths; edge `plan_upgrade_bridge`; `run_upgrade`)
+- Create: `tests/test_upgrade_bridge.py`
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_upgrade_bridge.py`:
+
+```python
+"""upgrade maintains the bridge: new files, updates, owner edits refused, side files (G7, G11)."""
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROOT))
+import wiki_fixtures as wf  # noqa: E402
+import init as init_module  # noqa: E402
+from test_upgrade import _make_library  # noqa: E402
+
+SKILL = ".claude/skills/ask-wiki/SKILL.md"
+MARK = "\n<!-- v1.1.0 bridge -->\n"
+
+
+def _release_with_bridge_change(v100, path):
+    shutil.copytree(v100, path, ignore=shutil.ignore_patterns(".git"))
+    (path / "VERSION").write_text("1.1.0\n", encoding="utf-8")
+    for name in ("ask-wiki.SKILL.md.tmpl", "pre-commit.wiki-harness"):
+        target = path / "templates" / "bridge" / name
+        target.write_text(target.read_text(encoding="utf-8") + (MARK if name.endswith(".tmpl") else "# v1.1.0\n"),
+                          encoding="utf-8")
+    wf.git(path, "init", "-q")
+    wf.git(path, "add", "-A")
+    wf.git(path, "commit", "-q", "-m", "library v1.1.0")
+    wf.git(path, "tag", "v1.1.0")
+    return path
+
+
+def _run(cwd, *args):
+    return subprocess.run([sys.executable, *map(str, args)], cwd=str(cwd), capture_output=True,
+                          text=True, env=wf.git_env(), timeout=900)
+
+
+def _initialised_host(tmp, husky=False):
+    tmp = Path(tmp).resolve()
+    v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+    v110 = _release_with_bridge_change(v100, tmp / "lib-v1.1.0")
+    repo = tmp / "acme"
+    repo.mkdir()
+    wf.git(repo, "init", "-q")
+    if husky:
+        hook = repo / ".husky" / "pre-commit"
+        hook.parent.mkdir()
+        hook.write_text("#!/bin/sh\necho owner\n", encoding="utf-8")
+        hook.chmod(0o755)
+        wf.git(repo, "config", "core.hooksPath", ".husky")
+        wf.git(repo, "add", "-A")
+        wf.git(repo, "commit", "-q", "--no-verify", "-m", "chore: husky")
+    result = _run(repo, v100 / "init.py", ".", "--non-interactive")
+    assert result.returncode == 0, result.stdout + result.stderr
+    return repo, v110
+
+
+def _upgrade(repo, v110, *extra):
+    return _run(repo, v110 / "upgrade.py", "wiki", "--to", "v1.1.0", "--apply",
+                "--library-path", v110, *extra)
+
+
+class Maintains(unittest.TestCase):
+    def test_an_untouched_skill_gets_the_new_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, v110 = _initialised_host(tmp)
+            result = _upgrade(repo, v110)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((repo / SKILL).read_text(encoding="utf-8").endswith(MARK))
+
+    def test_an_owner_edit_blocks_until_adopted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, v110 = _initialised_host(tmp)
+            (repo / SKILL).write_text("mine\n", encoding="utf-8")
+            wf.git(repo, "add", SKILL)
+            wf.git(repo, "commit", "-q", "-m", "Edit the skill")
+            blocked = _upgrade(repo, v110)
+            self.assertEqual(blocked.returncode, 1)
+            self.assertIn(f"`git checkout -- {SKILL}`", blocked.stderr)
+            self.assertEqual((repo / SKILL).read_text(encoding="utf-8"), "mine\n")
+            adopted = _upgrade(repo, v110, "--adopt-drift", SKILL)
+            self.assertEqual(adopted.returncode, 0, adopted.stdout + adopted.stderr)
+            self.assertEqual((repo / SKILL).read_text(encoding="utf-8"), "mine\n")
+            bridge = json.loads((repo / "wiki/.wiki-harness-manifest.json").read_text(encoding="utf-8"))["bridge"]
+            self.assertEqual(bridge[SKILL]["role"], "instance-fork")
+
+    def test_a_side_file_is_updated_and_the_owner_hook_never(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, v110 = _initialised_host(tmp, husky=True)
+            owner = (repo / ".husky" / "pre-commit").read_bytes()
+            result = _upgrade(repo, v110)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((repo / ".husky/pre-commit.wiki-harness").read_text(encoding="utf-8").endswith("# v1.1.0\n"))
+            self.assertEqual((repo / ".husky" / "pre-commit").read_bytes(), owner)
+
+    def test_the_report_names_bridge_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, v110 = _initialised_host(tmp)
+            report = _run(repo, v110 / "upgrade.py", "wiki", "--to", "v1.1.0", "--library-path", v110)
+            self.assertIn(f"../{SKILL}", report.stdout)
+
+
+class FirstInstall(unittest.TestCase):
+    def test_a_hand_made_in_host_wiki_gains_the_bridge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp).resolve()
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            v110 = _release_with_bridge_change(v100, tmp / "lib-v1.1.0")
+            repo = wf.build_in_host_wiki(tmp / "granado", library_root=v100, wire=False)
+            for hook, line in (("pre-commit", 'python3 "$root/wiki/scripts/lint.py" || exit 1'),
+                               ("commit-msg", 'exec python3 "$root/wiki/scripts/check_commit_msg.py" --root "$root/wiki" "$1"')):
+                path = repo / ".githooks" / hook
+                path.parent.mkdir(exist_ok=True)
+                path.write_text(f"#!/bin/sh\nroot=$(git rev-parse --show-toplevel)\n{line}\n", encoding="utf-8")
+                path.chmod(0o755)
+            (repo / SKILL).parent.mkdir(parents=True)
+            (repo / SKILL).write_text("hand-written\n", encoding="utf-8")
+            (repo / "CLAUDE.md").write_text("# Host\n", encoding="utf-8")
+            wf.git(repo, "config", "core.hooksPath", ".githooks")
+            wf.git(repo, "add", "-A")
+            wf.git(repo, "commit", "-q", "--no-verify", "-m", "chore: bridge by hand")
+            result = _upgrade(repo, v110, "--commit")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((repo / SKILL).read_text(encoding="utf-8"), "hand-written\n")
+            self.assertEqual((repo / "CLAUDE.md").read_text(encoding="utf-8"), "# Host\n")
+            bridge = json.loads((repo / "wiki/.wiki-harness-manifest.json").read_text(encoding="utf-8"))["bridge"]
+            for rel in (".claude/skills/ask-wiki/SKILL.wiki-harness.md", ".claude/skills/ingest-wiki/SKILL.md",
+                        "WIKI.md", ".githooks/pre-commit.wiki-harness", ".githooks/commit-msg.wiki-harness"):
+                self.assertIn(rel, bridge)
+                self.assertTrue((repo / rel).is_file(), rel)
+            self.assertIn("@WIKI.md", result.stdout)
+            self.assertFalse((repo / "AGENTS.md").exists())
+
+
+class Namespaces(unittest.TestCase):
+    def test_bridge_paths_never_collide_with_wiki_paths(self):
+        roles = init_module.build_role_map([f"scripts/{p.name}" for p in (ROOT / "scripts").glob("*.py")],
+                                           [".githooks/pre-commit", ".githooks/commit-msg"])
+        bridge = {p for f in init_module.BRIDGE_FILES for p in (f.canonical, init_module.side_path(f.canonical))}
+        self.assertFalse(set(roles) & bridge)
+        self.assertFalse(any(p.endswith(".wiki-harness") for p in roles))
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_upgrade_bridge -q
+```
+
+Expected: `FAILED` — the skill keeps its 1.0.0 text, the owner edit is not blocked, no side file
+update, no first install. Exit 1.
+
+- [ ] **Step 3: Implement**
+
+`init.py` (pure; `SIDE_MARKER` already imported):
+
+```python
+def recorded_side_hooks(bridge_paths):
+    """Pure. The hook side files a manifest's bridge section already records; they stay where
+    they are and upgrade keeps them current (D4), whatever the repository's hooks are now."""
+    files = []
+    for path in sorted(bridge_paths):
+        for hook in HOOK_NAMES:
+            if PurePosixPath(path).name == f"{hook}.{SIDE_MARKER}":
+                files.append(BridgeFile(f"{hook}-side", path, "managed", f"{hook}.{SIDE_MARKER}",
+                                        False, False))
+    return files
+```
+
+`upgrade.py` pure:
+
+```python
+# What an in-host upgrade will write outside the wiki folder, decided before anything is.
+BridgePlan = namedtuple("BridgePlan", "writes contents changed new_paths first_install "
+                                      "hooks_plan link_lines")
+
+
+def bridge_drifts(bridge_recorded, bridge_actual, adopt_drift_paths):
+    """Pure. G7: the recorded managed/template bridge entries whose bytes changed or vanished
+    and were not named by --adopt-drift this run -- each one blocks the upgrade."""
+    owned = managed_template_files(bridge_recorded)
+    return blocking_drifts(diff_manifest(owned, bridge_actual), adopt_drift_paths)
+
+
+def merge_bridge_entries(new_entries, old_bridge, adopt_drift_paths):
+    """Pure. The new bridge section: fresh hashes for what this run wrote; every old
+    instance-fork entry, and every path adopted this run, kept as instance-fork with its OLD
+    hash (the rule merge_manifest_files() applies to `files`)."""
+    adopt = set(adopt_drift_paths)
+    merged = dict(new_entries)
+    for path, entry in old_bridge.items():
+        if entry.get("role") == "instance-fork" or path in adopt:
+            merged[path] = {"role": "instance-fork", "sha256": entry["sha256"]}
+    return merged
+```
+
+`format_drift_abort(blocking, recorded, actual, harness_version, checkout_prefix="",
+bridge_blocking=(), bridge_recorded=None, bridge_actual=None)` appends, after the `files`
+lines, one line per bridge drift in the same wording with the repo-relative path for both the
+checkout and the `--adopt-drift` argument. `format_pending_report(paths, harness_version,
+bridge_paths=())` lists each bridge path, prefixed `../`, after the wiki paths.
+
+`upgrade.py` edge (reads the repository and the templates, writes nothing):
+
+```python
+def plan_upgrade_bridge(init_mod, library_root, top, old_bridge, adopt_drift_paths, values):
+    """Impure edge. The bridge an in-host upgrade writes, or (None, refusal). Uses the TARGET
+    release's init module, the single source of truth for what the bridge is. A first
+    install (no bridge section yet: every 1.x in-host wiki) also plans D4's hook side files
+    -- upgrade itself never writes git config."""
+    first_install = not old_bridge
+    hooks_plan = init_mod.gather_hooks_plan(top) if first_install else None
+    files = list(init_mod.BRIDGE_FILES) + init_mod.recorded_side_hooks(list(old_bridge))
+    if first_install:
+        files += init_mod.side_hook_files(hooks_plan)
+    candidates = [p for f in files for p in (f.canonical, init_mod.side_path(f.canonical))]
+    present = init_mod.bridge_present(top, candidates + list(init_mod.SEEDED_ROOT_FILES))
+    recorded = init_mod.recorded_logicals(files, list(old_bridge))
+    writes, refusal = init_mod.plan_bridge(files, recorded, present, command="upgrade")
+    if refusal:
+        return None, refusal
+    frozen = {p for p, e in old_bridge.items() if e.get("role") == "instance-fork"}
+    frozen |= set(adopt_drift_paths)
+    writes = [w for w in writes if w.path not in frozen]
+    for w in writes:
+        if not init_mod.contained(top, w.path):
+            return None, f"upgrade: bridge path {w.path!r} escapes the repository root"
+    new_paths = [w.path for w in writes if w.path not in present]
+    ignored = init_mod.ignored_paths(top, new_paths) if new_paths else []
+    if ignored:
+        return None, "\n".join(
+            init_mod.BRIDGE_IGNORED_MESSAGE.format(command="upgrade", path=path, rule=rule,
+                                                   folder=PurePosixPath(path).parts[0])
+            for path, rule in ignored)
+    contents = init_mod.render_bridge(library_root, writes, values)
+    changed = {p: b for p, b in contents.items()
+               if not (top / p).is_file() or (top / p).read_bytes() != b}
+    link_lines = init_mod.link_summary_lines(present) if first_install else []
+    return BridgePlan(writes, contents, changed, new_paths, first_install, hooks_plan,
+                      link_lines), None
+```
+
+`run_upgrade` for `layout == IN_HOST` (a `SUBFOLDER` wiki prints one line — `upgrade: the
+bridge is only installed for a wiki at the repository's top-level wiki/ folder; this wiki is at
+{wiki_rel}/` — and skips the bridge):
+
+1. With the step-1 drift check: `bridge_actual = hash_tree(top, managed_template_files(old_bridge).keys())`,
+   `bridge_blocking = bridge_drifts(old_bridge, bridge_actual, adopt_drift_paths)`; abort when
+   either list is non-empty, through the extended `format_drift_abort`.
+2. Right after the MAJOR-removal guard, before the scratch copy:
+   `bridge_plan, refusal = plan_upgrade_bridge(init_mod, library_root, top, old_bridge, adopt_drift_paths, values)`;
+   a refusal prints and returns 1 (nothing written).
+3. The idempotency fast path requires `not bridge_plan.changed` too; the dry-run report passes
+   `bridge_paths=sorted(bridge_plan.changed)`.
+4. After `promote_scratch` succeeds and before the manifest is written:
+
+```python
+        executable = {w.path for w in bridge_plan.writes if w.logical.endswith("-side")}
+        try:
+            init_mod.write_bridge(top, bridge_plan.changed, executable=executable)
+        except (OSError, init_mod.BridgeError) as exc:
+            git_checkout_dot(target)
+            for path in bridge_plan.new_paths:
+                if (top / path).is_file():
+                    (top / path).unlink()
+            print(format_promote_rollback(exc), file=sys.stderr)
+            return 1
+        bridge_section = merge_bridge_entries(
+            init_mod.bridge_entries(top, bridge_plan.writes), old_bridge, adopt_drift_paths)
+```
+
+   and the manifest written to the real target is recomputed with `bridge=bridge_section`.
+5. `--commit` pathspecs become `footprint_pathspecs(layout, wiki_rel, set(old_bridge) | set(bridge_plan.new_paths))`.
+6. On a first install, after the suggested-commit line, print the hooks lines — for a `wire`
+   plan exactly `upgrade: run \`git config core.hooksPath wiki/.githooks\` so the wiki's checks run on commits; upgrade never changes git config.`,
+   otherwise `init_mod.hooks_summary_lines(bridge_plan.hooks_plan)` — and every
+   `bridge_plan.link_lines` entry.
+
+- [ ] **Step 4: Run the tests and the ratchet lines** (`tests.test_upgrade` in the background)
+
+```bash
+python3 -m unittest tests.test_upgrade_bridge tests.test_upgrade_in_host -q
+python3 -m unittest tests.test_upgrade -q
+python3 tools/e2e_in_host.py --only G7 --only G11
+```
+
+Expected: `OK`, `OK`; `TOTAL 11/11`, exit 0.
+
+#### Verify
+
+- **Goal:** G7 (a release that changes a bridge file updates it; an owner-edited one is reported
+  as drift and not overwritten without `--adopt-drift`; a D4 side file is updated, the repo's
+  own hook never) and G11 (a 1.x in-host wiki gains the bridge as new files; an existing
+  repo-owned bridge path gets the harness version beside it); H3.
+- **Red:** `python3 -m unittest tests.test_upgrade_bridge -q` → `FAILED (failures=4, errors=0)` or more (all but `Namespaces`).
+- **Green:** `python3 -m unittest tests.test_upgrade_bridge tests.test_upgrade_in_host -q` → `OK`, exit 0; `python3 -m unittest tests.test_upgrade -q` → `OK`, exit 0; `python3 tools/e2e_in_host.py --only G7 --only G11` → `TOTAL 11/11`, exit 0.
+- **Stub check:** rewriting every bridge file unconditionally overwrites the owner's skill
+  (`test_an_owner_edit_blocks_until_adopted` fails); skipping the first install leaves
+  `WIKI.md` absent in `test_a_hand_made_in_host_wiki_gains_the_bridge`.
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_upgrade_bridge -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add init.py upgrade.py tests/test_upgrade_bridge.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "feat(upgrade): keep the bridge in step and install it on a hand-made in-host wiki" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 20/26'
+```
+
+---
+
+### Task 21: `upgrade --adopt` in a host repository follows D4 and installs the bridge (H2)
+
+`run_adopt` today calls `set_hooks_path(target)` unconditionally (`upgrade.py:1353-1356`),
+which in a host repository writes `core.hooksPath .githooks` into the host's config.
+
+**Files**
+- Modify: `upgrade.py` (`run_adopt`)
+- Create: `tests/test_adopt_in_host.py`
+
+- [ ] **Step 1: Write the failing test** — `tests/test_adopt_in_host.py`:
+
+```python
+"""--adopt of a pre-harness wiki folder in a host repository (H2, spec 5.9)."""
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+sys.path.insert(0, str(HERE))
+import wiki_fixtures as wf  # noqa: E402
+from test_upgrade import _make_library, _make_pre_adopt_target  # noqa: E402
+
+
+class AdoptInHost(unittest.TestCase):
+    def test_hooks_follow_d4_and_the_bridge_is_installed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp).resolve()
+            v100 = _make_library(tmp / "lib-v1.0.0", "1.0.0")
+            host = tmp / "host-repo"
+            host.mkdir()
+            wf.git(host, "init", "-q")
+            _make_pre_adopt_target(host / "wiki")
+            shutil.rmtree(host / "wiki" / ".git")
+            wf.git(host, "add", "wiki")
+            wf.git(host, "commit", "-q", "-m", "chore: pre-harness wiki folder")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "upgrade.py"), "wiki", "--to", "v1.0.0", "--adopt",
+                 "--library-path", str(v100), "--wiki-title", "Existing Wiki"],
+                cwd=str(host), capture_output=True, text=True, env=wf.git_env(), timeout=900)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(wf.git(host, "config", "--get", "core.hooksPath").stdout.strip(), "wiki/.githooks")
+            self.assertTrue((host / "WIKI.md").is_file())
+            manifest = json.loads((host / "wiki/.wiki-harness-manifest.json").read_text(encoding="utf-8"))
+            self.assertIn("WIKI.md", manifest["bridge"])
+            self.assertEqual(manifest["vars"]["repo_name"], "host-repo")
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+```bash
+python3 -m unittest tests.test_adopt_in_host -q
+```
+
+Expected: `'.githooks' != 'wiki/.githooks'`, exit 1.
+
+- [ ] **Step 3: Implement in `run_adopt`** — after the library and init module resolve:
+
+```python
+    layout, top = detect_layout(target)
+    # In a host repository the names come from the repository, not from the folder `wiki`.
+    name = top.name if layout == IN_HOST else target.resolve().name
+    values = init_mod.apply_defaults(values, name)
+    bridge_plan = None
+    if layout == IN_HOST:
+        bridge_plan, refusal = plan_upgrade_bridge(init_mod, library_root, top, {}, [], values)
+        if refusal:
+            print(refusal, file=sys.stderr)
+            return 1
+```
+
+(the `bridge_plan` is computed before the scratch copy, so a refusal writes nothing). After the
+promote, for `IN_HOST`: write the bridge exactly as `run_upgrade` step 4 does, compute the
+manifest with `bridge=init_mod.bridge_entries(top, bridge_plan.writes)`, then
+`init_mod.set_hooks_path(top, init_mod.WIKI_HOOKS_PATH)` only when
+`bridge_plan.hooks_plan.action == "wire"`, otherwise print
+`init_mod.hooks_summary_lines(bridge_plan.hooks_plan)`; print `bridge_plan.link_lines`. For
+`SUBFOLDER`, set no hooks and print the `git config core.hooksPath <rel>/.githooks` command.
+A standalone or non-repository target keeps `init_mod.set_hooks_path(target)` unchanged.
+
+- [ ] **Step 4: Run the tests**
+
+```bash
+python3 -m unittest tests.test_adopt_in_host tests.test_upgrade.TestAdopt -q
+```
+
+Expected: `OK` (`TestAdopt`'s standalone assertions unchanged).
+
+#### Verify
+
+- **Goal:** H2 ("no harness command writes the repo's `user.name` / `user.email`; hooks config
+  changes only as D4 rules") for `--adopt`; the bridge exists for every in-host wiki the harness
+  manages (D5).
+- **Red:** `python3 -m unittest tests.test_adopt_in_host -q` → `AssertionError: '.githooks' != 'wiki/.githooks'`, exit 1.
+- **Green:** `python3 -m unittest tests.test_adopt_in_host tests.test_upgrade.TestAdopt -q` → `OK`, exit 0.
+- **Stub check:** keeping the unconditional `set_hooks_path(target)` fails the config assertion;
+  skipping the bridge fails the `WIKI.md` assertions.
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_adopt_in_host -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add upgrade.py tests/test_adopt_in_host.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "fix(upgrade): adopt a wiki folder in a host repository by the D4 rules" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 21/26'
 ```
 
 ---
