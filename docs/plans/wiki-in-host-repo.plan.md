@@ -4558,3 +4558,515 @@ git commit -m "feat(init): leave a repository's own hooks alone and write the wi
 ```
 
 ---
+
+### Task 16: Default names come from the repository (G8, K5)
+
+`init` needs no flag at all: `repo_name` defaults to the repository root's name, `wiki_title` to
+`repo_name`, `org_name` to `wiki_title`, `content_language` to English. `missing_required_vars`
+keeps its meaning (`wiki_title`) because `upgrade --adopt` still calls it through the target
+release's init module — adopt's CLI contract does not change; only `init.main` stops calling it.
+
+**Files**
+- Modify: `init.py` (`DEFAULTED_VARS` order, `INIT_PROMPT_ORDER`, `apply_defaults`, `collect_vars`, `main` drops the missing-vars refusal; docstrings)
+- Create: `tests/test_init_names.py`
+- Modify: `tests/test_init.py` (the intents listed in Step 4 — REFUTED in advance)
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_init_names.py`:
+
+```python
+"""init's default names come from the repository, not from the folder `wiki` (G8, K5)."""
+from __future__ import annotations
+
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROOT))
+import wiki_fixtures as wf  # noqa: E402
+import init as init_module  # noqa: E402
+
+
+class Defaults(unittest.TestCase):
+    def test_every_name_derives_from_the_repository(self):
+        self.assertEqual(init_module.apply_defaults({}, "acme-widgets"), {
+            "repo_name": "acme-widgets", "wiki_title": "acme-widgets",
+            "org_name": "acme-widgets", "content_language": "English"})
+
+    def test_supplied_values_win(self):
+        filled = init_module.apply_defaults({"wiki_title": "Acme Wiki"}, "acme-widgets")
+        self.assertEqual((filled["wiki_title"], filled["org_name"], filled["repo_name"]),
+                         ("Acme Wiki", "Acme Wiki", "acme-widgets"))
+
+    def test_adopt_still_requires_a_title(self):
+        self.assertEqual(init_module.missing_required_vars({}), ["wiki_title"])
+
+
+class NoFlags(unittest.TestCase):
+    def test_init_with_no_name_flags_names_the_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve() / "acme-widgets"
+            repo.mkdir()
+            wf.git(repo, "init", "-q")
+            result = subprocess.run([sys.executable, str(ROOT / "init.py"), ".", "--non-interactive"],
+                                    cwd=str(repo), capture_output=True, text=True, env=wf.git_env(),
+                                    timeout=600)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            readme = (repo / "wiki" / "README.md").read_text(encoding="utf-8")
+            self.assertIn("acme-widgets", readme)
+            self.assertNotIn("source of truth for wiki", readme)
+            self.assertIn("acme-widgets", (repo / "wiki" / "AGENTS.md").read_text(encoding="utf-8"))
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_init_names -q
+```
+
+Expected: `test_every_name_derives_from_the_repository` fails (`wiki_title` missing) and the
+no-flags init exits 2 (`missing required value(s) for --non-interactive mode: --wiki-title`).
+
+- [ ] **Step 3: Implement in `init.py`**
+
+```python
+REQUIRED_VARS = ("wiki_title",)          # what `upgrade --adopt` requires; init requires nothing
+DEFAULTED_VARS = ("repo_name", "wiki_title", "org_name", "content_language")
+INIT_PROMPT_ORDER = DEFAULTED_VARS       # repo_name first, so the title prompt can offer it
+
+
+def apply_defaults(values, target_name):
+    """Pure. Derives every template variable the caller left empty (K5, G8): repo_name is the
+    repository root's own name, the title defaults to it, the organisation to the title, the
+    language to English. `target_name` is resolved at the edge (`.` and a trailing slash need
+    the real path first). A supplied value is never overridden."""
+    filled = dict(values)
+    if not filled.get("repo_name"):
+        filled["repo_name"] = target_name
+    if not filled.get("wiki_title"):
+        filled["wiki_title"] = filled["repo_name"]
+    if not filled.get("org_name"):
+        filled["org_name"] = filled["wiki_title"]
+    if not filled.get("content_language"):
+        filled["content_language"] = DEFAULT_CONTENT_LANGUAGE
+    return filled
+```
+
+`collect_vars`: when not `--non-interactive`, loop over `INIT_PROMPT_ORDER` only, each prompt
+offering `apply_defaults(values, target_name)[key]` in brackets with an empty answer taking it
+(the `REQUIRED_VARS` re-prompt loop is removed). `main` drops the `missing_required_vars` block.
+`run_adopt` (upgrade.py) is unchanged: it still calls `missing_required_vars` and refuses
+without `--wiki-title`.
+
+- [ ] **Step 4: Update `tests/test_init.py`'s changed intents**
+  - `NonInteractiveMissingRequiredFlagExits2` becomes "non-interactive with no flags succeeds":
+    exit 0, and the manifest's `vars` are the four derived values (G8);
+  - `DefaultedVarsPureCore`: `test_defaults_derive_every_optional_var` expects the title from
+    the target name too; `test_only_wiki_title_is_required` stays (adopt's contract);
+  - `InteractivePromptsOfferTheDefault.test_wiki_title_reprompts_until_answered` becomes
+    "an empty title answer takes the repository name";
+  - `PromptWithNoInputRefusesCleanly` keeps both tests: closed stdin on the first prompt still
+    exits 2 without a traceback (the first prompt is now `Repository name`).
+
+```bash
+python3 -m unittest tests.test_init_names tests.test_init tests.test_upgrade.TestAdopt -q
+python3 tools/e2e_in_host.py --only G8
+```
+
+Expected: `OK` (`TestAdopt` holds `test_adopt_missing_required_var_exits_2`, which must stay
+green unchanged); `TOTAL 1/1`, exit 0.
+
+#### Verify
+
+- **Goal:** G8 ("init at a repo root derives default names from the repo, not from the folder
+  name `wiki`") and K5; adopt's `--wiki-title` contract unchanged.
+- **Red:** `python3 -m unittest tests.test_init_names -q` → `FAILED (failures=2)`.
+- **Green:** `python3 -m unittest tests.test_init_names tests.test_init -q` → `OK`, exit 0; `python3 tools/e2e_in_host.py --only G8` → `TOTAL 1/1`, exit 0.
+- **Stub check:** leaving `wiki_title` required keeps the no-flags init at exit 2; deriving it
+  from the literal `wiki` would put `for wiki` in the README.
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_init_names -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add init.py tests/test_init_names.py tests/test_init.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "feat(init): derive every name from the repository root" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 16/26'
+```
+
+---
+
+### Task 17: Lint — BRIDGE warnings and remedies that are safe at the repository root
+
+**Files**
+- Modify: `scripts/lint.py` (pure `BridgeFacts`, `check_bridge`; `check_harness(…, checkout_prefix="")`; edge `bridge_facts`; `main` gathers hooks facts once)
+- Create: `tests/test_lint_bridge.py`
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_lint_bridge.py`:
+
+```python
+"""lint's BRIDGE warnings and its in-host remedies (D5, spec 5.4)."""
+from __future__ import annotations
+
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROOT / "scripts"))
+import wiki_fixtures as wf  # noqa: E402
+from lint import BridgeFacts, check_bridge  # noqa: E402
+from repo_layout import BRIDGE_LINK_LINE  # noqa: E402
+
+SKILL = ".claude/skills/ask-wiki/SKILL.md"
+
+
+def _lint(repo):
+    return subprocess.run([sys.executable, "wiki/scripts/lint.py"], cwd=str(repo),
+                          capture_output=True, text=True, env=wf.git_env(), timeout=300).stdout
+
+
+def _initialised(tmp, claude_md=None):
+    repo = Path(tmp).resolve() / "acme"
+    repo.mkdir()
+    wf.git(repo, "init", "-q")
+    if claude_md is not None:
+        (repo / "CLAUDE.md").write_text(claude_md, encoding="utf-8")
+        wf.git(repo, "add", "CLAUDE.md")
+        wf.git(repo, "commit", "-q", "-m", "chore: claude")
+    result = subprocess.run([sys.executable, str(ROOT / "init.py"), ".", "--non-interactive"],
+                            cwd=str(repo), capture_output=True, text=True, env=wf.git_env(), timeout=600)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return repo
+
+
+class Pure(unittest.TestCase):
+    def test_nothing_to_say_without_facts(self):
+        self.assertEqual(check_bridge(None), [])
+
+    def test_a_root_file_without_the_link(self):
+        facts = BridgeFacts({"AGENTS.md": None, "CLAUDE.md": "# mine\n"}, {}, {})
+        self.assertEqual([(f.severity, f.code, f.path) for f in check_bridge(facts)],
+                         [("WARN", "BRIDGE", "../CLAUDE.md")])
+
+    def test_no_root_file_at_all(self):
+        facts = BridgeFacts({"AGENTS.md": None, "CLAUDE.md": None}, {}, {})
+        self.assertEqual([f.path for f in check_bridge(facts)], ["../AGENTS.md"])
+
+    def test_drift_and_missing(self):
+        recorded = {"WIKI.md": {"role": "template", "sha256": "a"},
+                    SKILL: {"role": "template", "sha256": "b"},
+                    "x.md": {"role": "instance-fork", "sha256": "c"}}
+        facts = BridgeFacts({"AGENTS.md": BRIDGE_LINK_LINE, "CLAUDE.md": None}, recorded, {"WIKI.md": "z"})
+        messages = {f.path: f.message for f in check_bridge(facts)}
+        self.assertIn("edited since wiki-harness wrote it", messages["../WIKI.md"])
+        self.assertIn("missing", messages[f"../{SKILL}"])
+        self.assertNotIn("../x.md", messages)
+
+
+class InHost(unittest.TestCase):
+    def test_an_existing_claude_md_without_the_link_warns_until_it_has_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _initialised(tmp, claude_md="# Host rules\n")
+            self.assertIn("WARN BRIDGE ../CLAUDE.md: add this line so agents find the wiki:", _lint(repo))
+            with (repo / "CLAUDE.md").open("a", encoding="utf-8") as handle:
+                handle.write(BRIDGE_LINK_LINE + "\n")
+            self.assertNotIn("BRIDGE ../CLAUDE.md", _lint(repo))
+
+    def test_an_edited_skill_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _initialised(tmp)
+            (repo / SKILL).write_text("mine\n", encoding="utf-8")
+            self.assertIn(f"WARN BRIDGE ../{SKILL}: edited since wiki-harness wrote it", _lint(repo))
+
+    def test_the_harness_remedy_names_the_path_from_the_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _initialised(tmp)
+            with (repo / "wiki" / "AGENTS.md").open("a", encoding="utf-8") as handle:
+                handle.write("\nlocal edit\n")
+            self.assertIn("'git checkout -- wiki/AGENTS.md'", _lint(repo))
+
+
+class Standalone(unittest.TestCase):
+    def test_no_bridge_findings_and_the_1x_remedy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = wf.build_standalone_wiki(Path(tmp) / "consumer")
+            with (root / "AGENTS.md").open("a", encoding="utf-8") as handle:
+                handle.write("\nlocal edit\n")
+            out = subprocess.run([sys.executable, "scripts/lint.py"], cwd=str(root), capture_output=True,
+                                 text=True, env=wf.git_env(), timeout=300).stdout
+            self.assertNotIn("BRIDGE", out)
+            self.assertIn("'git checkout -- AGENTS.md'", out)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_lint_bridge -q
+```
+
+Expected: `ImportError: cannot import name 'BridgeFacts' from 'lint'`, exit 1.
+
+- [ ] **Step 3: Implement in `scripts/lint.py`** (`BRIDGE_LINK_LINE`, `BRIDGE_LINK_TOKEN`,
+  `IN_HOST` join the `repo_layout` import)
+
+Pure:
+
+```python
+# bridge_facts()'s return value. root_files: {"AGENTS.md": text or None, "CLAUDE.md": ...}
+# at the repository root; recorded: the manifest's bridge section; actual: {path: sha256}
+# for its managed/template entries as they are on disk now.
+BridgeFacts = namedtuple("BridgeFacts", "root_files recorded actual")
+
+
+def check_bridge(facts):
+    """Pure. D5: WARN until a root instruction file links WIKI.md, and WARN when a recorded
+    bridge file was edited or removed -- never an ERROR: the bridge is not one of the wiki's
+    invariants, and `upgrade` is where an owner's edit needs consent (G7). Paths are shown
+    relative to the wiki root, like every other finding."""
+    if facts is None:
+        return []
+    findings = []
+    present = {name: text for name, text in sorted(facts.root_files.items()) if text is not None}
+    if not present:
+        findings.append(Finding("WARN", "BRIDGE", "../AGENTS.md",
+                                "no root AGENTS.md or CLAUDE.md links WIKI.md; create one "
+                                f"with: {BRIDGE_LINK_LINE}"))
+    for name, text in present.items():
+        if BRIDGE_LINK_TOKEN not in text:
+            findings.append(Finding("WARN", "BRIDGE", f"../{name}",
+                                    f"add this line so agents find the wiki: {BRIDGE_LINK_LINE}"))
+    owned = {p: e for p, e in facts.recorded.items() if e.get("role") in ("managed", "template")}
+    for drift in diff_manifest(owned, facts.actual):
+        if drift.status == "hash_mismatch":
+            findings.append(Finding("WARN", "BRIDGE", f"../{drift.path}",
+                                    "edited since wiki-harness wrote it; upgrade refuses until you "
+                                    f"restore it or run 'upgrade --adopt-drift {drift.path}'"))
+        elif drift.status == "missing":
+            findings.append(Finding("WARN", "BRIDGE", f"../{drift.path}",
+                                    "missing; upgrade refuses until you restore it"))
+    return findings
+```
+
+`check_harness(manifest_state, checkout_prefix="")`: the managed hash-mismatch message's
+`'git checkout -- {drift.path}'` becomes `'git checkout -- {checkout_prefix}{drift.path}'`;
+nothing else changes. Edge:
+
+```python
+def bridge_facts(root, layout):
+    """Impure edge. None unless the wiki is in-host and its manifest carries a valid bridge
+    section (a malformed manifest is check_harness()'s to report)."""
+    if layout != IN_HOST:
+        return None
+    root = Path(root)
+    try:
+        manifest = read_manifest(root / MANIFEST_FILENAME)
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return None
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("bridge"), dict) \
+            or _manifest_shape_error(manifest) is not None:
+        return None
+    repo = root.resolve().parent
+    root_files = {}
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        try:
+            root_files[name] = (repo / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            root_files[name] = None
+    recorded = manifest["bridge"]
+    owned = [p for p, e in recorded.items() if e["role"] in ("managed", "template")]
+    try:
+        actual = hash_tree(repo, owned)
+    except OSError:
+        actual = {}
+    return BridgeFacts(root_files, recorded, actual)
+```
+
+`main` gathers the hooks facts once and reuses them:
+
+```python
+    facts = hooks_facts(root)
+    in_gate = os.environ.get(GATE_ENV) == "pre-commit"
+    findings += check_hooks(facts, in_gate)
+    layout = facts.layout if facts is not None else None
+    prefix = facts.wiki_rel + "/" if layout not in (None, STANDALONE) else ""
+    findings += check_harness(read_harness_manifest(root), checkout_prefix=prefix)
+    findings += check_bridge(bridge_facts(root, layout))
+```
+
+- [ ] **Step 4: Run the tests**
+
+```bash
+python3 -m unittest tests.test_lint_bridge tests.test_lint_hooks tests.test_harness_integrity tests.test_lint_cli -q
+```
+
+Expected: `OK`.
+
+#### Verify
+
+- **Goal:** D5 ("lint warns until that line exists"), G7's lint side (an edited bridge file is
+  reported as drift), and safe remedies at the repository root (spec §5.4); G9 (no BRIDGE
+  finding and the 1.x remedy on a standalone wiki).
+- **Red:** `python3 -m unittest tests.test_lint_bridge -q` → `ImportError: cannot import name 'BridgeFacts' from 'lint'`, exit 1.
+- **Green:** `python3 -m unittest tests.test_lint_bridge tests.test_lint_hooks tests.test_harness_integrity tests.test_lint_cli -q` → `OK`, exit 0.
+- **Stub check:** `check_bridge` returning `[]` fails four tests; a prefix applied in every
+  layout fails `test_no_bridge_findings_and_the_1x_remedy`.
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_lint_bridge -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/lint.py tests/test_lint_bridge.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "feat(lint): warn until the bridge is linked, and name remedies from the repository root" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 17/26'
+```
+
+---
+
+### Task 18: The wiki's own manual states its path base (spec §5.10)
+
+**Files**
+- Modify: `templates/AGENTS.root.md.tmpl`, `templates/README.md.tmpl`, `templates/gaps.AGENTS.md`
+- Create: `tests/test_manual_path_base.py`
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_manual_path_base.py`:
+
+```python
+"""The wiki's manual says where its paths start, in words true in both layouts (spec 5.10)."""
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+from string import Template
+
+ROOT = Path(__file__).resolve().parent.parent
+VALUES = {"wiki_title": "Acme", "org_name": "Acme", "content_language": "English", "repo_name": "acme"}
+
+
+def _render(name):
+    return Template((ROOT / "templates" / name).read_text(encoding="utf-8")).substitute(VALUES)
+
+
+class PathBase(unittest.TestCase):
+    def test_the_root_manual_says_where_you_stand(self):
+        text = _render("AGENTS.root.md.tmpl")
+        self.assertIn("## Where you stand", text)
+        self.assertIn("relative to the folder that holds this file", text)
+        self.assertIn("This wiki, in repository `acme`, is", text)
+
+    def test_no_manual_names_the_standalone_hooks_command(self):
+        for name in ("AGENTS.root.md.tmpl", "README.md.tmpl"):
+            self.assertNotIn("git config core.hooksPath .githooks", _render(name), name)
+
+    def test_the_gaps_manual_names_its_path_base(self):
+        text = (ROOT / "templates" / "gaps.AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("relative to the wiki folder", text)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_manual_path_base -q
+```
+
+Expected: `FAILED (failures=3)`.
+
+- [ ] **Step 3: Edit the templates**
+
+`templates/AGENTS.root.md.tmpl`: the first sentence becomes
+"This wiki, in repository `$repo_name`, is the **knowledge source of truth** for $org_name: an
+LLM-maintained wiki." (the rest of that paragraph unchanged), and a new section goes right after
+the language paragraph, before `## Layout`:
+
+```markdown
+## Where you stand
+
+Every path and command in this wiki's manuals is relative to the folder that holds this file.
+If your session runs somewhere else — for example at the root of a repository that keeps this
+wiki in a `wiki/` folder, which that repository's `WIKI.md` explains — put this folder's path in
+front of every path. The scripts find the wiki from their own location, so run them by path
+from anywhere (`python3 wiki/scripts/lint.py` from such a repository's root) instead of changing
+directory.
+```
+
+and the `.githooks/` row of the layout table becomes:
+
+```markdown
+| `.githooks/` | Commit hooks, run through `scripts/commit_gate.py` | Wired by `init`; if lint reports `HOOKS`, follow its message | this file |
+```
+
+`templates/README.md.tmpl`: the two lines starting `- **Setup after clone:**` and
+`- Without that one-time setup` become one line:
+
+```markdown
+- **Setup after clone:** run `python3 scripts/lint.py`; if it reports `HOOKS`, do what its message says — until then commits skip the wiki's checks.
+```
+
+`templates/gaps.AGENTS.md`: above the first command block, add the sentence:
+
+```markdown
+Commands here are relative to the wiki folder (the root `AGENTS.md`, "Where you stand"); from
+anywhere else, run them by path, e.g. `python3 wiki/scripts/gap.py list`.
+```
+
+- [ ] **Step 4: Run the tests**
+
+```bash
+python3 -m unittest tests.test_manual_path_base tests.test_templates tests.test_genericity tests.test_init_in_host -q
+```
+
+Expected: `OK` (a fresh in-host wiki still lints clean with the new text).
+
+#### Verify
+
+- **Goal:** G6's "no hand-written bridge" depends on the manual itself naming its path base
+  (#46 gap 2; card "Today": the manual "never names its path base"); G9's standalone wikis get
+  text that is true for them too.
+- **Red:** `python3 -m unittest tests.test_manual_path_base -q` → `FAILED (failures=3)`.
+- **Green:** `python3 -m unittest tests.test_manual_path_base tests.test_templates tests.test_genericity tests.test_init_in_host -q` → `OK`, exit 0.
+- **Stub check:** leaving the templates untouched fails all three tests; deleting the hooks line
+  without a replacement leaves the README with no setup instruction (reviewed in the diff).
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_manual_path_base -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add templates/AGENTS.root.md.tmpl templates/README.md.tmpl templates/gaps.AGENTS.md tests/test_manual_path_base.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "feat(templates): state the manual's path base and a layout-neutral hooks setup" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 18/26'
+```
+
+---
