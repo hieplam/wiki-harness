@@ -3209,3 +3209,1352 @@ git commit -m "feat(manifest): add the optional bridge section" -m $'Tribe-Card:
 ```
 
 ---
+
+### Task 12: `init`'s target facts and refusals (K8), as pure decisions
+
+Adds the refusal decision and the edge that gathers its facts (spec §5.7 "Refusals"). `main` is
+not rewired yet — Task 13 does that together with the new flow, so no commit leaves `init` half
+in each layout.
+
+**Files**
+- Modify: `init.py` (pure `TargetFacts`, `init_refusal`, four message constants; edge `gather_target_facts`; `_git` gains `extra_env`)
+- Create: `tests/test_init_target.py`
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_init_target.py`:
+
+```python
+"""init's target refusals (card K8): decided before anything is written."""
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent))
+import wiki_fixtures as wf  # noqa: E402
+import init as init_module  # noqa: E402
+
+TF = init_module.TargetFacts
+
+
+def _facts(**kw):
+    base = dict(target="/r", exists=True, is_dir=True, is_empty=False, top_level="/r",
+                is_bare=False, wiki_exists=False, operation=None, force=False)
+    base.update(kw)
+    return TF(**base)
+
+
+class Decide(unittest.TestCase):
+    def test_a_repository_root_is_accepted(self):
+        self.assertIsNone(init_module.init_refusal(_facts()))
+
+    def test_a_new_directory_is_accepted(self):
+        self.assertIsNone(init_module.init_refusal(_facts(exists=False, is_empty=True, top_level=None)))
+
+    def test_a_file_is_refused(self):
+        self.assertIn("is not empty", init_module.init_refusal(_facts(is_dir=False, top_level=None)))
+
+    def test_a_bare_repository_is_refused(self):
+        self.assertEqual(init_module.init_refusal(_facts(is_bare=True, top_level=None)),
+                         "/r is a bare git repository; init needs a work tree")
+
+    def test_inside_a_work_tree_names_the_top_level(self):
+        self.assertEqual(init_module.init_refusal(_facts(target="/r/wiki", exists=False, top_level="/r")),
+                         "init takes the repository root as its target: /r/wiki is inside the git "
+                         "work tree at /r; run: init /r")
+
+    def test_an_existing_wiki_path_is_refused(self):
+        self.assertEqual(init_module.init_refusal(_facts(wiki_exists=True)),
+                         "/r/wiki already exists; init never writes into an existing wiki/ path")
+
+    def test_a_non_empty_plain_directory_needs_force(self):
+        self.assertIn("--force", init_module.init_refusal(_facts(top_level=None)))
+        self.assertIsNone(init_module.init_refusal(_facts(top_level=None, force=True)))
+
+    def test_an_operation_in_progress_is_refused(self):
+        self.assertEqual(init_module.init_refusal(_facts(operation="merge")),
+                         "a merge is in progress in /r; finish or abort it, then re-run init")
+
+
+class Gather(unittest.TestCase):
+    def test_facts_for_real_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp).resolve()
+            repo = tmp / "repo"
+            wf.git(tmp, "init", "-q", "repo")
+            (repo / "src").mkdir()
+            facts = init_module.gather_target_facts(repo, False)
+            self.assertEqual((facts.top_level, facts.is_bare, facts.wiki_exists),
+                             (str(repo), False, False))
+            child = init_module.gather_target_facts(repo / "wiki", False)
+            self.assertEqual((child.exists, child.top_level), (False, str(repo)))
+            sub = init_module.gather_target_facts(repo / "src", False)
+            self.assertEqual(sub.top_level, str(repo))
+            (repo / ".git" / "MERGE_HEAD").write_text("0" * 40 + "\n", encoding="utf-8")
+            self.assertEqual(init_module.gather_target_facts(repo, False).operation, "merge")
+            wf.git(tmp, "init", "-q", "--bare", "bare.git")
+            self.assertTrue(init_module.gather_target_facts(tmp / "bare.git", False).is_bare)
+            plain = tmp / "plain"
+            plain.mkdir()
+            (plain / "x").write_text("x", encoding="utf-8")
+            self.assertEqual(init_module.gather_target_facts(plain, False).top_level, None)
+
+    def test_relative_and_dot_targets_resolve_first(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp).resolve()
+            wf.git(tmp, "init", "-q", "repo")
+            previous = os.getcwd()
+            try:
+                os.chdir(tmp / "repo")
+                self.assertEqual(init_module.gather_target_facts(Path("."), False).target, str(tmp / "repo"))
+                os.chdir(tmp)
+                self.assertEqual(init_module.gather_target_facts(Path("repo/"), False).target, str(tmp / "repo"))
+            finally:
+                os.chdir(previous)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_init_target -q
+```
+
+Expected: `AttributeError: module 'init' has no attribute 'TargetFacts'`, exit 1.
+
+- [ ] **Step 3: Implement in `init.py`** — pure part below the existing constants:
+
+```python
+NOT_THE_ROOT_MESSAGE = ("init takes the repository root as its target: {target} is inside "
+                        "the git work tree at {top}; run: init {top}")
+BARE_MESSAGE = "{target} is a bare git repository; init needs a work tree"
+WIKI_EXISTS_MESSAGE = "{target}/wiki already exists; init never writes into an existing wiki/ path"
+OPERATION_MESSAGE = "a {operation} is in progress in {top}; finish or abort it, then re-run init"
+
+# Facts init_refusal() decides on, gathered by gather_target_facts(). `target` and
+# `top_level` are resolved absolute path strings; `top_level` is None outside a work tree.
+TargetFacts = namedtuple("TargetFacts", "target exists is_dir is_empty top_level is_bare "
+                                        "wiki_exists operation force")
+
+
+def init_refusal(facts):
+    """Pure. The exact refusal for a target, or None. Nothing is ever written when this
+    returns a message. The target is the repository ROOT (K8): an existing repository's top
+    level, or a new or empty directory init turns into one."""
+    if facts.exists and not facts.is_dir:
+        return REFUSAL_MESSAGE.format(path=facts.target)
+    if facts.is_bare:
+        return BARE_MESSAGE.format(target=facts.target)
+    if facts.top_level is not None and facts.top_level != facts.target:
+        return NOT_THE_ROOT_MESSAGE.format(target=facts.target, top=facts.top_level)
+    if facts.wiki_exists:
+        return WIKI_EXISTS_MESSAGE.format(target=facts.target)
+    if facts.top_level is None and facts.exists and not facts.is_empty and not facts.force:
+        return REFUSAL_MESSAGE.format(path=facts.target)
+    if facts.operation:
+        return OPERATION_MESSAGE.format(operation=facts.operation, top=facts.top_level)
+    return None
+```
+
+`from collections import namedtuple` joins the imports. The edge, below the impure marker
+(`_git` gains `extra_env=None`, merged into its environment after the isolation keys):
+
+```python
+# Marker paths under the git dir, in the order init reports them.
+IN_PROGRESS_MARKERS = (("MERGE_HEAD", "merge"), ("rebase-merge", "rebase"),
+                       ("rebase-apply", "rebase"), ("CHERRY_PICK_HEAD", "cherry-pick"),
+                       ("REVERT_HEAD", "revert"))
+
+
+def gather_target_facts(target, force):
+    """Impure edge. The facts init_refusal() needs, host git config isolated. The target is
+    resolved first, so `.`, a trailing slash and a relative name mean the same as the
+    absolute path. A target that does not exist yet is asked about through its nearest
+    existing ancestor: inside a work tree, that ancestor's top level is not the target."""
+    target = Path(target)
+    resolved = target.resolve()
+    exists = target.exists() or target.is_symlink()
+    is_dir = target.is_dir() if exists else True
+    is_empty = not exists or (is_dir and not any(target.iterdir()))
+    probe = resolved
+    while not probe.exists():
+        probe = probe.parent
+    top_level, is_bare, operation = None, False, None
+    if probe.is_dir():
+        bare = _git(probe, "rev-parse", "--is-bare-repository")
+        is_bare = probe == resolved and bare.returncode == 0 and bare.stdout.strip() == "true"
+        shown = _git(probe, "rev-parse", "--show-toplevel")
+        if not is_bare and shown.returncode == 0 and shown.stdout.strip():
+            top_level = str(Path(shown.stdout.strip()).resolve())
+            git_dir = Path(_git(probe, "rev-parse", "--absolute-git-dir").stdout.strip())
+            for marker, name in IN_PROGRESS_MARKERS:
+                if (git_dir / marker).exists():
+                    operation = name
+                    break
+    wiki = resolved / "wiki"
+    return TargetFacts(str(resolved), exists, is_dir, is_empty, top_level, is_bare,
+                       wiki.exists() or wiki.is_symlink(), operation, force)
+```
+
+List `init_refusal()` in the docstring's pure core and `gather_target_facts()` in its edges.
+
+- [ ] **Step 4: Run the tests**
+
+```bash
+python3 -m unittest tests.test_init_target tests.test_init -q
+```
+
+Expected: `OK` (`tests.test_init` is untouched by this task and stays green).
+
+#### Verify
+
+- **Goal:** K8 and G1's precondition — `init` refuses, before any write, a target inside a work
+  tree (naming the top level), a root with a `wiki/` path, a bare repository, a non-empty plain
+  directory without `--force`, and a repository mid-operation; relative, `.` and trailing-slash
+  targets resolve first (fixtures-mirror-reality).
+- **Red:** `python3 -m unittest tests.test_init_target -q` → `AttributeError: module 'init' has no attribute 'TargetFacts'`, exit 1.
+- **Green:** `python3 -m unittest tests.test_init_target tests.test_init -q` → `OK`, exit 0.
+- **Stub check:** an `init_refusal` returning None fails six `Decide` tests; a gather that skipped
+  the ancestor walk reports `top_level None` for `repo/wiki` and fails
+  `test_facts_for_real_directories`.
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_init_target -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add init.py tests/test_init_target.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "feat(init): decide target refusals for a repository-root target" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 12/26'
+```
+
+---
+
+### Task 13: `init` produces the in-host layout (G1, K6, K8, H1, H2)
+
+Rewires `main` (spec §5.7 flow steps 1–5 and 7–11; the bridge of step 6 is Task 14, hook side
+files Task 15): the target is the repository root, the wiki is `<root>/wiki/`, git is
+initialised only for a new repository, no identity is written, only the D4 `wire` plan writes
+config, the commit is path-scoped to the footprint and authored through the environment.
+`tests/test_init.py` is rewritten to the in-host contract by the rule in Step 5 (REFUTED in
+advance, Global Constraint 9).
+
+**Files**
+- Modify: `init.py` (`git_init`, `set_hooks_path`, `dry_run_hooks`, `commit_scaffold` → `commit_footprint`, `verify_commit`, `summary_text`, `main`; new pure `lint_acceptable`, `footprint_holds`, `hooks_summary_lines`; new edge `gather_hooks_plan`; docstring)
+- Create: `tests/test_init_in_host.py`
+- Modify: `tests/test_init.py` (Step 5's rule)
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_init_in_host.py`:
+
+```python
+"""init produces the in-host layout and touches nothing outside its footprint (G1, H1, H2)."""
+from __future__ import annotations
+
+import hashlib
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROOT))
+import wiki_fixtures as wf  # noqa: E402
+import init as init_module  # noqa: E402
+
+FLAGS = ["--wiki-title", "Acme Widgets", "--non-interactive"]
+
+
+def _init(target, cwd):
+    return subprocess.run([sys.executable, str(ROOT / "init.py"), str(target), *FLAGS],
+                          cwd=str(cwd), capture_output=True, text=True, env=wf.git_env(),
+                          timeout=600)
+
+
+def _codebase(path):
+    path.mkdir(parents=True)
+    wf.git(path, "init", "-q")
+    (path / "src").mkdir()
+    (path / "src" / "app.py").write_text("print(1)\n", encoding="utf-8")
+    wf.git(path, "add", "-A")
+    wf.git(path, "commit", "-q", "-m", "feat: host")
+    with (path / "src" / "app.py").open("a", encoding="utf-8") as handle:
+        handle.write("# dirty\n")
+    (path / "src" / "staged.py").write_text("S = 1\n", encoding="utf-8")
+    wf.git(path, "add", "src/staged.py")
+    return path
+
+
+def _snapshot(path):
+    files = {p.relative_to(path).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+             for p in path.rglob("*") if p.is_file() and ".git" not in p.relative_to(path).parts}
+    index = wf.git(path, "ls-files", "-s").stdout.splitlines()
+    return files, index
+
+
+def _outside(snapshot_files, snapshot_index):
+    files = {k: v for k, v in snapshot_files.items() if k.startswith("src/")}
+    index = [line for line in snapshot_index if "\tsrc/" in line]
+    return files, index
+
+
+class Codebase(unittest.TestCase):
+    def test_dot_target_at_a_codebase_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _codebase(Path(tmp).resolve() / "acme")
+            before = _outside(*_snapshot(repo))
+            config_before = wf.git(repo, "config", "--local", "--list").stdout.splitlines()
+            result = _init(".", repo)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((repo / "wiki" / "index.md").is_file())
+            self.assertFalse((repo / "wiki" / ".git").exists())
+            self.assertNotIn("160000 ", wf.git(repo, "ls-files", "-s").stdout)
+            self.assertEqual(_outside(*_snapshot(repo)), before)
+            added = sorted(set(wf.git(repo, "config", "--local", "--list").stdout.splitlines())
+                           - set(config_before))
+            self.assertEqual(added, ["core.hookspath=wiki/.githooks"])
+            changed = wf.git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").stdout.split()
+            self.assertTrue(changed and all(p.startswith("wiki/") for p in changed), changed)
+            self.assertIn("src/staged.py", wf.git(repo, "diff", "--cached", "--name-only").stdout)
+            self.assertEqual(wf.git(repo, "log", "-1", "--format=%an").stdout.strip(), "wiki-harness init")
+            self.assertEqual(wf.git(repo, "config", "--local", "--get", "user.name").returncode, 1)
+
+
+class NewRepository(unittest.TestCase):
+    def test_relative_name_and_absolute_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp).resolve()
+            self.assertEqual(_init("fresh", tmp).returncode, 0)
+            (tmp / "empty").mkdir()
+            self.assertEqual(_init(tmp / "empty", tmp).returncode, 0)
+            for repo in (tmp / "fresh", tmp / "empty"):
+                self.assertTrue((repo / ".git").exists())
+                self.assertTrue((repo / "wiki" / ".wiki-harness-manifest.json").is_file())
+                lint = subprocess.run([sys.executable, "wiki/scripts/lint.py"], cwd=repo,
+                                      capture_output=True, text=True, env=wf.git_env(), timeout=300)
+                self.assertEqual(lint.returncode, 0, lint.stdout)
+
+
+class Refusals(unittest.TestCase):
+    def test_a_subfolder_target_names_the_top_level_and_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _codebase(Path(tmp).resolve() / "acme")
+            result = _init("wiki", repo)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(f"run: init {repo}", result.stderr)
+            self.assertFalse((repo / "wiki").exists())
+
+    def test_an_existing_wiki_path_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _codebase(Path(tmp).resolve() / "acme")
+            (repo / "wiki").mkdir()
+            self.assertEqual(_init(".", repo).returncode, 2)
+
+
+class PureHelpers(unittest.TestCase):
+    def test_lint_acceptable(self):
+        self.assertTrue(init_module.lint_acceptable(True, "", True))
+        self.assertFalse(init_module.lint_acceptable(False, "ERROR HOOKS .githooks: x\n", True))
+        self.assertTrue(init_module.lint_acceptable(False, "ERROR HOOKS .githooks: x\n", False))
+        self.assertFalse(init_module.lint_acceptable(False, "ERROR HOOKS .githooks: x\nERROR RAW a: y\n", False))
+
+    def test_footprint_holds(self):
+        self.assertTrue(init_module.footprint_holds(["wiki/index.md", "WIKI.md"], ["wiki", "WIKI.md"]))
+        self.assertFalse(init_module.footprint_holds(["wiki/index.md", "src/a.py"], ["wiki"]))
+        self.assertFalse(init_module.footprint_holds(["wikis/a"], ["wiki"]))
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_init_in_host -q
+```
+
+Expected: failures — `init .` in a codebase exits 2 (`is not empty`), the new repositories have
+no `wiki/.wiki-harness-manifest.json`, `lint_acceptable` does not exist. Exit 1.
+
+- [ ] **Step 3: Implement in `init.py`**
+
+Imports: `from repo_layout import (ALREADY_WIRED, HOOK_NAMES, PRINT_ONLY, SIDE_FILES, WIKI_FOLDER, WIRE, plan_hooks, wiki_hooks_rel)`.
+
+Pure core:
+
+```python
+WIKI_HOOKS_PATH = wiki_hooks_rel(WIKI_FOLDER)
+PLACEHOLDER_IDENTITY = {"GIT_AUTHOR_NAME": GIT_IDENTITY_NAME, "GIT_AUTHOR_EMAIL": GIT_IDENTITY_EMAIL,
+                        "GIT_COMMITTER_NAME": GIT_IDENTITY_NAME, "GIT_COMMITTER_EMAIL": GIT_IDENTITY_EMAIL}
+
+
+def lint_acceptable(exit_ok, output, hooks_wired):
+    """Pure. Step 12's verdict. A clean lint always passes. When init did not wire the hooks
+    (the repository has its own, D4), lint reports HOOKS until the owner merges them -- that
+    one finding is expected, every other ERROR still stops init."""
+    if exit_ok:
+        return True
+    if hooks_wired:
+        return False
+    errors = [line for line in output.splitlines() if line.startswith("ERROR ")]
+    return bool(errors) and all(line.startswith("ERROR HOOKS ") for line in errors)
+
+
+def footprint_holds(changed, footprint):
+    """Pure. True when every changed repo-relative path is a footprint entry or lies under
+    one (an entry is a folder or a file; `wiki` covers `wiki/...` but not `wikis/...`)."""
+    return all(any(path == entry or path.startswith(entry + "/") for entry in footprint)
+               for path in changed)
+
+
+def hooks_summary_lines(plan):
+    """Pure. What the summary says about the hooks for a repo_layout.HooksPlan."""
+    if plan.action in (WIRE, ALREADY_WIRED):
+        return [f"Hooks: core.hooksPath is {WIKI_HOOKS_PATH} -- the wiki's checks run on every "
+                "commit that touches wiki/."]
+    lines = ["Hooks: this repository already has its own commit hooks, so wiki-harness did not "
+             "change them. The wiki's checks are NOT active until each of those hooks also runs:"]
+    for hook in HOOK_NAMES:
+        message_arg = ' "$1"' if hook == "commit-msg" else ""
+        lines.append(f'  {hook}: "$(git rev-parse --show-toplevel)/{WIKI_HOOKS_PATH}/{hook}"'
+                     f"{message_arg} || exit 1")
+    lines.append("Lint reports HOOKS until then.")
+    return lines
+
+
+def summary_text(target, commit_hash, version, hooks_lines=(), link_lines=()):
+    """Pure. Step 16's summary: where the wiki is, the hooks, the link lines still to add,
+    and the mandatory reminder that API/cloud-agent commits bypass every local hook."""
+    short = commit_hash[:12] if commit_hash else commit_hash
+    lines = [f"Scaffolded {target}/wiki -- first commit {short}.", *hooks_lines,
+             "Next: start ingesting -- see wiki/AGENTS.md's Workflow: Ingest. An agent at the "
+             "repository root finds the wiki through WIKI.md.", *link_lines,
+             bypass_warning(version)]
+    return "\n".join(lines)
+```
+
+Edges (replacing `git_init`, `set_hooks_path`, `dry_run_hooks`, `commit_scaffold`, `verify_commit`):
+
+```python
+def git_init(target):
+    """Step 3: a new repository only -- never inside an existing one, and never an identity
+    in its config (H2)."""
+    _git(target, "init", "-q")
+
+
+def gather_hooks_plan(root):
+    """Impure edge, host config isolated: the repository's own core.hooksPath, where it
+    resolves, and which hooks $GIT_DIR/hooks holds -- judged by repo_layout.plan_hooks()."""
+    root = Path(root).resolve()
+    configured = _git(root, "config", "--get", "core.hooksPath").stdout.strip() or None
+    configured_rel = None
+    if configured is not None:
+        # A relative core.hooksPath is relative to the top level of the work tree.
+        resolved = (root / configured).resolve()
+        if resolved.is_relative_to(root) and not resolved.is_relative_to(root / ".git"):
+            configured_rel = resolved.relative_to(root).as_posix()
+    default_dir = (root / _git(root, "rev-parse", "--git-path", "hooks").stdout.strip()).resolve()
+    present = tuple(hook for hook in HOOK_NAMES
+                    if configured is None and (default_dir / hook).is_file())
+    return plan_hooks(configured, configured_rel, present)
+
+
+def set_hooks_path(target, value=".githooks"):
+    """Step 11: sets core.hooksPath to `value`, then reads it back to confirm the write
+    landed. `value` defaults to the standalone `.githooks` (upgrade --adopt on a standalone
+    wiki still calls it that way)."""
+    _git(target, "config", "core.hooksPath", value)
+    return _git(target, "config", "--get", "core.hooksPath").stdout.strip() == value
+
+
+def dry_run_hooks(root, footprint, subject):
+    """Step 13: stages the footprint, then runs both wiki hooks directly by absolute path,
+    from the repository root (the cwd git gives a hook)."""
+    root = Path(root)
+    if _git(root, "add", "--", *footprint).returncode != 0:
+        return False
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    hooks = (root / WIKI_FOLDER / ".githooks").resolve()
+    fd, msg_path = tempfile.mkstemp(suffix=".msg")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(subject + "\n")
+        commit_msg_result = subprocess.run([str(hooks / "commit-msg"), msg_path], cwd=root,
+                                           capture_output=True, text=True, env=env, timeout=600)
+    finally:
+        os.unlink(msg_path)
+    if commit_msg_result.returncode != 0:
+        return False
+    pre_commit_result = subprocess.run([str(hooks / "pre-commit")], cwd=root,
+                                       capture_output=True, text=True, env=env, timeout=600)
+    return pre_commit_result.returncode == 0
+
+
+def commit_footprint(root, footprint, subject):
+    """Step 14: stage and commit only the footprint (K6, H1), on the current branch, through
+    whatever hooks the repository has; authored by the placeholder identity through the
+    environment, never the repository's config (H2). Anything else already staged stays
+    staged and uncommitted."""
+    if _git(root, "add", "--", *footprint).returncode != 0:
+        return False
+    return _git(root, "commit", "-m", subject, "--", *footprint,
+                extra_env=PLACEHOLDER_IDENTITY).returncode == 0
+
+
+def verify_commit(root):
+    """Step 15: (landed, hash, subject, the paths HEAD changed)."""
+    hash_result = _git(root, "log", "-1", "--format=%H")
+    subject_result = _git(root, "log", "-1", "--format=%s")
+    changed = _git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", "HEAD")
+    if hash_result.returncode != 0 or subject_result.returncode != 0 or changed.returncode != 0:
+        return False, "", "", []
+    return (True, hash_result.stdout.strip(), subject_result.stdout.strip(),
+            changed.stdout.splitlines())
+```
+
+`run_lint(target)` keeps its signature (it is called with the wiki folder). `main`:
+
+```python
+def main(argv):
+    args = parse_args(argv)
+    library_root = Path(__file__).resolve().parent
+    facts = gather_target_facts(Path(args.target), args.force)
+    refusal = init_refusal(facts)                                     # step 1
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 2
+    root = Path(facts.target)
+    try:
+        values, origins_raw = collect_vars(args, target_name=root.name)   # step 2
+    except (AnswersFileError, NoInputError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    missing = missing_required_vars(values)
+    if missing:
+        print(missing_vars_message(missing), file=sys.stderr)
+        return 2
+    values = apply_defaults(values, root.name)
+    origins = parse_origins(origins_raw)
+
+    root.mkdir(parents=True, exist_ok=True)
+    if facts.top_level is None:
+        git_init(root)                                                  # step 3
+    wiki = root / WIKI_FOLDER
+    wiki.mkdir()
+    scaffold_wiki(library_root, wiki, values, origins)                  # steps 4-10
+    plan = gather_hooks_plan(root)
+    if plan.action == WIRE and not set_hooks_path(root, WIKI_HOOKS_PATH):   # step 11
+        print(HOOKS_PATH_FAILURE_MESSAGE.format(target=root), file=sys.stderr)
+        return 1
+    footprint = [WIKI_FOLDER]
+
+    lint_ok, lint_output = run_lint(wiki)                               # step 12
+    print(lint_output)
+    if not lint_acceptable(lint_ok, lint_output, plan.action in (WIRE, ALREADY_WIRED)):
+        return 1
+    version = read_version(library_root)
+    subject = commit_subject(version)
+    if not dry_run_hooks(root, footprint, subject):                     # step 13
+        print(HOOK_DRY_RUN_FAILURE_MESSAGE.format(target=root), file=sys.stderr)
+        return 1
+    if not commit_footprint(root, footprint, subject):                  # step 14
+        print(COMMIT_FAILURE_MESSAGE.format(target=root), file=sys.stderr)
+        return 1
+    landed, commit_hash, commit_subj, changed = verify_commit(root)    # step 15
+    if not landed or commit_subj != subject or not footprint_holds(changed, footprint):
+        print(COMMIT_VERIFY_FAILURE_MESSAGE.format(target=root), file=sys.stderr)
+        return 1
+    print(summary_text(root, commit_hash, version, hooks_summary_lines(plan)))   # step 16
+    return 0
+```
+
+Update the module docstring: the target is the repository root; the wiki is `<root>/wiki/`; list
+every pure function and edge by name; drop "16 ordered steps" wording that no longer holds.
+
+- [ ] **Step 4: Run the new tests**
+
+```bash
+python3 -m unittest tests.test_init_in_host tests.test_init_target -q
+```
+
+Expected: `OK`.
+
+- [ ] **Step 5: Rewrite `tests/test_init.py` to the in-host contract** — the rule, applied to
+  every test that runs `init` and inspects what it made: the target stays the repository root;
+  every wiki file is looked for under `target / "wiki"` (add `wiki = target / "wiki"`); git
+  queries stay at `target`; `lint.py` runs as `wiki / "scripts" / "lint.py"` with
+  `--root wiki`; paths in `git show --stat HEAD` gain the `wiki/` prefix; `_git` gains the
+  `wiki_fixtures.IDENTITY` environment (init no longer writes an identity, so a test commit needs
+  one). The changed intents, each tied to the card:
+  - `InitSetsHookspath`: expects `wiki/.githooks` (D4, spec §5.2);
+  - `InitFirstCommitGoesThroughRealHooks`: the free-form `--allow-empty` commit is still
+    refused, and the output contains `commit-msg:` (S1's reword rule judges it);
+  - `InitRelativeTargetSucceeds`: `relative-wiki/.git` is a directory and
+    `relative-wiki/wiki/.githooks/commit-msg` is a file;
+  - `DryRunHooksExecsAbsoluteProgramPaths`: calls `dry_run_hooks(target, ["wiki"], subject)`
+    and expects `expected_root / "wiki" / ".githooks" / …`;
+  - `SummaryNamesTheRunningVersion`, `InitRefusesNonemptyWithoutForce`,
+    `InitRefusesWhenTargetIsAFile`, `InitRefusesWhenTargetIsABrokenSymlink` and every pure test:
+    unchanged.
+  Then run:
+
+```bash
+python3 -m unittest tests.test_init tests.test_init_in_host tests.test_init_target tests.test_commit_gate -q
+python3 tools/e2e_in_host.py --only G1
+```
+
+Expected: `OK`; the ratchet prints `PASS` for G1.1–G1.6 on all four forms: `TOTAL 24/24`, exit 0.
+
+#### Verify
+
+- **Goal:** G1 (one repo at the root, no nested `.git`, no gitlink, every non-footprint path
+  byte-identical in worktree and index, config changed only by the D4 wiring, commit only the
+  footprint, relative and absolute targets) with H1/H2.
+- **Red:** `python3 -m unittest tests.test_init_in_host -q` → `FAILED`, `test_dot_target_at_a_codebase_root` with `2 != 0` (`is not empty`).
+- **Green:** `python3 -m unittest tests.test_init tests.test_init_in_host tests.test_init_target tests.test_commit_gate -q` → `OK`, exit 0; `python3 tools/e2e_in_host.py --only G1` → `TOTAL 24/24`, exit 0.
+- **Stub check:** an init that still scaffolds into the target fails G1.2 and the
+  `wiki/index.md` assertion; one that commits with `git add -A` commits `src/staged.py` and fails
+  G1.4/G1.6; one that writes `user.name` fails the config assertion (G1.5).
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_init_in_host tests.test_init_target -q
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add init.py tests/test_init_in_host.py tests/test_init.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "feat(init)!: scaffold the wiki as the wiki/ folder of the repository root" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 13/26'
+```
+
+---
+
+### Task 14: The bridge — `WIKI.md`, the two skills, the root link files (D5, K9, K10, K11)
+
+**Files**
+- Create: `templates/bridge/WIKI.md.tmpl`, `templates/bridge/ask-wiki.SKILL.md.tmpl`, `templates/bridge/ingest-wiki.SKILL.md.tmpl`, `templates/bridge/root-link.md.tmpl`
+- Modify: `init.py` (pure `BridgeFile`, `BRIDGE_FILES`, `BridgeWrite`, `recorded_logicals`, `plan_bridge`, `seeded_root_writes`, `link_summary_lines`; edges `bridge_present`, `ignored_paths`, `render_bridge`, `write_bridge`, `bridge_entries`; `write_manifest_file(…, bridge=None)`; `main` step 6)
+- Create: `tests/test_bridge.py`
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_bridge.py`:
+
+```python
+"""The bridge init writes outside the wiki folder (D5, K9, K11, H3, H4)."""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
+import wiki_fixtures as wf  # noqa: E402
+import init as init_module  # noqa: E402
+from repo_layout import BRIDGE_LINK_LINE, HooksPlan  # noqa: E402
+
+WIRE = HooksPlan("wire", None)
+
+
+def _init(cwd, *extra):
+    return subprocess.run([sys.executable, str(ROOT / "init.py"), ".", "--wiki-title", "Acme Widgets",
+                           "--non-interactive", *extra], cwd=str(cwd), capture_output=True, text=True,
+                          env=wf.git_env(), timeout=600)
+
+
+def _repo(path):
+    path.mkdir(parents=True)
+    wf.git(path, "init", "-q")
+    (path / "src").mkdir()
+    (path / "src" / "app.py").write_text("print(1)\n", encoding="utf-8")
+    wf.git(path, "add", "-A")
+    wf.git(path, "commit", "-q", "-m", "feat: host")
+    return path
+
+
+class Plan(unittest.TestCase):
+    files = init_module.BRIDGE_FILES
+
+    def test_canonical_paths_when_free(self):
+        writes, refusal = init_module.plan_bridge(self.files, {}, set())
+        self.assertIsNone(refusal)
+        self.assertEqual([w.path for w in writes], ["WIKI.md", ".claude/skills/ask-wiki/SKILL.md",
+                                                     ".claude/skills/ingest-wiki/SKILL.md"])
+
+    def test_a_repo_owned_file_gets_a_side_file(self):
+        writes, _ = init_module.plan_bridge(self.files, {}, {".claude/skills/ask-wiki/SKILL.md"})
+        self.assertIn(".claude/skills/ask-wiki/SKILL.wiki-harness.md", [w.path for w in writes])
+
+    def test_recorded_paths_are_sticky(self):
+        recorded = init_module.recorded_logicals(self.files, [".claude/skills/ask-wiki/SKILL.wiki-harness.md"])
+        writes, _ = init_module.plan_bridge(self.files, recorded, set())
+        self.assertIn(".claude/skills/ask-wiki/SKILL.wiki-harness.md", [w.path for w in writes])
+
+    def test_both_paths_taken_is_a_refusal(self):
+        taken = {"WIKI.md", "WIKI.wiki-harness.md"}
+        writes, refusal = init_module.plan_bridge(self.files, {}, taken)
+        self.assertEqual(writes, [])
+        self.assertIn("WIKI.wiki-harness.md", refusal)
+
+    def test_seeded_root_files_only_when_absent(self):
+        self.assertEqual(init_module.seeded_root_writes(set()), ["AGENTS.md", "CLAUDE.md"])
+        self.assertEqual(init_module.seeded_root_writes({"CLAUDE.md"}), ["AGENTS.md"])
+
+    def test_root_link_template_is_the_link_line(self):
+        text = (ROOT / "templates" / "bridge" / "root-link.md.tmpl").read_text(encoding="utf-8")
+        self.assertIn(BRIDGE_LINK_LINE, text)
+
+
+class InitWritesTheBridge(unittest.TestCase):
+    def test_a_codebase_without_root_instructions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _repo(Path(tmp).resolve() / "acme")
+            result = _init(repo)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            tracked = set(wf.git(repo, "ls-files").stdout.split())
+            for rel in ("WIKI.md", ".claude/skills/ask-wiki/SKILL.md",
+                        ".claude/skills/ingest-wiki/SKILL.md", "AGENTS.md", "CLAUDE.md"):
+                self.assertIn(rel, tracked, rel)
+            self.assertIn(BRIDGE_LINK_LINE, (repo / "CLAUDE.md").read_text(encoding="utf-8"))
+            skill = (repo / ".claude/skills/ask-wiki/SKILL.md").read_text(encoding="utf-8")
+            self.assertIn("Acme Widgets", skill)
+            bridge = json.loads((repo / "wiki/.wiki-harness-manifest.json").read_text(encoding="utf-8"))["bridge"]
+            self.assertEqual(sorted(bridge), [".claude/skills/ask-wiki/SKILL.md",
+                                              ".claude/skills/ingest-wiki/SKILL.md", "WIKI.md"])
+            self.assertTrue(all(entry["role"] == "template" for entry in bridge.values()))
+
+    def test_existing_repo_files_are_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _repo(Path(tmp).resolve() / "acme")
+            (repo / "CLAUDE.md").write_text("# Mine\n", encoding="utf-8")
+            skill = repo / ".claude/skills/ask-wiki/SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text("mine\n", encoding="utf-8")
+            wf.git(repo, "add", "-A")
+            wf.git(repo, "commit", "-q", "-m", "chore: mine")
+            result = _init(repo)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((repo / "CLAUDE.md").read_text(encoding="utf-8"), "# Mine\n")
+            self.assertEqual(skill.read_text(encoding="utf-8"), "mine\n")
+            self.assertTrue((repo / ".claude/skills/ask-wiki/SKILL.wiki-harness.md").is_file())
+            self.assertIn(f"Add this line to CLAUDE.md so agents find the wiki: {BRIDGE_LINK_LINE}", result.stdout)
+
+    def test_an_ignored_bridge_path_refuses_before_any_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _repo(Path(tmp).resolve() / "acme")
+            (repo / ".gitignore").write_text(".claude/\n", encoding="utf-8")
+            wf.git(repo, "add", "-A")
+            wf.git(repo, "commit", "-q", "-m", "chore: ignore")
+            result = _init(repo)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(".gitignore:1:.claude/", result.stderr)
+            self.assertFalse((repo / "wiki").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_bridge -q
+```
+
+Expected: `AttributeError: module 'init' has no attribute 'BRIDGE_FILES'`, exit 1.
+
+- [ ] **Step 3: Write the four templates** (`string.Template`, the four existing variables only;
+  no other `$`).
+
+`templates/bridge/WIKI.md.tmpl`:
+
+```markdown
+# ${wiki_title} — the wiki in `wiki/`
+
+This repository keeps an LLM-maintained wiki in its `wiki/` folder: the knowledge source of
+truth for ${org_name}. This file is for an agent whose session runs at the repository root,
+which is where you are when you read it.
+
+## Where you stand
+
+The wiki's own manuals — `wiki/AGENTS.md` and the `AGENTS.md` in each of its folders — write
+every path relative to the `wiki/` folder. From the repository root, put `wiki/` in front:
+
+| The wiki's manuals say | From the repository root |
+|---|---|
+| `index.md` | `wiki/index.md` |
+| `wiki/PAGE.md` (a knowledge page) | `wiki/wiki/PAGE.md` |
+| `sources/cards/CARD-ID.md` | `wiki/sources/cards/CARD-ID.md` |
+| `sources/raw/FILE` | `wiki/sources/raw/FILE` |
+| `python3 scripts/lint.py` | `python3 wiki/scripts/lint.py` |
+
+Run the wiki's scripts by their path from the repository root. Each one finds the wiki from its
+own location, so never `cd` into `wiki/` first: a second `cd wiki` would land in the pages
+folder `wiki/wiki/`.
+
+## Language
+
+Everything written into `wiki/` — pages, cards, gap records, the subjects of wiki commits — is
+in ${content_language}, whatever language the conversation uses. Answer the person in the
+language they use. A gap's `--prompt` keeps their exact words.
+
+## Commits
+
+- A commit that touches `wiki/` follows the wiki's commit convention (`wiki/AGENTS.md`,
+  "Commit convention"); the repository's hooks enforce it.
+- A commit that touches nothing in `wiki/` is never judged by the wiki's rules.
+- For a wiki operation, stage and commit only `wiki/` paths (`git add -- wiki`, then
+  `git commit -m "SUBJECT" -- wiki`), so nothing else that is staged is swept in.
+- `python3 wiki/scripts/gap.py` commits only its two gap files, on the current branch.
+- Branch and merge policy are this repository's own rules, not the wiki's. If it forbids
+  committing to its default branch, switch to a branch before recording a gap or ingesting. If
+  it squash-merges pull requests, the wiki's one-commit-per-operation history collapses into
+  one; a rebase merge keeps it, where the repository allows one.
+
+## Workflows from the repository root
+
+| Task | How |
+|---|---|
+| Answer a question about ${wiki_title} | Claude Code: the `ask-wiki` skill. Any agent: `wiki/AGENTS.md`, "Workflow: Query", with the path base above |
+| Record a question the wiki cannot answer | `wiki/AGENTS.md`, "Workflow: Record a gap" |
+| File a new source into the wiki | Claude Code: the `ingest-wiki` skill. Any agent: `wiki/AGENTS.md`, "Workflow: Ingest" |
+
+Cite from the root — `wiki/wiki/PAGE.md` and `wiki/sources/cards/CARD-ID.md` — never in the
+wiki-relative form.
+
+## After cloning
+
+Run `python3 wiki/scripts/lint.py`. If it reports `HOOKS`, do what its message says.
+```
+
+`templates/bridge/ask-wiki.SKILL.md.tmpl`:
+
+```markdown
+---
+name: ask-wiki
+description: Answer questions about ${wiki_title} (${org_name}'s knowledge) from this repository's wiki in `wiki/`, citing a wiki page and a source card for every claim. Use it BEFORE searching the code or the web whenever a question touches ${wiki_title}, or when you need this project's context before doing work. When the wiki cannot answer, it records the miss as a knowledge gap.
+---
+
+# Ask the wiki (${wiki_title})
+
+Your session runs at the repository root; the wiki is the `wiki/` folder. Read `WIKI.md` once
+for the path base, the language rule and the commit rules. Every path below is from the root.
+
+## 1. Find the pages
+
+Read `wiki/index.md` — one line per page, grouped by topic — and pick every page that may
+answer. When two or three look relevant, read them all.
+
+## 2. Read, follow links, then search
+
+Read the chosen pages in `wiki/wiki/` and follow their links. Still missing something: search
+the pages (`wiki/wiki/`), then the cards (`wiki/sources/cards/`). Open a raw source under
+`wiki/sources/raw/` only when a card lacks the detail, and read only the part you need.
+
+## 3. Answer with citations
+
+Every claim names where it comes from, as a path from the repository root: the page
+`wiki/wiki/PAGE.md` and the card it cites, `wiki/sources/cards/CARD-ID.md`. Say how far the
+card can be trusted (its `trust` field). If a page's `## Open questions` touches the question,
+say the wiki has not settled it.
+
+## 4. When the wiki cannot answer, say so and record a gap
+
+Say in one sentence that the wiki has no entry for this, and where you looked. Never fill the
+gap with general knowledge stated as fact; if you answer from general knowledge, label it so.
+Then record the miss — after you have composed your answer, because `--answer-given` is what
+you tell the person:
+
+    python3 wiki/scripts/gap.py add --service ${repo_name} --session SESSION-ID \
+      --context "what you were doing" --prompt "the person's exact words" \
+      --question "the replayable question asked of the wiki" \
+      --wiki-answer "what the wiki returned, or nothing" \
+      --answer-given "what you told the person" --topics TOPIC-A,TOPIC-B
+
+It commits only the two gap files, on the current branch. If this repository forbids
+committing to its default branch, switch to a branch first. Never edit
+`wiki/gaps/knowledge-gaps.jsonl` by hand and never use `--no-verify`.
+
+## 5. Offer to file new synthesis
+
+An answer assembled from several pages, or found outside the wiki, is new knowledge: offer to
+ingest it (the `ingest-wiki` skill), and wait for the person's yes.
+```
+
+`templates/bridge/ingest-wiki.SKILL.md.tmpl`:
+
+```markdown
+---
+name: ingest-wiki
+description: File a new source — a document, a session's findings, a thread — into this repository's ${wiki_title} wiki in `wiki/`: store the raw source, write its card, update the pages and the index, lint, and commit it as one ingest. Use it when the person asks to add, save or file knowledge about ${wiki_title}, or after they agree to file an answer back into the wiki.
+---
+
+# Ingest into the wiki (${wiki_title})
+
+Your session runs at the repository root; the wiki is the `wiki/` folder. Read `WIKI.md` first,
+then follow "Workflow: Ingest" in `wiki/AGENTS.md`, reading every path in it with `wiki/` in
+front. The steps, from the root:
+
+1. **Raw** — store the artifact verbatim under `wiki/sources/raw/` (rules:
+   `wiki/sources/AGENTS.md`). Knowledge born in this session has no raw; go to 2.
+2. **Card** — one card per source in `wiki/sources/cards/` (rules and the per-origin recipe:
+   `wiki/sources/cards/AGENTS.md`); its keys are exactly those in
+   `wiki/sources/cards/card-schema.json`.
+3. **Pages** — update or create the pages in `wiki/wiki/` each claim belongs to, citing the
+   card (rules: `wiki/wiki/AGENTS.md`).
+4. **Index** — add or update each page's line in `wiki/index.md`.
+5. **Lint** — `python3 wiki/scripts/lint.py` must exit 0. Fix what it reports.
+6. **Re-read** the pages you touched for contradictions; resolve them by trust and date, or
+   list them under the page's `## Open questions` and tell the person.
+7. **Commit** — only the wiki's paths, as one operation:
+
+       git add -- wiki
+       git commit -m "ingest(CARD-ID): SUMMARY" -- wiki
+
+   If this repository forbids committing to its default branch, switch to a branch first. Never
+   use `--no-verify`.
+
+Filling a recorded gap: after the ingest, close it with
+`python3 wiki/scripts/gap.py resolve GAP-ID --card CARD-ID --page wiki/PAGE.md` (the ledger
+records the page relative to the wiki folder), then
+`python3 wiki/scripts/gap.py measure GAP-ID --verdict answered --wiki-answer "WHAT IT SAYS NOW"`.
+```
+
+`templates/bridge/root-link.md.tmpl` (copied verbatim, not rendered):
+
+```markdown
+# Agent instructions
+
+Wiki: before you answer a question about this project's domain or change anything under `wiki/`, read @WIKI.md.
+```
+
+- [ ] **Step 4: Implement in `init.py`**
+
+Pure core:
+
+```python
+BRIDGE_TEMPLATES = "bridge"
+ROOT_LINK_TEMPLATE = "root-link.md.tmpl"
+SEEDED_ROOT_FILES = ("AGENTS.md", "CLAUDE.md")
+BRIDGE_CLOBBER_MESSAGE = ("init refuses: {path} and {side} both exist and wiki-harness did not "
+                          "write them; it never overwrites a file it did not create")
+BRIDGE_IGNORED_MESSAGE = ("init refuses: {path} would be ignored by git ({rule}); a bridge that "
+                          "is not committed does not travel with the repository. Add a negation "
+                          "such as !{folder}/ to that ignore file, then re-run init.")
+
+# One file of the bridge (spec 5.6): its logical name, canonical repo-relative path, manifest
+# role, source under templates/bridge/, whether it is rendered, and whether a repo-owned
+# file at the canonical path sends it to a side path (K11) or refuses.
+BridgeFile = namedtuple("BridgeFile", "logical canonical role source rendered allow_side")
+BRIDGE_FILES = (
+    BridgeFile("instructions", "WIKI.md", "template", "WIKI.md.tmpl", True, True),
+    BridgeFile("ask-skill", ".claude/skills/ask-wiki/SKILL.md", "template",
+               "ask-wiki.SKILL.md.tmpl", True, True),
+    BridgeFile("ingest-skill", ".claude/skills/ingest-wiki/SKILL.md", "template",
+               "ingest-wiki.SKILL.md.tmpl", True, True),
+)
+# Where plan_bridge() puts one bridge file.
+BridgeWrite = namedtuple("BridgeWrite", "logical path role source rendered")
+
+
+def recorded_logicals(files, recorded_paths):
+    """Pure. {logical: recorded path} for the manifest's bridge paths each logical file owns
+    (its canonical path, or that path's side path)."""
+    owned = {}
+    for f in files:
+        for path in (f.canonical, side_path(f.canonical)):
+            if path in recorded_paths:
+                owned[f.logical] = path
+    return owned
+
+
+def plan_bridge(files, recorded, present):
+    """Pure. K11 and H3: where each bridge file goes. A recorded file stays where it was
+    recorded (sticky); otherwise its canonical path when nothing is there; otherwise its side
+    path (when allowed) when nothing is there; otherwise a refusal. `present` is the set of
+    repo-relative paths that exist. Returns (writes, refusal)."""
+    writes = []
+    for f in files:
+        if f.logical in recorded:
+            path = recorded[f.logical]
+        elif f.canonical not in present:
+            path = f.canonical
+        elif f.allow_side and side_path(f.canonical) not in present:
+            path = side_path(f.canonical)
+        else:
+            side = side_path(f.canonical) if f.allow_side else f.canonical
+            return [], BRIDGE_CLOBBER_MESSAGE.format(path=f.canonical, side=side)
+        writes.append(BridgeWrite(f.logical, path, f.role, f.source, f.rendered))
+    return writes, None
+
+
+def seeded_root_writes(present):
+    """Pure. K9: the root instruction files init creates -- each one only when absent."""
+    return [name for name in SEEDED_ROOT_FILES if name not in present]
+
+
+def link_summary_lines(present):
+    """Pure. D5: one line per existing root instruction file, naming the link line to add."""
+    return [f"Add this line to {name} so agents find the wiki: {BRIDGE_LINK_LINE}"
+            for name in SEEDED_ROOT_FILES if name in present]
+```
+
+(`side_path`, `BRIDGE_LINK_LINE` join the `repo_layout` import.)
+
+Edges:
+
+```python
+class BridgeError(Exception):
+    """A bridge path failed its containment proof (H4); main() exits 2."""
+
+
+def bridge_present(root, paths):
+    """Impure edge. The subset of repo-relative `paths` that exist (a broken symlink counts)."""
+    return {p for p in paths if (root / p).exists() or (root / p).is_symlink()}
+
+
+def ignored_paths(root, paths):
+    """Impure edge. [(path, 'source:line:pattern')] for every path git would ignore."""
+    result = _git(root, "check-ignore", "--no-index", "-v", "--", *paths)
+    found = []
+    for line in result.stdout.splitlines():
+        rule, _, path = line.partition("\t")
+        found.append((path, rule))
+    return found
+
+
+def contained(root, rel):
+    """Impure edge (resolves the filesystem). H4: a bridge path is relative, has no `..`, is not
+    under .git, and its resolved parent lies inside the resolved repository root."""
+    p = PurePosixPath(rel)
+    if p.is_absolute() or ".." in p.parts or (p.parts and p.parts[0] == ".git"):
+        return False
+    top = Path(root).resolve()
+    parent = (Path(root) / rel).parent.resolve()
+    return parent.is_relative_to(top) and not parent.is_relative_to(top / ".git")
+
+
+def render_bridge(library_root, writes, values):
+    """Impure edge (reads templates). {path: bytes} for each planned write."""
+    out = {}
+    for w in writes:
+        text = (Path(library_root) / "templates" / BRIDGE_TEMPLATES / w.source).read_text(encoding="utf-8")
+        out[w.path] = (render(text, values) if w.rendered else text).encode("utf-8")
+    return out
+
+
+def write_bridge(root, contents, executable=()):
+    """Impure edge. Writes each path only after its containment proof; `executable` paths get
+    mode 755."""
+    for rel, data in contents.items():
+        if not contained(root, rel):
+            raise BridgeError(f"bridge path {rel!r} escapes the repository root")
+        path = Path(root) / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        if rel in executable:
+            path.chmod(0o755)
+
+
+def bridge_entries(root, writes):
+    """Impure edge. The manifest's bridge section for these writes."""
+    hashes = hash_tree(Path(root), [w.path for w in writes])
+    return {w.path: {"role": w.role, "sha256": hashes[w.path]} for w in writes if w.path in hashes}
+```
+
+`write_manifest_file(library_root, target, values, scripts_paths, hooks_paths, bridge=None)`
+passes `bridge` to `compute_manifest`. In `main`, after `git_init` and before `wiki.mkdir()`,
+plan and check, then write after `scaffold_wiki`:
+
+```python
+    files = list(BRIDGE_FILES)
+    candidates = [p for f in files for p in (f.canonical, side_path(f.canonical))]
+    present = bridge_present(root, candidates + list(SEEDED_ROOT_FILES))
+    writes, refusal = plan_bridge(files, {}, present)
+    seeded = seeded_root_writes(present)
+    ignored = ignored_paths(root, [w.path for w in writes] + seeded)
+    if refusal or ignored:
+        if facts.top_level is None:
+            shutil.rmtree(root / ".git", ignore_errors=True)    # init created it a moment ago
+        if refusal:
+            print(refusal, file=sys.stderr)
+        for path, rule in ignored:
+            folder = PurePosixPath(path).parts[0]
+            print(BRIDGE_IGNORED_MESSAGE.format(path=path, rule=rule, folder=folder), file=sys.stderr)
+        return 2
+```
+
+After `scaffold_wiki(...)` (which now returns the paths it needs):
+
+```python
+    scripts_paths, hooks_paths = scaffold_wiki(library_root, wiki, values, origins)  # steps 4-10
+    try:                                                                              # step 6b
+        write_bridge(root, render_bridge(library_root, writes, values))
+        root_link = (library_root / "templates" / BRIDGE_TEMPLATES / ROOT_LINK_TEMPLATE).read_bytes()
+        write_bridge(root, {name: root_link for name in seeded})
+    except BridgeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    write_manifest_file(library_root, wiki, values, scripts_paths, hooks_paths,
+                        bridge=bridge_entries(root, writes))
+    footprint = [WIKI_FOLDER] + [w.path for w in writes] + seeded
+```
+
+and the summary line becomes
+`summary_text(root, commit_hash, version, hooks_summary_lines(plan), link_summary_lines(present))`.
+`shutil` and `PurePosixPath` join the imports. Every edge name goes into the module docstring.
+
+- [ ] **Step 5: Run the tests and the ratchet lines**
+
+```bash
+python3 -m unittest tests.test_bridge tests.test_init_in_host tests.test_init tests.test_genericity tests.test_build_release tests.test_templates -q
+python3 tools/e2e_in_host.py --only G1 --only G6.W5 --only G6.W6
+```
+
+Expected: `OK`; `TOTAL 26/26`, exit 0 (G1's 24 lines now with the bridge in the footprint, plus
+W5 and W6).
+
+#### Verify
+
+- **Goal:** D5 (new files only, recorded with hashes; the link line printed for an existing root
+  file), K9 (absent root files created with the link), K10 (skills name the domain from `init`'s
+  values), K11 (a repo-owned bridge path gets a side file), H3, H4; G6's W5 and W6.
+- **Red:** `python3 -m unittest tests.test_bridge -q` → `AttributeError: module 'init' has no attribute 'BRIDGE_FILES'`, exit 1.
+- **Green:** `python3 -m unittest tests.test_bridge tests.test_init_in_host tests.test_init tests.test_genericity tests.test_build_release tests.test_templates -q` → `OK`, exit 0; `python3 tools/e2e_in_host.py --only G1 --only G6.W5 --only G6.W6` → `TOTAL 26/26`, exit 0.
+- **Stub check:** writing every bridge file at its canonical path clobbers the owner's
+  `SKILL.md` and fails `test_existing_repo_files_are_never_overwritten`; skipping the ignore
+  check fails `test_an_ignored_bridge_path_refuses_before_any_write`; writing no manifest section
+  fails the `bridge` assertion.
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_bridge -q
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add templates/bridge init.py tests/test_bridge.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "feat(init): write the bridge -- WIKI.md, the ask-wiki and ingest-wiki skills, the root link" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 14/26'
+```
+
+---
+
+### Task 15: D4 — side files beside the repository's own hooks, print-only outside the work tree
+
+**Files**
+- Create: `templates/bridge/pre-commit.wiki-harness`, `templates/bridge/commit-msg.wiki-harness` (mode 755)
+- Modify: `init.py` (pure `side_hook_files`, `hooks_summary_lines` side-files branch; `main` adds the side files to the bridge and makes them executable)
+- Create: `tests/test_init_hooks_d4.py`
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_init_hooks_d4.py`:
+
+```python
+"""D4: wire when the repository has no hooks; otherwise never touch its hooks (G3, S2)."""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+sys.path.insert(0, str(HERE))
+import wiki_fixtures as wf  # noqa: E402
+
+OWNER = "#!/bin/sh\necho owner >> \"$(git rev-parse --git-dir)/owner.log\"\n"
+
+
+def _repo(path):
+    path.mkdir(parents=True)
+    wf.git(path, "init", "-q")
+    (path / "src").mkdir()
+    (path / "src" / "app.py").write_text("print(1)\n", encoding="utf-8")
+    wf.git(path, "add", "-A")
+    wf.git(path, "commit", "-q", "-m", "feat: host")
+    return path
+
+
+def _init(repo):
+    return subprocess.run([sys.executable, str(ROOT / "init.py"), ".", "--wiki-title", "Acme",
+                           "--non-interactive"], cwd=str(repo), capture_output=True, text=True,
+                          env=wf.git_env(), timeout=600)
+
+
+def _lint(repo):
+    return subprocess.run([sys.executable, "wiki/scripts/lint.py"], cwd=str(repo),
+                          capture_output=True, text=True, env=wf.git_env(), timeout=300)
+
+
+class Husky(unittest.TestCase):
+    def test_side_files_beside_the_owner_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _repo(Path(tmp).resolve() / "acme")
+            hook = repo / ".husky" / "pre-commit"
+            hook.parent.mkdir()
+            hook.write_text(OWNER, encoding="utf-8")
+            hook.chmod(0o755)
+            wf.git(repo, "config", "core.hooksPath", ".husky")
+            wf.git(repo, "add", "-A")
+            wf.git(repo, "commit", "-q", "--no-verify", "-m", "chore: husky")
+            result = _init(repo)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(hook.read_text(encoding="utf-8"), OWNER)
+            self.assertEqual(wf.git(repo, "config", "--get", "core.hooksPath").stdout.strip(), ".husky")
+            for name in ("pre-commit", "commit-msg"):
+                side = repo / ".husky" / f"{name}.wiki-harness"
+                self.assertTrue(side.is_file() and os.access(side, os.X_OK), name)
+                self.assertIn(f"wiki/.githooks/{name}", side.read_text(encoding="utf-8").splitlines()[-1])
+            bridge = json.loads((repo / "wiki/.wiki-harness-manifest.json").read_text(encoding="utf-8"))["bridge"]
+            self.assertEqual(bridge[".husky/pre-commit.wiki-harness"]["role"], "managed")
+            self.assertIn(".husky/pre-commit.wiki-harness", wf.git(repo, "ls-files").stdout)
+            self.assertIn("add the line in .husky/pre-commit.wiki-harness to .husky/pre-commit", _lint(repo).stdout)
+            self.assertIn("Merge .husky/pre-commit.wiki-harness into .husky/pre-commit", result.stdout)
+
+
+class HooksInTheGitDir(unittest.TestCase):
+    def test_print_only_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _repo(Path(tmp).resolve() / "acme")
+            shim = repo / ".git" / "hooks" / "pre-commit"
+            shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            shim.chmod(0o755)
+            result = _init(repo)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(wf.git(repo, "config", "--get", "core.hooksPath").returncode, 1)
+            self.assertFalse(list(repo.rglob("*.wiki-harness")))
+            self.assertIn('pre-commit: "$(git rev-parse --show-toplevel)/wiki/.githooks/pre-commit" || exit 1',
+                          result.stdout)
+            self.assertIn("ERROR HOOKS", _lint(repo).stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_init_hooks_d4 -q
+```
+
+Expected: `Husky` fails (no `.husky/pre-commit.wiki-harness`); `HooksInTheGitDir` passes already
+(Task 13 prints the lines). Exit 1.
+
+- [ ] **Step 3: Write the side-file templates** — `templates/bridge/pre-commit.wiki-harness`:
+
+```sh
+#!/bin/sh
+# wiki-harness: the wiki's pre-commit check. This repository already had its own commit hooks,
+# so wiki-harness did not replace them. Add the last line of this file to the pre-commit hook
+# beside it. Keep this file: `upgrade` keeps it current, and lint reports HOOKS until that line
+# runs on every commit.
+"$(git rev-parse --show-toplevel)/wiki/.githooks/pre-commit" || exit 1
+```
+
+`templates/bridge/commit-msg.wiki-harness`:
+
+```sh
+#!/bin/sh
+# wiki-harness: the wiki's commit-msg check. This repository already had its own commit hooks,
+# so wiki-harness did not replace them. Add the last line of this file to the commit-msg hook
+# beside it (create that hook if there is none). Keep this file: `upgrade` keeps it current, and
+# lint reports HOOKS until that line runs on every commit.
+"$(git rev-parse --show-toplevel)/wiki/.githooks/commit-msg" "$1" || exit 1
+```
+
+Both `chmod 755` and committed with that mode.
+
+- [ ] **Step 4: Implement in `init.py`**
+
+```python
+def side_hook_files(plan):
+    """Pure. D4: the hook side files a `side-files` plan adds to the bridge; never the hooks
+    themselves, and never a side path of a side path (a collision refuses)."""
+    if plan.action != SIDE_FILES:
+        return []
+    return [BridgeFile(f"{hook}-side", f"{plan.hooks_dir}/{hook}.{SIDE_MARKER}", "managed",
+                       f"{hook}.{SIDE_MARKER}", False, False) for hook in HOOK_NAMES]
+```
+
+`hooks_summary_lines` gains, before the print-only branch:
+
+```python
+    if plan.action == SIDE_FILES:
+        lines = ["Hooks: this repository already has its own commit hooks, so wiki-harness did not "
+                 "change them. The wiki's checks are NOT active until you:"]
+        lines += [f"  Merge {plan.hooks_dir}/{hook}.{SIDE_MARKER} into {plan.hooks_dir}/{hook} "
+                  "(its last line)." for hook in HOOK_NAMES]
+        lines.append("Lint reports HOOKS until then.")
+        return lines
+```
+
+In `main`, the hooks plan is gathered before the bridge is planned (`plan = gather_hooks_plan(root)`
+moves up, right after `git_init`), `files = list(BRIDGE_FILES) + side_hook_files(plan)`, and the
+side files are written executable:
+`write_bridge(root, render_bridge(library_root, writes, values), executable={w.path for w in writes if w.logical.endswith("-side")})`.
+`SIDE_MARKER` joins the `repo_layout` import.
+
+- [ ] **Step 5: Run the tests and the ratchet lines**
+
+```bash
+python3 -m unittest tests.test_init_hooks_d4 tests.test_bridge tests.test_init_in_host -q
+python3 tools/e2e_in_host.py --only G3
+```
+
+Expected: `OK`; `TOTAL 7/7`, exit 0 (G3.4–G3.7 now pass: side files written and merged, both
+manager configs prove the hooks).
+
+#### Verify
+
+- **Goal:** D4 (wire if empty; otherwise a side file named with `wiki-harness`, the owner's hook
+  untouched), S2 (print-only outside the work tree), G3 (both D4 cases; HOOKS reported until the
+  merge).
+- **Red:** `python3 -m unittest tests.test_init_hooks_d4 -q` → `FAILED (failures=1)`, `Husky.test_side_files_beside_the_owner_hooks`.
+- **Green:** `python3 -m unittest tests.test_init_hooks_d4 tests.test_bridge tests.test_init_in_host -q` → `OK`, exit 0; `python3 tools/e2e_in_host.py --only G3` → `TOTAL 7/7`, exit 0.
+- **Stub check:** setting `core.hooksPath` in a husky repo fails the `.husky` config assertion;
+  writing side files without recording them fails the manifest assertion; skipping the mode
+  fails the `os.X_OK` assertion.
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_init_hooks_d4 -q
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add templates/bridge/pre-commit.wiki-harness templates/bridge/commit-msg.wiki-harness init.py tests/test_init_hooks_d4.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "feat(init): leave a repository's own hooks alone and write the wiki's beside them" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 15/26'
+```
+
+---
