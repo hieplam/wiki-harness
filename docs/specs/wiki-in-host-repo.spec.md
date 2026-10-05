@@ -426,7 +426,7 @@ with the matching rule (`git check-ignore -v` output) — a bridge that does not
 clone breaks G6 for every other clone, and force-adding past the owner's ignore rules would
 override repo policy. The refusal says to add a negation such as `!.claude/skills/` and re-run.
 
-The `WIKI.md` and skill texts are written out in full in the plan (Task 13). Their content
+The `WIKI.md` and skill texts are written out in full in the plan (Task 14). Their content
 requirements, each traceable to #46 or granado-espada's bridge:
 
 - path base: the wiki's manuals write paths relative to `wiki/`; from the root, prefix `wiki/`;
@@ -483,7 +483,7 @@ Flow:
 3. `git init -q` only when the target is not already a top level (new/empty directory, or
    `--force`); never writes `user.name` / `user.email` (H2);
 4. `scaffold_wiki(library_root, <root>/wiki, values, origins)` — steps 4–10 of 1.x unchanged,
-   against the wiki folder (refactored out of `main`, Task 9);
+   against the wiki folder (refactored out of `main`, plan Task 5);
 5. hooks: gather facts, `plan_hooks`; `wire` sets `core.hooksPath wiki/.githooks` and reads it
    back; `side-files` adds the two side files to the bridge plan;
 6. bridge: render, plan, write; root `AGENTS.md` / `CLAUDE.md` created from
@@ -659,7 +659,7 @@ Checks (ids are stable; the plan's tasks name them):
 | G11 | granado-shaped fixture (V1 init into `<root>/wiki`, `.git` removed, root `.githooks/` with granado's two hooks, `core.hooksPath .githooks`, hand-written `.claude/skills/ask-wiki/SKILL.md`, root `CLAUDE.md`) upgraded to R1: G11.1 exit 0; G11.2 the hand-written skill byte-identical and `SKILL.wiki-harness.md` beside it; G11.3 `.claude/skills/ingest-wiki/SKILL.md` and `WIKI.md` created; G11.4 `.githooks/pre-commit` byte-identical and `.githooks/pre-commit.wiki-harness` present; G11.5 the manifest's `bridge` lists them; G11.6 root `CLAUDE.md` byte-identical, the link line printed, lint WARNs `BRIDGE`; G11.7 lint has no `ERROR HOOKS` (granado's hooks call `wiki/scripts/lint.py`) |
 
 Baseline: the plan's Tasks 1–3 build the tool; Task 3 commits its full output on the unchanged
-library as `docs/evidence/in-host-e2e-baseline.txt` before any build task. Every build task's
+library as `docs/evidence/in-host-e2e-baseline.txt` before any build task (71 checks). Every build task's
 Green names the check ids it turns from FAIL to PASS. Task 25 commits
 `docs/evidence/in-host-e2e-after.txt`; the done claim is `TOTAL n/n` there against the baseline
 total, and no check may go PASS → FAIL between them.
@@ -673,8 +673,8 @@ target; lifecycle code is exercised against an empty directory and against a rep
 has code and hooks.
 
 Fixtures. Once `init` produces only the in-host layout, every existing test that needs a
-standalone wiki builds it through `tests/fixtures/standalone_wiki.py:build_standalone_wiki`
-(Task 9), which reproduces a 1.x consumer's shape — wiki root = repo root, `core.hooksPath
+standalone wiki builds it through `tests/wiki_fixtures.py:build_standalone_wiki`
+(plan Task 5; `build_in_host_wiki` builds the in-host shape for script-level tests), which reproduces a 1.x consumer's shape — wiki root = repo root, `core.hooksPath
 .githooks`, the library's own `scaffold_wiki` output, one commit — instead of calling
 `init.py`. Those tests' assertions stay unchanged (G9 Verify: "the existing suite's
 lint/upgrade/hook assertions stay unchanged"). `tests/test_init.py` asserts `init`'s own
@@ -726,7 +726,7 @@ and is not deterministic); its transcripts go into the PR evidence.
 | The amend rule over-checks `--allow-empty` right after a wiki commit | accepted over-check (Oracle) |
 | `upgrade` loads the target release's `init` module while `repo_layout` / `manifest` are already imported from the running release (Python's module cache) | pre-existing pattern for `manifest`; both modules keep backward-compatible signatures; noted in `upgrade.py`'s docstring |
 | Host `.gitignore` ignores `.claude/` | refused before any write, with the rule and the negation to add (§5.6) |
-| Squash merge loses the `BREAKING CHANGE:` footer | `feat(init)!` title alone forces MAJOR; the squash body is passed explicitly and checked after merge (Task 23) |
+| Squash merge loses the `BREAKING CHANGE:` footer | `feat(init)!` title alone forces MAJOR; the squash body is passed explicitly and checked after merge (plan Task 25) |
 
 Rollback: the release is one squash commit; reverting it on `main` restores 1.4.1 behaviour for
 new `init`s. Wikis initialised by 2.0 keep working with 2.0 scripts (vendored); a 1.x `upgrade`

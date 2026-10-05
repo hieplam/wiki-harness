@@ -1395,7 +1395,7 @@ baseline is measured, never adjusted).
 - **Goal:** the committed tool measures the baseline for G1–G9 and G11 before any build task
   (card "Goals", Ratchet column).
 - **Red:** `python3 -m unittest tests.test_e2e_in_host_tool -q` → `AttributeError: module 'e2e_in_host' has no attribute 'R2_MARK_MD'`, exit 1.
-- **Green:** `python3 -m unittest tests.test_e2e_in_host_tool -q` → `OK`, exit 0; and `tail -n 1 docs/evidence/in-host-e2e-baseline.txt` → a `TOTAL` line whose second number is 81 (24 G1 + 1 G1.7 + 8 G2 + 7 G3 + 4 G4 + 5 G5 + 6 G6 + 4 G7 + 1 G8 + 4 G9 + 7 G11), with `grep -c '^PASS' docs/evidence/in-host-e2e-baseline.txt` → `16`.
+- **Green:** `python3 -m unittest tests.test_e2e_in_host_tool -q` → `OK`, exit 0; and `tail -n 1 docs/evidence/in-host-e2e-baseline.txt` → a `TOTAL` line whose second number is 71 (24 G1 + 1 G1.7 + 8 G2 + 7 G3 + 4 G4 + 5 G5 + 6 G6 + 4 G7 + 1 G8 + 4 G9 + 7 G11), with `grep -c '^PASS' docs/evidence/in-host-e2e-baseline.txt` → `16`.
 - **Stub check:** a baseline file written by hand would not reproduce: `python3 tools/e2e_in_host.py --only G9 --only G11.7` re-run in the audit must reproduce its G9 and G11.7 lines; a builder that skipped the published-hash check could not report `PASS G9.1` once the tag is missing (setup FAIL).
 
 #### Done
@@ -3819,7 +3819,8 @@ python3 -m unittest tests.test_init tests.test_init_in_host tests.test_init_targ
 python3 tools/e2e_in_host.py --only G1
 ```
 
-Expected: `OK`; the ratchet prints `PASS` for G1.1–G1.6 on all four forms: `TOTAL 24/24`, exit 0.
+Expected: `OK`; the ratchet prints `PASS` for G1.1–G1.6 on all four forms and for G1.7 (the
+payload init; `--only G1` also selects it): `TOTAL 25/25`, exit 0.
 
 #### Verify
 
@@ -3827,7 +3828,7 @@ Expected: `OK`; the ratchet prints `PASS` for G1.1–G1.6 on all four forms: `TO
   byte-identical in worktree and index, config changed only by the D4 wiring, commit only the
   footprint, relative and absolute targets) with H1/H2.
 - **Red:** `python3 -m unittest tests.test_init_in_host -q` → `FAILED`, `test_dot_target_at_a_codebase_root` with `2 != 0` (`is not empty`).
-- **Green:** `python3 -m unittest tests.test_init tests.test_init_in_host tests.test_init_target tests.test_commit_gate -q` → `OK`, exit 0; `python3 tools/e2e_in_host.py --only G1` → `TOTAL 24/24`, exit 0.
+- **Green:** `python3 -m unittest tests.test_init tests.test_init_in_host tests.test_init_target tests.test_commit_gate -q` → `OK`, exit 0; `python3 tools/e2e_in_host.py --only G1` → `TOTAL 25/25`, exit 0.
 - **Stub check:** an init that still scaffolds into the target fails G1.2 and the
   `wiki/index.md` assertion; one that commits with `git add -A` commits `src/staged.py` and fails
   G1.4/G1.6; one that writes `user.name` fails the config assertion (G1.5).
@@ -4335,7 +4336,7 @@ python3 -m unittest tests.test_bridge tests.test_init_in_host tests.test_init te
 python3 tools/e2e_in_host.py --only G1 --only G6.W5 --only G6.W6
 ```
 
-Expected: `OK`; `TOTAL 26/26`, exit 0 (G1's 24 lines now with the bridge in the footprint, plus
+Expected: `OK`; `TOTAL 27/27`, exit 0 (G1's 25 lines now with the bridge in the footprint, plus
 W5 and W6).
 
 #### Verify
@@ -4344,7 +4345,7 @@ W5 and W6).
   file), K9 (absent root files created with the link), K10 (skills name the domain from `init`'s
   values), K11 (a repo-owned bridge path gets a side file), H3, H4; G6's W5 and W6.
 - **Red:** `python3 -m unittest tests.test_bridge -q` → `AttributeError: module 'init' has no attribute 'BRIDGE_FILES'`, exit 1.
-- **Green:** `python3 -m unittest tests.test_bridge tests.test_init_in_host tests.test_init tests.test_genericity tests.test_build_release tests.test_templates -q` → `OK`, exit 0; `python3 tools/e2e_in_host.py --only G1 --only G6.W5 --only G6.W6` → `TOTAL 26/26`, exit 0.
+- **Green:** `python3 -m unittest tests.test_bridge tests.test_init_in_host tests.test_init tests.test_genericity tests.test_build_release tests.test_templates -q` → `OK`, exit 0; `python3 tools/e2e_in_host.py --only G1 --only G6.W5 --only G6.W6` → `TOTAL 27/27`, exit 0.
 - **Stub check:** writing every bridge file at its canonical path clobbers the owner's
   `SKILL.md` and fails `test_existing_repo_files_are_never_overwritten`; skipping the ignore
   check fails `test_an_ignored_bridge_path_refuses_before_any_write`; writing no manifest section
@@ -5084,6 +5085,7 @@ git commit -m "feat(templates): state the manual's path base and a layout-neutra
 """upgrade in a host repository touches only the wiki's footprint (G5, H1, K6)."""
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -5143,7 +5145,9 @@ class InHost(unittest.TestCase):
             self.assertEqual(after_index, before_index)
             self.assertIn("src/staged.py", wf.git(root, "diff", "--cached", "--name-only").stdout)
             changed = wf.git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").stdout.split()
-            self.assertTrue(changed and all(p.startswith("wiki/") for p in changed), changed)
+            manifest = json.loads((root / "wiki/.wiki-harness-manifest.json").read_text(encoding="utf-8"))
+            bridge = set(manifest.get("bridge", {}))   # Task 20 installs one; the footprint grows with it
+            self.assertTrue(changed and all(p.startswith("wiki/") or p in bridge for p in changed), changed)
 
     def test_an_absolute_target_from_elsewhere(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5665,7 +5669,7 @@ Expected: `OK`, `OK`; `TOTAL 11/11`, exit 0.
   as drift and not overwritten without `--adopt-drift`; a D4 side file is updated, the repo's
   own hook never) and G11 (a 1.x in-host wiki gains the bridge as new files; an existing
   repo-owned bridge path gets the harness version beside it); H3.
-- **Red:** `python3 -m unittest tests.test_upgrade_bridge -q` → `FAILED (failures=4, errors=0)` or more (all but `Namespaces`).
+- **Red:** `python3 -m unittest tests.test_upgrade_bridge -q` → `FAILED`, exit 1: every test except `Namespaces` fails.
 - **Green:** `python3 -m unittest tests.test_upgrade_bridge tests.test_upgrade_in_host -q` → `OK`, exit 0; `python3 -m unittest tests.test_upgrade -q` → `OK`, exit 0; `python3 tools/e2e_in_host.py --only G7 --only G11` → `TOTAL 11/11`, exit 0.
 - **Stub check:** rewriting every bridge file unconditionally overwrites the owner's skill
   (`test_an_owner_edit_blocks_until_adopted` fails); skipping the first install leaves
@@ -5808,3 +5812,756 @@ git commit -m "fix(upgrade): adopt a wiki folder in a host repository by the D4 
 ```
 
 ---
+
+### Task 22: G6's oracle — `tools/e2e_agent_session.py`, three headless sessions at the root
+
+Builds the evidence tool of spec §7.3. It is run for real once, in Task 25 (it costs money and
+is not deterministic); this task proves its pure verdicts and its scenario with `--dry-run`.
+
+**Files**
+- Create: `tools/e2e_agent_session.py`
+- Create: `tests/test_e2e_agent_session_tool.py`
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_e2e_agent_session_tool.py`:
+
+```python
+"""The G6 agent-session tool: its pure verdicts, and a dry run that builds the scenario."""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+import e2e_agent_session as g6  # noqa: E402
+
+
+def _stream(skill, answer):
+    events = [{"type": "system", "subtype": "init", "skills": ["ask-wiki"]}]
+    if skill:
+        events.append({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Skill", "input": {"skill": skill}}]}})
+    events.append({"type": "assistant", "message": {"content": [{"type": "text", "text": answer}]}})
+    events.append({"type": "result", "subtype": "success", "result": answer})
+    return "\n".join(json.dumps(e) for e in events) + "\nnot json\n"
+
+
+class Verdicts(unittest.TestCase):
+    def test_query_needs_the_skill_the_fact_and_a_root_citation(self):
+        good = g6.parse_events(_stream("ask-wiki", "Use 7.3 Nm (wiki/wiki/gizmo-fastening.md)."))
+        self.assertTrue(g6.verdict_query(good)[0])
+        self.assertFalse(g6.verdict_query(g6.parse_events(_stream(None, "7.3 Nm (wiki/wiki/gizmo-fastening.md)")))[0])
+        self.assertFalse(g6.verdict_query(g6.parse_events(_stream("ask-wiki", "7.3 Nm (./wiki/gizmo-fastening.md)")))[0])
+
+    def test_gap_needs_exactly_one_path_scoped_gap_commit(self):
+        gap = ("gap(gap-2026-10-05-001): record unanswered question",
+               ["wiki/gaps/KNOWLEDGE_GAP.md", "wiki/gaps/knowledge-gaps.jsonl"])
+        self.assertTrue(g6.verdict_gap([gap])[0])
+        self.assertFalse(g6.verdict_gap([gap, ("lint: x", ["wiki/index.md"])])[0])
+        self.assertFalse(g6.verdict_gap([(gap[0], gap[1] + ["src/app.py"])])[0])
+
+    def test_ingest_needs_one_ingest_commit_inside_wiki_and_a_clean_lint(self):
+        ingest = ("ingest(src-2026-10-05-001): file the washers note",
+                  ["wiki/index.md", "wiki/sources/cards/src-2026-10-05-001.md"])
+        self.assertTrue(g6.verdict_ingest([ingest], 0)[0])
+        self.assertFalse(g6.verdict_ingest([ingest], 1)[0])
+        self.assertFalse(g6.verdict_ingest([(ingest[0], ingest[1] + ["notes/x.md"])], 0)[0])
+
+    def test_the_session_is_isolated_and_bounded(self):
+        argv = g6.claude_argv("q", "sonnet", 1.5)
+        for flag in ("--setting-sources", "--strict-mcp-config", "--no-session-persistence",
+                     "--max-budget-usd", "--allowedTools"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "project")
+
+
+class DryRun(unittest.TestCase):
+    def test_dry_run_builds_the_scenario_and_prints_three_sessions(self):
+        result = subprocess.run([sys.executable, str(ROOT / "tools" / "e2e_agent_session.py"), "--dry-run"],
+                                capture_output=True, text=True, timeout=900)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sum(1 for line in result.stdout.splitlines() if line.startswith("claude -p")), 3)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_e2e_agent_session_tool -q
+```
+
+Expected: `ModuleNotFoundError: No module named 'e2e_agent_session'`, exit 1.
+
+- [ ] **Step 3: Write `tools/e2e_agent_session.py`**
+
+```python
+#!/usr/bin/env python3
+"""G6's oracle (card wiki-in-host-repo, spec 7.3): three headless Claude Code sessions at the
+root of a freshly initialised repository that has NO hand-written bridge.
+
+1. query  -- a question the wiki answers: the ask-wiki skill runs and the answer cites the
+             page from the repository root;
+2. gap    -- a question it cannot answer: exactly one gap commit, holding only the two gap files;
+3. ingest -- "file this note": exactly one ingest commit inside wiki/, and lint exits 0.
+
+It costs money and is not deterministic: run it once at delivery, never in CI. Transcripts
+and a verdict file go to --out. Repo-internal (tools/), never vendored.
+
+Pure core: claude_argv(), parse_events(), skill_invocations(), final_text(), verdict_query(),
+verdict_gap(), verdict_ingest().
+Impure edges: everything below the marker.
+Python 3.9 stdlib only.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+ALLOWED_TOOLS = ",".join((
+    "Read", "Grep", "Glob", "Skill", "Write", "Edit",
+    "Bash(python3 wiki/scripts/gap.py:*)", "Bash(python3 wiki/scripts/lint.py:*)",
+    "Bash(python3 wiki/scripts/card_frontmatter_lint.py:*)", "Bash(git add:*)",
+    "Bash(git commit:*)", "Bash(git status:*)", "Bash(git log:*)", "Bash(git diff:*)",
+    "Bash(git switch:*)", "Bash(cp:*)", "Bash(mkdir:*)",
+))
+QUERY = "What torque should I use for the Zarnex gizmo housing bolts, and why?"
+GAP_QUESTION = "What is the IP rating of the Zarnex gizmo housing?"
+INGEST = "File notes/zarnex-washers.md into the wiki."
+PAGE = ("---\ntitle: Gizmo fastening\ntopics: [assembly]\n---\n"
+        "The Zarnex gizmo housing bolts are tightened to **7.3 Nm**, never more: above 7.5 Nm the "
+        "polymer boss cracks within a week (card "
+        "[src-2026-01-02-001](../sources/cards/src-2026-01-02-001.md)).\n")
+CARD = ("---\nid: src-2026-01-02-001\ndate: 2026-01-02\norigin: session\ntrust: verified-in-code\n"
+        "topics: [assembly]\n---\n## Claims\n"
+        "- Zarnex gizmo housing bolts: 7.3 Nm; above 7.5 Nm the polymer boss cracks.\n")
+NOTE = ("# Zarnex washers\n\nEvery Zarnex gizmo housing bolt takes one 4 mm nylon washer; a steel "
+        "washer chips the polymer boss. Measured on the assembly line, 2026-10-01.\n")
+
+
+# ---- pure core ----
+
+def claude_argv(prompt, model, budget):
+    """Pure. One isolated, bounded headless session (user settings, MCP servers and session
+    history all excluded; only the listed tools allowed)."""
+    return ["claude", "-p", prompt, "--model", model, "--max-budget-usd", str(budget),
+            "--setting-sources", "project", "--strict-mcp-config", "--no-session-persistence",
+            "--permission-mode", "default", "--allowedTools", ALLOWED_TOOLS,
+            "--output-format", "stream-json", "--verbose"]
+
+
+def parse_events(text):
+    """Pure. stream-json lines in, the JSON objects out; a line that is not JSON is skipped."""
+    events = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
+def skill_invocations(events):
+    """Pure. The skills the session invoked through the Skill tool, in order."""
+    names = []
+    for event in events:
+        if event.get("type") != "assistant":
+            continue
+        for block in (event.get("message") or {}).get("content") or []:
+            if block.get("type") == "tool_use" and block.get("name") == "Skill":
+                names.append((block.get("input") or {}).get("skill"))
+    return names
+
+
+def final_text(events):
+    """Pure. The session's final answer: the result event's text, else the last text block."""
+    for event in reversed(events):
+        if event.get("type") == "result" and event.get("result"):
+            return event["result"]
+    for event in reversed(events):
+        for block in reversed((event.get("message") or {}).get("content") or []):
+            if block.get("type") == "text":
+                return block.get("text", "")
+    return ""
+
+
+def verdict_query(events):
+    """Pure. (ok, reason) for session 1."""
+    text = final_text(events)
+    skills = skill_invocations(events)
+    ok = "ask-wiki" in skills and "7.3" in text and "wiki/wiki/gizmo-fastening.md" in text
+    return ok, f"skills {skills}; fact {'7.3' in text}; root citation {'wiki/wiki/gizmo-fastening.md' in text}"
+
+
+def verdict_gap(new_commits):
+    """Pure. (ok, reason) for session 2. `new_commits` is [(subject, [paths])]."""
+    expected = ["wiki/gaps/KNOWLEDGE_GAP.md", "wiki/gaps/knowledge-gaps.jsonl"]
+    ok = (len(new_commits) == 1 and new_commits[0][0].startswith("gap(gap-")
+          and sorted(new_commits[0][1]) == expected)
+    return ok, f"new commits {new_commits}"
+
+
+def verdict_ingest(new_commits, lint_rc):
+    """Pure. (ok, reason) for session 3."""
+    ingests = [c for c in new_commits if c[0].startswith("ingest(")]
+    ok = (len(ingests) == 1 and ingests[0][1] and all(p.startswith("wiki/") for p in ingests[0][1])
+          and lint_rc == 0)
+    return ok, f"new commits {new_commits}; lint exit {lint_rc}"
+
+
+# ---- impure edges ----
+
+def env():
+    """Impure edge. Host git config isolated; identity from the environment."""
+    e = dict(os.environ)
+    e["GIT_CONFIG_GLOBAL"] = os.devnull
+    e["GIT_CONFIG_SYSTEM"] = os.devnull
+    e["GIT_AUTHOR_NAME"] = e["GIT_COMMITTER_NAME"] = "G6 Owner"
+    e["GIT_AUTHOR_EMAIL"] = e["GIT_COMMITTER_EMAIL"] = "owner@example.invalid"
+    return e
+
+
+def run(args, cwd, timeout=300):
+    """Impure edge."""
+    return subprocess.run([str(a) for a in args], cwd=str(cwd), capture_output=True, text=True,
+                          env=env(), timeout=timeout, stdin=subprocess.DEVNULL)
+
+
+def write(path, text):
+    """Impure edge."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def build_scenario(lib, root):
+    """Impure edge. A codebase, `init` typed at its root, one seeded page and card, one note
+    outside the wiki."""
+    root.mkdir(parents=True)
+    run(["git", "init", "-q", "-b", "main"], root)
+    write(root / "src" / "assembly.py", "def assemble():\n    pass\n")
+    write(root / "notes" / "zarnex-washers.md", NOTE)
+    run(["git", "add", "-A"], root)
+    run(["git", "commit", "-q", "-m", "feat: assembly code and notes"], root)
+    init = run([sys.executable, Path(lib) / "init.py", ".", "--wiki-title", "Zarnex gizmos",
+                "--non-interactive"], root, timeout=600)
+    if init.returncode != 0:
+        raise RuntimeError(f"init failed: {init.stdout}{init.stderr}")
+    write(root / "wiki" / "wiki" / "gizmo-fastening.md", PAGE)
+    write(root / "wiki" / "sources" / "cards" / "src-2026-01-02-001.md", CARD)
+    with (root / "wiki" / "index.md").open("a", encoding="utf-8") as handle:
+        handle.write("\n## Assembly\n- [Gizmo fastening](./wiki/gizmo-fastening.md) — torque values and why\n")
+    run(["git", "add", "--", "wiki"], root)
+    seeded = run(["git", "commit", "-q", "-m", "ingest(src-2026-01-02-001): seed the fastening page",
+                  "--", "wiki"], root)
+    if seeded.returncode != 0:
+        raise RuntimeError(f"seed commit failed: {seeded.stdout}{seeded.stderr}")
+
+
+def new_commits(root, since):
+    """Impure edge. [(subject, [paths])] for commits after `since`, oldest first."""
+    log = run(["git", "log", "--reverse", "--format=%H%x09%s", f"{since}..HEAD"], root).stdout
+    commits = []
+    for line in log.splitlines():
+        sha, _, subject = line.partition("\t")
+        paths = run(["git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha], root).stdout.split()
+        commits.append((subject, paths))
+    return commits
+
+
+def session(root, prompt, model, budget, transcript):
+    """Impure edge. One headless session; its transcript is kept."""
+    result = run(claude_argv(prompt, model, budget), root, timeout=1800)
+    transcript.write_text(result.stdout, encoding="utf-8")
+    return parse_events(result.stdout)
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(prog="e2e_agent_session.py", description=__doc__.splitlines()[0])
+    parser.add_argument("--library", default=str(REPO_ROOT))
+    parser.add_argument("--out", default=str(REPO_ROOT / "docs" / "evidence" / "g6-agent-session"))
+    parser.add_argument("--model", default="sonnet")
+    parser.add_argument("--budget", type=float, default=1.5, help="USD cap per session")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="build the scenario and print the three sessions; run none")
+    args = parser.parse_args(argv)
+    work = Path(tempfile.mkdtemp(prefix="wiki-harness-g6-")).resolve()
+    root = work / "zarnex"
+    try:
+        build_scenario(args.library, root)
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+        print(f"scenario setup failed: {exc}", file=sys.stderr)
+        shutil.rmtree(work, ignore_errors=True)
+        return 2
+    if args.dry_run:
+        print(f"scenario: {root}")
+        for prompt in (QUERY, GAP_QUESTION, INGEST):
+            print(shlex.join(claude_argv(prompt, args.model, args.budget)))
+        shutil.rmtree(work, ignore_errors=True)
+        return 0
+    if shutil.which("claude") is None:
+        print("claude is not on PATH; G6's oracle needs Claude Code", file=sys.stderr)
+        return 2
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    lines = []
+    events = session(root, QUERY, args.model, args.budget, out / "query.jsonl")
+    ok, reason = verdict_query(events)
+    lines.append(f"{'PASS' if ok else 'FAIL'} G6.query {reason}")
+    before = run(["git", "rev-parse", "HEAD"], root).stdout.strip()
+    session(root, GAP_QUESTION, args.model, args.budget, out / "gap.jsonl")
+    ok, reason = verdict_gap(new_commits(root, before))
+    lines.append(f"{'PASS' if ok else 'FAIL'} G6.gap {reason}")
+    before = run(["git", "rev-parse", "HEAD"], root).stdout.strip()
+    session(root, INGEST, args.model, args.budget, out / "ingest.jsonl")
+    lint_rc = run([sys.executable, "wiki/scripts/lint.py"], root).returncode
+    ok, reason = verdict_ingest(new_commits(root, before), lint_rc)
+    lines.append(f"{'PASS' if ok else 'FAIL'} G6.ingest {reason}")
+    passed = sum(1 for line in lines if line.startswith("PASS"))
+    lines.append(f"TOTAL {passed}/3")
+    (out / "verdict.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print("\n".join(lines))
+    shutil.rmtree(work, ignore_errors=True)
+    return 0 if passed == 3 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+```
+
+- [ ] **Step 4: Run the tests**
+
+```bash
+python3 -m unittest tests.test_e2e_agent_session_tool -q
+```
+
+Expected: `OK`.
+
+#### Verify
+
+- **Goal:** G6's oracle exists as committed, reviewable code: a headless session at the root,
+  with no hand-written bridge, must answer with root citations, record a path-scoped gap and
+  ingest with lint exit 0 (card G6 Verify column).
+- **Red:** `python3 -m unittest tests.test_e2e_agent_session_tool -q` → `ModuleNotFoundError: No module named 'e2e_agent_session'`, exit 1.
+- **Green:** `python3 -m unittest tests.test_e2e_agent_session_tool -q` → `OK`, exit 0.
+- **Stub check:** a `verdict_query` that ignored the skill or the root citation fails
+  `test_query_needs_the_skill_the_fact_and_a_root_citation` (E3 showed exactly that failure mode:
+  `./wiki/gizmo-fastening.md`); a dry run that skipped `init` cannot print the three sessions
+  after a successful seed commit.
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_e2e_agent_session_tool -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tools/e2e_agent_session.py tests/test_e2e_agent_session_tool.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "test(e2e): add the G6 headless agent-session oracle" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 22/26'
+```
+
+---
+
+### Task 23: Docs — the compatibility policy's one-time exception (D7) and the README (G10)
+
+**Files**
+- Modify: `docs/compatibility-policy.md` (§2 manifest row note, new §3.1, §4 code list)
+- Modify: `README.md` (quickstart, identity paragraph, new "Where the wiki lives" section)
+- Create: `tests/test_docs_in_host.py`
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_docs_in_host.py`:
+
+```python
+"""The 2.0 docs say what changed, why, and what happens to 1.x wikis (D7, G10)."""
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+class Policy(unittest.TestCase):
+    text = (ROOT / "docs" / "compatibility-policy.md").read_text(encoding="utf-8")
+
+    def test_the_one_time_exception_and_its_reason(self):
+        self.assertIn("### 3.1 One-time exception: 2.0.0", self.text)
+        self.assertIn("no installed wiki loses anything", self.text)
+        self.assertIn("not a precedent", self.text)
+
+    def test_the_bridge_key_and_the_bridge_code(self):
+        self.assertIn("`bridge`", self.text)
+        self.assertIn("`BRIDGE`", self.text)
+
+
+class Readme(unittest.TestCase):
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    def test_the_layout_and_the_unsupported_topologies(self):
+        self.assertIn("## Where the wiki lives", self.text)
+        self.assertIn("wiki-harness init my-project", self.text)
+        for phrase in ("nested repository", "submodule", "1.x"):
+            self.assertIn(phrase, self.text)
+
+    def test_init_never_writes_your_git_config(self):
+        self.assertIn("never writes your git config", self.text)
+        self.assertNotIn('git config user.name  "Your Name"', self.text)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+python3 -m unittest tests.test_docs_in_host -q
+```
+
+Expected: `FAILED (failures=4)`.
+
+- [ ] **Step 3: Edit the docs**
+
+`docs/compatibility-policy.md` — after §3's last paragraph:
+
+```markdown
+### 3.1 One-time exception: 2.0.0
+
+Release 2.0.0 changes what `init <target>` produces — the target is now the repository root and
+the wiki is its `wiki/` folder — without a deprecating MINOR release first. The reason, recorded
+when the owner ratified it (card wiki-in-host-repo, D7): `init` changes what an existing
+invocation produces, and no installed wiki loses anything — every 1.x wiki keeps its layout, and
+lint, the hooks, the scripts and `upgrade` keep supporting it (D6) — so a deprecation release
+would protect nobody. This is not a precedent: every other removal still follows §3.
+```
+
+§2's manifest row, MINOR cell, gains: "2.0.0 added one such key, `bridge` (the files the harness
+writes outside the wiki folder, keyed relative to the repository root)." §4's code list gains
+`BRIDGE` (WARN only).
+
+`README.md`:
+- Quickstart: `wiki-harness init my-project` (a new or existing repository's root; no flag is
+  required), and the printed output and the "Then open" line name `my-project/wiki/AGENTS.md`.
+- Replace the "set your own git identity" paragraph and its `git config user.*` block with:
+  "`init` authors its one commit as `wiki-harness init` through environment variables and never
+  writes your git config: your own identity applies to every commit after it."
+- New section, after "What you get":
+
+```markdown
+## Where the wiki lives
+
+`init` takes a repository's root — an existing codebase or a new directory — and creates the
+wiki as one folder of it:
+
+    my-project/                ← the repository; your agent's session opens here
+    ├── AGENTS.md, CLAUDE.md    ← created only when absent; otherwise init prints one line to add
+    ├── WIKI.md                 ← how an agent at the root queries, ingests and records gaps
+    ├── .claude/skills/         ← ask-wiki, ingest-wiki
+    ├── src/ …                  ← your code, untouched
+    └── wiki/                   ← every wiki folder: index.md, AGENTS.md, sources/, wiki/, gaps/, scripts/, .githooks/
+
+The wiki shares the repository's history, branches, pull requests and remote, so a clone carries
+it. Only paths under `wiki/` and the bridge files above are ever written by `init` or
+`upgrade`; anything else you have staged or changed stays as it was. If your repository already
+has commit hooks (husky, a `.githooks/` folder), `init` leaves them alone and writes
+`<hook>.wiki-harness` beside them for you to merge; lint reports `HOOKS` until you do. The
+pre-commit framework and lefthook can run the wiki's hooks from their own config instead.
+
+**1.x wikis.** A wiki created by 1.x — the wiki is the repository — keeps that layout. Lint,
+the hooks, the scripts and `upgrade` keep supporting it, and `upgrade` never moves it.
+
+**Not supported.** A nested repository (a wiki with its own `.git` inside another repository):
+it has no remote of its own, a clone of the outer repository does not contain it, and a search
+from the outer root skips it. A submodule: it needs a separate remote and splits the wiki's
+journal from the code it describes.
+```
+
+- [ ] **Step 4: Run the tests**
+
+```bash
+python3 -m unittest tests.test_docs_in_host tests.test_release_config -q
+```
+
+Expected: `OK`.
+
+#### Verify
+
+- **Goal:** G10 (the README shows the in-host layout, says what happens to 1.x wikis, and why
+  nested repositories and submodules are not supported) and D7 (the §3 exception recorded in the
+  policy with its reason).
+- **Red:** `python3 -m unittest tests.test_docs_in_host -q` → `FAILED (failures=4)`.
+- **Green:** `python3 -m unittest tests.test_docs_in_host tests.test_release_config -q` → `OK`, exit 0. G10's own oracle is the owner reading the README next to #46.
+- **Stub check:** a heading with no body passes the heading assertion but not the
+  `nested repository` / `submodule` / `1.x` assertions; the owner's read is the remaining check.
+
+#### Done
+
+```bash
+python3 -m unittest tests.test_docs_in_host -q
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docs/compatibility-policy.md README.md tests/test_docs_in_host.py docs/plans/wiki-in-host-repo.plan.md
+git commit -m "docs: record the 2.0.0 exception and document where the wiki lives" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 23/26'
+```
+
+---
+
+### Task 24: Governance — known limitations and the pending C3 fact deltas (S1, S3, S4)
+
+**Files**
+- Modify: `docs/known-limitations.md` (entries C–F)
+
+- [ ] **Step 1: Confirm the entries are absent**
+
+```bash
+grep -c "wiki-harness#49" docs/known-limitations.md
+```
+
+Expected: `0` (exit 1).
+
+- [ ] **Step 2: Append four entries to `docs/known-limitations.md`**
+
+```markdown
+## (C) The C3 model does not record 2.0.0 yet — tracked in hieplam/wiki-harness#49
+
+The installed C3 tooling cannot validate or change this repository's model (c3x 11.0.0 and
+9.9.1 report broken seals; `repair`, `migrate` and `import --force` refuse before resealing).
+Ruling S4 of card wiki-in-host-repo: no `.c3/` edits in 2.0.0. These facts are stale until
+hieplam/wiki-harness#49 restores the toolchain and lands them through a change-unit:
+
+| Fact | What it must say after 2.0.0 |
+|---|---|
+| `c3-210` (init) | Contract: `init.py <repo-root> [--wiki-title …] [--org-name …] [--content-language …] [--repo-name …] [--origins …] [--answers-file …] [--non-interactive] [--force]`; the wiki is `<repo-root>/wiki/`; refusals: a target that is not its work tree's top level, an existing `wiki/` path, a bare repository, a merge or rebase in progress; no git identity written; hooks per D4 (wire `wiki/.githooks`, else side files, else print-only); the commit is path-scoped to the footprint; the bridge (`WIKI.md`, two skills, root `AGENTS.md`/`CLAUDE.md` when absent) |
+| `c3-211` (upgrade) | Every git write bounded by the footprint's pathspecs in a host repository; the bridge maintained (drift refused without `--adopt-drift`, side files updated, first install on a 1.x in-host wiki); `--adopt` follows D4 in a host repository |
+| `c3-101` (lint core) | RAW reads `git diff --cached --relative`; HOOKS proven by the effective hook files, husky ≥ 9, or a manager config (`.pre-commit-config.yaml`, `lefthook.yml` and its variants), skipped inside the commit gate; BRIDGE (WARN); HARNESS remedies prefixed `wiki/` in-host |
+| `c3-110` (git hooks) | Both hooks exec `scripts/commit_gate.py`, which judges only commits touching the wiki folder (and rewords of such commits) |
+| `c3-201` (manifest) | Optional `bridge` key: repo-root-relative paths, roles from `VALID_ROLES` |
+| template facts (`c3-3`, `c3-301`, `c3-302`, `c3-303`) | `templates/bridge/` (four rendered or seeded files, two MANAGED hook side files); `AGENTS.root.md.tmpl` "Where you stand"; layout-neutral hooks setup lines |
+
+## (D) A reword that also adds non-wiki changes is not judged by the commit convention
+
+Ruling S1. The commit gate judges a commit that stages a wiki path, and a commit whose index
+equals HEAD when HEAD touched the wiki (a plain reword). An `git commit --amend` that stages only
+non-wiki paths and rewrites a wiki commit's message is not judged: git gives a commit-msg hook
+no way to tell an amend from a new commit. A standalone wiki judges every commit.
+
+## (E) Hook managers whose call lint cannot read
+
+Ruling S3. Lint proves the wiki's hooks run from the effective hook files, husky ≥ 9's editable
+hooks, or a config at the repository root (`.pre-commit-config.yaml`, `lefthook.yml`,
+`lefthook.yaml`, `.lefthook.yml`, `.lefthook.yaml`). Any other manager keeps `ERROR HOOKS` on a
+manual lint run (commits still work: inside the commit gate lint does not ask). The config-file
+proof is a file read: it does not check that the manager is installed in a given clone.
+
+## (F) A global `core.hooksPath` is not seen by `init`
+
+`init` isolates host git config, so a hooks path set in your global config is invisible to it;
+when the repository has no hooks of its own, `init` sets the repository's `core.hooksPath` to
+`wiki/.githooks`, which takes precedence over the global value in that repository.
+```
+
+- [ ] **Step 3: Check the entries**
+
+```bash
+grep -c "wiki-harness#49" docs/known-limitations.md
+grep -c "c3-210\|c3-211\|c3-101\|c3-110\|c3-201" docs/known-limitations.md
+```
+
+Expected: `1` or more for the first; `5` or more for the second.
+
+#### Verify
+
+- **Goal:** rulings S1 (residual hole documented), S3 (other managers documented), S4 (pending
+  fact deltas listed, citing hieplam/wiki-harness#49 — the coordinator's addition to S4).
+- **Red:** `grep -c "wiki-harness#49" docs/known-limitations.md` → `0`, exit 1.
+- **Green:** `grep -c "wiki-harness#49" docs/known-limitations.md` → `2`, exit 0 (the heading and the body); `grep -c "c3-210\|c3-211\|c3-101\|c3-110\|c3-201" docs/known-limitations.md` → a count of at least `5`, exit 0.
+- **Stub check:** an entry without the issue number or without the fact table fails one of the
+  two greps; an empty append fails both.
+
+#### Done
+
+```bash
+grep -q "wiki-harness#49" docs/known-limitations.md
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add docs/known-limitations.md docs/plans/wiki-in-host-repo.plan.md
+git commit -m "docs: record the 2.0.0 known limitations and the pending C3 fact deltas" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 24/26'
+```
+
+---
+
+### Task 25: Delivery evidence — the ratchet after, the G6 sessions, the full suite, the squash body
+
+Produces every artifact the PR and the squash merge need. No product code changes.
+
+**Files**
+- Create: `docs/evidence/in-host-e2e-after.txt`
+- Create: `docs/evidence/g6-agent-session/` (`query.jsonl`, `gap.jsonl`, `ingest.jsonl`, `verdict.txt`)
+- Create: `docs/evidence/in-host-squash-body.md`
+
+- [ ] **Step 1: Confirm the after-evidence is absent**
+
+```bash
+test -f docs/evidence/in-host-e2e-after.txt
+```
+
+Expected: exit 1.
+
+- [ ] **Step 2: Run the ratchet and the full suite, both in the background** (Global Constraint 4; wait for both)
+
+```bash
+python3 tools/e2e_in_host.py > docs/evidence/in-host-e2e-after.txt 2>&1; echo "e2e exit=$?"
+./run_tests.sh > /tmp/wiki-harness-full-suite.txt 2>&1; echo "suite exit=$?"
+```
+
+Expected: `e2e exit=0` with last line `TOTAL 71/71`; `suite exit=0` with `OK` near the end. Any
+check that is PASS in `docs/evidence/in-host-e2e-baseline.txt` and FAIL here is a regression:
+stop and report it to the Warchief.
+
+- [ ] **Step 3: Run G6's oracle once** (costs money; at most three sessions of 1.50 USD each)
+
+```bash
+python3 tools/e2e_agent_session.py --out docs/evidence/g6-agent-session
+```
+
+Expected: `TOTAL 3/3`, exit 0. A FAIL line is evidence too: commit it and report it to the
+Warchief, who rules on the skills' trigger text (K10) before delivery.
+
+- [ ] **Step 4: Write `docs/evidence/in-host-squash-body.md`** — the squash commit's body; its
+  last paragraph is the footer release-please reads:
+
+```markdown
+`init` now treats its target as the repository root and scaffolds the wiki as that
+repository's `wiki/` folder, with a bridge so an agent whose session opens at the root can
+query, ingest and record gaps. Every wiki invariant holds in that layout (raw immutability, the
+gap ledger, the commit convention for wiki-touching commits only), `upgrade` changes only the
+wiki's footprint, and 1.x standalone wikis keep working unchanged.
+
+Ratchet (tools/e2e_in_host.py): see docs/evidence/in-host-e2e-baseline.txt and
+docs/evidence/in-host-e2e-after.txt.
+
+BREAKING CHANGE: `init TARGET` now treats TARGET as the repository root and creates the wiki in TARGET/wiki/ as a folder of that repository (no nested git repository); a target inside a repository that is not its top level is refused. When the repository has no commit hooks, init sets core.hooksPath to wiki/.githooks; otherwise it leaves them alone and writes HOOK.wiki-harness beside them to merge by hand. init also writes WIKI.md, the .claude/skills/ask-wiki and ingest-wiki skills, and a root AGENTS.md / CLAUDE.md when absent, and never writes git user.name/user.email. Existing 1.x wikis are not moved: lint, hooks, scripts and upgrade keep supporting the standalone layout; on upgrade they receive the new hook scripts (scripts/commit_gate.py, scripts/repo_layout.py) and reworded AGENTS.md, README.md and gaps/AGENTS.md text.
+```
+
+- [ ] **Step 5: Check the three artifacts**
+
+```bash
+tail -n 1 docs/evidence/in-host-e2e-after.txt
+tail -n 1 docs/evidence/g6-agent-session/verdict.txt
+tail -n 1 docs/evidence/in-host-squash-body.md | cut -c1-16
+```
+
+Expected: `TOTAL 71/71`, `TOTAL 3/3`, `BREAKING CHANGE:`.
+
+#### Verify
+
+- **Goal:** the Ratchet column for G1–G9 and G11 (baseline → after on the same committed tool,
+  only in the good direction), G6's Verify (headless sessions at the root, transcripts and
+  commits as evidence), and ruling S7's squash body (the `BREAKING CHANGE:` footer survives into
+  the commit release-please reads).
+- **Red:** `test -f docs/evidence/in-host-e2e-after.txt` → exit 1 (not applicable as a code failure: this task measures).
+- **Green:** `tail -n 1 docs/evidence/in-host-e2e-after.txt` → `TOTAL 71/71`; `tail -n 1 docs/evidence/g6-agent-session/verdict.txt` → `TOTAL 3/3`; `tail -n 1 docs/evidence/in-host-squash-body.md | cut -c1-16` → `BREAKING CHANGE:`.
+- **Stub check:** an after-file written by hand would not reproduce `TOTAL 71/71` when the audit
+  re-runs `python3 tools/e2e_in_host.py --only G5 --only G11`; the G6 transcripts are raw
+  stream-json the audit can replay through `verdict_query`.
+
+#### Done
+
+```bash
+test -s docs/evidence/in-host-e2e-after.txt
+test -s docs/evidence/in-host-squash-body.md
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add docs/evidence docs/plans/wiki-in-host-repo.plan.md
+git commit -m "docs(evidence): record the in-host ratchet after, the G6 sessions and the squash body" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Task: 25/26'
+```
+
+Delivery (Warchief Method step 7, after Task 26): the PR title is
+`feat(init)!: init scaffolds the wiki as a folder of its repository, with a bridge for the agent at the root`;
+its body carries the ratchet's per-goal counts before → after, the G6 verdict lines and links,
+the `## Harness gaps` section from Task 26, and ends with the attribution line. Merge by squash
+(ruling S7), never `--merge`:
+`gh pr merge --squash --subject "feat(init)!: init scaffolds the wiki as a folder of its repository, with a bridge for the agent at the root" --body-file docs/evidence/in-host-squash-body.md`,
+then `git fetch origin && git log -1 --format=%B origin/main | tail -n 1 | cut -c1-16` must print
+`BREAKING CHANGE:`.
+
+---
+
+### Task 26: Harness-gap gate
+
+Run `gap-gate.ts` (Warchief Method step 7) on the card branch; paste `<card id>-gap-gate.md` verbatim
+as the PR body's `## Harness gaps` section, including its `gap-gate v1` stamp line; commit the
+`.tribe/harness-gaps.jsonl` append with the trailer `Tribe-Milestone: gap-gate` before the PR opens;
+run `debt-backfill.ts`.
+
+#### Verify
+
+- **Goal:** the tribe delivery's harness-gap gate (orchestrate-campaign "tribe cards — campaign
+  plan additions"): every Tracker candidate reconciled, the ledger append committed, the stamp in
+  the PR body.
+- **Red:** not applicable — the gate reads the finished branch and its Tracker reports, so there
+  is no code here to go red.
+- **Green:** `bun "<gaps-dir>/gap-gate.ts" --repo "$PWD" --home "$RUNNER_CAMPAIGN_HOME" --card "$RUNNER_CARD_ID" --base "$RUNNER_BASE_SHA" --head HEAD` → exit 0, and `<campaign home>/reports/<card id>-gap-gate.md` ends with the `gap-gate v1` stamp line.
+- **Stub check:** a PR body without the stamp fails `verify-shipped`'s stamp check; a skipped
+  gate leaves no `<card id>-gap-gate.md` to paste.
+
+#### Done
+
+```bash
+bun "<gaps-dir>/gap-gate.ts" --repo "$PWD" --home "$RUNNER_CAMPAIGN_HOME" --card "$RUNNER_CARD_ID" --base "$RUNNER_BASE_SHA" --head HEAD
+```
+
+- [ ] **Step 1: Commit**
+
+```bash
+git add .tribe/harness-gaps.jsonl
+git commit -m "chore(gaps): record the harness-gap ledger events for this card" -m $'Tribe-Card: wiki-in-host-repo\nTribe-Milestone: gap-gate'
+```
+
+---
+
+## Goal → task → Verify
+
+| Goal | Built by | Verify (command → expected) |
+| --- | --- | --- |
+| G1 `init` produces the in-host layout, footprint-only, relative and absolute | 5, 12, 13, 14 | `python3 tools/e2e_in_host.py --only G1` → `TOTAL 25/25`; `python3 -m unittest tests.test_init_in_host tests.test_init_target -q` → `OK` |
+| G2 every wiki invariant holds in-host; convention only for wiki commits | 6, 7, 10 | `python3 tools/e2e_in_host.py --only G2` → `TOTAL 8/8`; `python3 -m unittest tests.test_commit_gate tests.test_in_host_raw tests.test_in_host_gap_lint -q` → `OK` |
+| G3 the commit gate fails closed (both D4 cases, S3 managers) | 4, 9, 15 | `python3 tools/e2e_in_host.py --only G3` → `TOTAL 7/7`; `python3 -m unittest tests.test_lint_hooks tests.test_init_hooks_d4 -q` → `OK` |
+| G4 every script gives the same result from any directory | 8 | `python3 tools/e2e_in_host.py --only G4` → `TOTAL 4/4` |
+| G5 `upgrade --check/--apply` in-host change only the footprint | 19 | `python3 tools/e2e_in_host.py --only G5` → `TOTAL 5/5`; `python3 -m unittest tests.test_upgrade_in_host -q` → `OK` |
+| G6 a root session answers, records a gap, ingests — no hand-written bridge | 14, 18, 22, 25 | `python3 tools/e2e_in_host.py --only G6` → `TOTAL 6/6`; `tail -n 1 docs/evidence/g6-agent-session/verdict.txt` → `TOTAL 3/3` |
+| G7 `upgrade` keeps the bridge in step; owner edits need consent | 11, 17, 20 | `python3 tools/e2e_in_host.py --only G7` → `TOTAL 4/4`; `python3 -m unittest tests.test_upgrade_bridge tests.test_lint_bridge -q` → `OK` |
+| G8 default names come from the repository | 16 | `python3 tools/e2e_in_host.py --only G8` → `TOTAL 1/1` |
+| G9 1.x standalone wikis keep working | 5, 9, 10, 17, 19 | `python3 tools/e2e_in_host.py --only G9` → `TOTAL 4/4`; `python3 -m unittest tests.test_upgrade -q` → `OK` (assertions unchanged) |
+| G10 README: layout, 1.x, unsupported topologies | 23 | `python3 -m unittest tests.test_docs_in_host -q` → `OK`; the owner reads it next to #46 |
+| G11 a hand-made 1.x in-host wiki gains the bridge | 20 | `python3 tools/e2e_in_host.py --only G11` → `TOTAL 7/7` |
+| D7 the §3 exception recorded with its reason | 23 | `python3 -m unittest tests.test_docs_in_host.Policy -q` → `OK` |
+| S1 / S3 / S4 documented limitations, C3 deltas citing #49 | 24 | `grep -c "wiki-harness#49" docs/known-limitations.md` → `2` |
+| S7 squash body with the footer | 25 | `tail -n 1 docs/evidence/in-host-squash-body.md \| cut -c1-16` → `BREAKING CHANGE:` |
+| Ratchet: baseline before any build, only the good direction | 1, 2, 3, 25 | `tail -n 1 docs/evidence/in-host-e2e-baseline.txt` → `TOTAL 16/71` (Task 3); `tail -n 1 docs/evidence/in-host-e2e-after.txt` → `TOTAL 71/71` (Task 25), no PASS → FAIL between them |
