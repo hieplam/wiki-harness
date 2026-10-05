@@ -5577,7 +5577,8 @@ lines, one line per bridge drift in the same wording with the repo-relative path
 checkout and the `--adopt-drift` argument. `format_pending_report(paths, harness_version,
 bridge_paths=())` lists each bridge path, prefixed `../`, after the wiki paths.
 
-`upgrade.py` edge (reads the repository and the templates, writes nothing):
+`upgrade.py` edge (reads the repository and the templates, writes nothing; `PurePosixPath` joins
+the `pathlib` import):
 
 ```python
 def plan_upgrade_bridge(init_mod, library_root, top, old_bridge, adopt_drift_paths, values):
