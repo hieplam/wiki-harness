@@ -21,6 +21,7 @@ from card_frontmatter_lint import (  # noqa: E402  (needs the sys.path line abov
     RULES_FILES, SCHEMA_PATH, Finding, card_id_pattern_from_schema,
     card_id_scan_pattern, check_card, load_schema, parse_frontmatter, resolve)
 import gap_lint  # noqa: E402  (needs the sys.path line above)
+import decision_lint  # noqa: E402  (needs the sys.path line above)
 from manifest import diff_manifest, hash_tree, is_valid_role, read_manifest  # noqa: E402
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
@@ -422,6 +423,8 @@ def run(files, changes, gap_findings=()):
     findings += check_card_citations(files, schema)
     for check in (check_cards, check_frontmatter, check_index_sync):
         findings += check(files)
+    findings += decision_lint.check_decisions(files, _wiki_pages(files),
+                                              _strip_code, extract_links)
     findings += check_raw_immutability(changes)
     findings += list(gap_findings)
     return findings
