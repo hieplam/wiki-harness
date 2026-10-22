@@ -109,9 +109,13 @@ internal space collapsed, and case folded, equals one of:
 
 When at least one decision page exists, `index.md` has a level-2 heading whose text is
 `Decisions` (case-insensitive). The section runs to the next level-1 or level-2 heading. Each
-decision page has a list line there; the **first** link on the line is the entry, later links
-are references. The line states the page's `status` as a whole word, case-insensitive
-(`Decided` counts), outside the text and target of every link on the line.
+decision page has a list item there (`-`, `*`, `+`, `1.` or `1)`). An **entry** is a list item
+at the section's outermost item indentation; its **first** link is the page it lists. A wrapped
+line, a deeper (nested) item, and an indented line after a blank line continue the item: their
+text counts toward the status word and their links are references. A line that belongs to no
+item is prose and is ignored. The item states the page's `status` as a whole word,
+case-insensitive (`Decided` counts), outside the text and target of every link. CRLF line ends
+are read as LF before fences are found.
 
 ```markdown
 ## Decisions

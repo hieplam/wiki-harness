@@ -157,8 +157,9 @@ Every page must appear in `index.md`, grouped under a `##` topic heading, with a
 description. Lint fails both directions: a page missing from the index, and an index entry
 pointing at a page that does not exist.
 
-Every decision page appears a second time, in one `## Decisions` section, with its status on
-the line. The first link on a line is the entry; a later link is a reference:
+Every decision page appears a second time, as a list item in one `## Decisions` section, with
+its status in the item. The item's first link is the entry. A later link, also on a wrapped
+line or a nested item, is a reference:
 
 ```markdown
 ## Decisions

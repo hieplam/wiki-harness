@@ -463,6 +463,59 @@ class IndexSection(unittest.TestCase):
         self.assertEqual(run(files), [err(
             "d", "status 'done' is not one of: proposed, decided, superseded")])
 
+    def _replaced_pair(self):
+        return {"new": decision(status="decided", supersedes="old"),
+                "old": decision(status="superseded", superseded_by="new")}
+
+    def test_wrapped_item_line_is_a_continuation(self):
+        text = index("- [old](./wiki/old.md) — superseded by",
+                     "  [new](./wiki/new.md)",
+                     "- [new](./wiki/new.md) — decided")
+        self.assertEqual(run(wiki(self._replaced_pair(), index=text)), [])
+
+    def test_status_word_on_a_wrapped_line_counts(self):
+        text = index("- [old](./wiki/old.md) — replaced by [new](./wiki/new.md),",
+                     "  superseded on 2024-03-01",
+                     "- [new](./wiki/new.md) — decided")
+        self.assertEqual(run(wiki(self._replaced_pair(), index=text)), [])
+
+    def test_nested_item_is_a_continuation(self):
+        text = index("- [new](./wiki/new.md) — decided",
+                     "  - replaces [old](./wiki/old.md)",
+                     "- [old](./wiki/old.md) — superseded")
+        self.assertEqual(run(wiki(self._replaced_pair(), index=text)), [])
+
+    def test_prose_line_is_not_an_entry(self):
+        files = wiki({"d": decision(status="decided"), "plain": page()},
+                     index=index("Read [how to write one](./wiki/plain.md) first.",
+                                 "",
+                                 "- [d](./wiki/d.md) — decided"))
+        self.assertEqual(run(files), [])
+
+    def test_numbered_item_is_an_entry(self):
+        files = wiki({"d": decision(status="decided")},
+                     index=index("1. [d](./wiki/d.md) — decided"))
+        self.assertEqual(run(files), [])
+
+    def test_unindented_prose_after_a_blank_line_ends_the_item(self):
+        files = wiki({"d": decision(status="decided")},
+                     index=index("- [d](./wiki/d.md) — soon", "",
+                                 "The word decided here is prose."))
+        self.assertEqual(run(files), [err(
+            "index.md", "'## Decisions' lists wiki/d.md without its status 'decided'")])
+
+    def test_crlf_page_heading_inside_a_fence_does_not_count(self):
+        body = ("```markdown\n## Context\n```\n\n## Decision\n\n"
+                "## Rejected options\n\n## Consequences\n")
+        text = decision(body, status="decided").replace("\n", "\r\n")
+        self.assertEqual(run(wiki({"d": text})),
+                         [err("d", "missing required section '## Context'")])
+
+    def test_crlf_index_entry_inside_a_fence_does_not_count(self):
+        text = index("```", "- [d](./wiki/d.md) — decided", "```").replace("\n", "\r\n")
+        self.assertEqual(run(wiki({"d": decision(status="decided")}, index=text)), [err(
+            "index.md", "decision page not listed under '## Decisions': wiki/d.md")])
+
     def test_missing_index_is_left_to_index_check(self):
         files = {"wiki/d.md": decision(status="decided")}
         self.assertEqual(run(files), [])

@@ -17,7 +17,7 @@ parser in the harness instead of two.
 Pure, every function: check_decisions(), decision_pages(), opts_in(),
 link_values(), shown(), section_names(), page_findings(),
 link_findings(), valid_status(), loop_path(), replacement_findings(),
-decisions_entries(), states_status(), index_findings().
+lf(), decisions_entries(), states_status(), index_findings().
 There are no impure edges.
 
 Python 3 stdlib only.
@@ -40,6 +40,9 @@ DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 H2_RE = re.compile(r"^##(?!#)[ \t]+(.*?)[ \t]*#*[ \t]*$")
 # A level-1 or level-2 heading: where a `## Decisions` section ends.
 SECTION_END_RE = re.compile(r"^#{1,2}(?!#)(?:[ \t]|$)")
+# The start of a markdown list item ('-', '*', '+', '1.' or '1)'), with its
+# indentation captured.
+LIST_ITEM_RE = re.compile(r"^([ \t]*)(?:[-*+]|\d+[.)])[ \t]+")
 # A whole inline link, text and target, removed before the status word is
 # searched -- a title or a file name that contains "decided" says nothing.
 INLINE_LINK_RE = re.compile(r"\[[^\]]*\]\([^)]*\)")
@@ -89,13 +92,19 @@ def shown(value):
     return value
 
 
+def lf(text):
+    """Pure. `text` with CRLF line ends turned into LF, before strip_code()
+    sees it: its fence closer does not match a line that ends in '\\r', so
+    on a CRLF page no fence would close and a fenced heading would count."""
+    return text.replace("\r\n", "\n")
+
+
 def section_names(text, strip_code):
     """Pure. The casefolded text of every level-2 heading outside fenced
-    code, with runs of spaces collapsed. Lines are split on '\\n' and a
-    trailing '\\r' is dropped, so a CRLF page reads the same as an LF one."""
+    code, with runs of spaces collapsed."""
     names = set()
-    for line in strip_code(text).split("\n"):
-        m = H2_RE.match(line.rstrip("\r"))
+    for line in strip_code(lf(text)).split("\n"):
+        m = H2_RE.match(line)
         if m:
             names.add(" ".join(m.group(1).split()).casefold())
     return names
@@ -238,37 +247,62 @@ def decisions_entries(index, strip_code, extract_links):
 
     A section opens at a level-2 heading whose text is "Decisions" (any
     case) and runs to the next level-1 or level-2 heading; two such
-    sections read as one list. Each line's FIRST link, resolved from
-    index.md, is that line's entry -- later links are references, such as
-    the page a superseded decision points to. `entries` pairs each entry
-    with its original line, because strip_code() also blanks inline code
-    spans and a status may be written as `decided`. Headings and links are
-    read from the stripped text, so nothing inside a fence counts."""
-    stripped = strip_code(index).split("\n")
-    original = index.split("\n")
+    sections read as one list. An entry is a list item at the section's
+    outermost item indentation, and its FIRST link, resolved from index.md,
+    is the page it lists. Everything else that belongs to the item -- a
+    wrapped line, a deeper (nested) item, an indented line after a blank
+    line -- continues it: its text counts toward the status word, and its
+    links are references, such as the page a superseded decision points
+    to. A line that belongs to no item is prose and is ignored.
+
+    `entries` pairs each listed page with the item's original text, because
+    strip_code() also blanks inline code spans and a status may be written
+    as `decided`. Headings, items and links are read from the stripped
+    text, so nothing inside a fence counts: a fenced line is blank there."""
+    text = lf(index)
+    stripped = strip_code(text).split("\n")
+    original = text.split("\n")
     has_section = False
     in_section = False
     entries = []
+    current = None          # [page, [original lines]] of the item being read
+    outer_indent = None     # indentation of the section's first list item
+    after_blank = False
     for plain, line in zip(stripped, original):
-        plain = plain.rstrip("\r")
         heading = H2_RE.match(plain)
         if heading and " ".join(heading.group(1).split()).casefold() == "decisions":
             has_section = in_section = True
+            current, outer_indent, after_blank = None, None, False
             continue
         if SECTION_END_RE.match(plain):
             in_section = False
             continue
-        if in_section:
+        if not in_section:
+            continue
+        if not plain.strip():
+            after_blank = True
+            continue
+        item = LIST_ITEM_RE.match(plain)
+        indent = len(item.group(1).expandtabs(4)) if item else None
+        if item and (outer_indent is None or indent <= outer_indent):
+            if outer_indent is None:
+                outer_indent = indent
             targets = extract_links(plain)
-            if targets:
-                entries.append((resolve("index.md", targets[0]), line))
-    return has_section, entries
+            current = [resolve("index.md", targets[0]), [line]] if targets else None
+            if current:
+                entries.append(current)
+        elif current is not None and (item or not after_blank or plain[0] in " \t"):
+            current[1].append(line)
+        else:
+            current = None
+        after_blank = False
+    return has_section, [(page, " ".join(lines)) for page, lines in entries]
 
 
-def states_status(line, status):
-    """Pure. True when `status` appears on the index line as a whole word,
-    in any case, outside the text and target of every link."""
-    rest = INLINE_LINK_RE.sub(" ", line)
+def states_status(item, status):
+    """Pure. True when `status` appears in the index item's text as a whole
+    word, in any case, outside the text and target of every link."""
+    rest = INLINE_LINK_RE.sub(" ", item)
     return re.search(rf"\b{status}\b", rest, re.IGNORECASE) is not None
 
 
@@ -289,7 +323,7 @@ def index_findings(files, decisions, strip_code, extract_links):
     by_path = {page.path: page for page in decisions.values()}
     findings = []
     listed = set()
-    for target, line in entries:
+    for target, item in entries:
         if target not in files:
             continue
         page = by_path.get(target)
@@ -299,7 +333,7 @@ def index_findings(files, decisions, strip_code, extract_links):
             continue
         listed.add(target)
         status = valid_status(page.meta)
-        if status is not None and not states_status(line, status):
+        if status is not None and not states_status(item, status):
             findings.append(finding(
                 f"'## Decisions' lists {target} without its status '{status}'"))
     for path in sorted(set(by_path) - listed):

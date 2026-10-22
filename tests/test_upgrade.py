@@ -842,12 +842,23 @@ class TestDecisionPagesArriveOnUpgrade(unittest.TestCase):
     CALL_LINES = ("    findings += decision_lint.check_decisions(files, _wiki_pages(files),\n"
                   "                                              _strip_code, extract_links)\n")
 
+    # Rules files of a release that predates decision pages: no decision
+    # text at all, so only the upgrade can put it into the wiki.
+    OLD_WIKI_RULES = "# Rules for `wiki/`\n\nKnowledge pages.\n"
+    OLD_ROOT_RULES = "# $wiki_title — Operating Manual\n\nRead `index.md` first.\n"
+
     def _release_without_decision_pages(self, root):
-        """This checkout as a v1.0.0 library with the decision checker cut
-        out of it. The two wiring lines are asserted present before they
-        are removed, so a moved line fails here loudly instead of leaving
-        a library that imports a deleted module."""
+        """This checkout as a v1.0.0 library with decision pages cut out of
+        it: no checker module, no wiring, no decision text in the MANAGED
+        wiki rules or the TEMPLATE root rules. The two wiring lines are
+        asserted present before they are removed, so a moved line fails
+        here loudly instead of leaving a library that imports a deleted
+        module."""
         _make_library(root, "1.0.0")
+        (root / "templates" / "wiki.AGENTS.md").write_text(
+            self.OLD_WIKI_RULES, encoding="utf-8")
+        (root / "templates" / "AGENTS.root.md.tmpl").write_text(
+            self.OLD_ROOT_RULES, encoding="utf-8")
         (root / "scripts" / "decision_lint.py").unlink()
         lint_py = root / "scripts" / "lint.py"
         text = lint_py.read_text(encoding="utf-8")
@@ -869,6 +880,10 @@ class TestDecisionPagesArriveOnUpgrade(unittest.TestCase):
             self.assertEqual(init_result.returncode, 0,
                              init_result.stdout + init_result.stderr)
             self.assertFalse((target / "scripts" / "decision_lint.py").exists())
+            self.assertNotIn("kind: decision",
+                             (target / "wiki" / "AGENTS.md").read_text(encoding="utf-8"))
+            self.assertNotIn("## Decisions",
+                             (target / "AGENTS.md").read_text(encoding="utf-8"))
             v110 = _make_library(tmp / "lib-v1.1.0", "1.1.0")
 
             result = _run_upgrade(target, "--to", "v1.1.0", "--apply",
@@ -879,12 +894,15 @@ class TestDecisionPagesArriveOnUpgrade(unittest.TestCase):
                              (ROOT / "scripts" / "decision_lint.py").read_bytes())
             manifest = json.loads((target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
             self.assertEqual(manifest["files"]["scripts/decision_lint.py"]["role"], "managed")
-            wiki_rules = (target / "wiki" / "AGENTS.md").read_text(encoding="utf-8")
-            self.assertIn("kind: decision", wiki_rules)
+            self.assertEqual((target / "wiki" / "AGENTS.md").read_bytes(),
+                             (ROOT / "templates" / "wiki.AGENTS.md").read_bytes())
             self.assertIn("## Decisions", (target / "AGENTS.md").read_text(encoding="utf-8"))
+            env = dict(os.environ)
+            env["GIT_CONFIG_GLOBAL"] = os.devnull
+            env["GIT_CONFIG_SYSTEM"] = os.devnull
             lint_result = subprocess.run(
                 [sys.executable, str(target / "scripts" / "lint.py"), "--root", str(target)],
-                capture_output=True, text=True, timeout=120)
+                capture_output=True, text=True, env=env, timeout=120)
             self.assertEqual(lint_result.returncode, 0,
                              lint_result.stdout + lint_result.stderr)
 
