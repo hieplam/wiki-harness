@@ -12,11 +12,14 @@
 
 | origin | extract |
 |---|---|
-| `session` | Verified findings, decisions made, gotchas discovered |
+| `session` | Verified findings, decisions made, lessons learnt, gotchas discovered |
 | `transcript` | Speakers/personas, decisions + owners, commitments |
 | `jira` | Problem → root cause → fix → affected services |
 | `slack` | The question + the tribal answer |
 | `confluence` / `research` | Concepts, definitions, procedures |
+| `adr` | Context, decision, rejected options, consequences, status, supersedes |
 
-All recipes emit the SAME contract: a card with claims, filed into wiki pages. A recipe must
-never invent its own wiki-page shape.
+All recipes emit the SAME contract: a card with claims, filed into wiki pages. A recipe never
+invents its own page shape: it files into a page kind that `wiki/AGENTS.md` defines. A decision,
+a lesson learnt, or the fix an incident produced goes to a decision page. An `adr` card is filed
+as `wiki/AGENTS.md` describes under "Importing an ADR".
