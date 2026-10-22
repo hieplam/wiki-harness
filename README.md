@@ -126,7 +126,7 @@ Your-wiki/
 │   └── cards/             ← one card per source: where it came from + its claims
 │       ├── card-schema.json   ← THE definition of card frontmatter
 │       └── recipes.md         ← what to extract, per kind of source
-├── wiki/                  ← the knowledge pages themselves
+├── wiki/                  ← the knowledge pages and decision pages
 ├── scripts/               ← lint.py and friends, copied from this library
 ├── .githooks/             ← pre-commit + commit-msg, wired to core.hooksPath
 └── .wiki-harness-manifest.json   ← which files the harness owns, and their hashes

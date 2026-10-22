@@ -832,6 +832,63 @@ class TestApplyPipeline(unittest.TestCase):
             self.assertIn(b'"harness_version": "1.0.0"', after_manifest)
 
 
+class TestDecisionPagesArriveOnUpgrade(unittest.TestCase):
+    """A wiki initialised from a release that predates decision pages gets
+    the checker module and the page rules from its next upgrade -- MANAGED
+    paths reach an existing wiki, and scripts/*.py are discovered off disk,
+    so no list had to name the new module."""
+
+    IMPORT_LINE = "import decision_lint  # noqa: E402  (needs the sys.path line above)\n"
+    CALL_LINES = ("    findings += decision_lint.check_decisions(files, _wiki_pages(files),\n"
+                  "                                              _strip_code, extract_links)\n")
+
+    def _release_without_decision_pages(self, root):
+        """This checkout as a v1.0.0 library with the decision checker cut
+        out of it. The two wiring lines are asserted present before they
+        are removed, so a moved line fails here loudly instead of leaving
+        a library that imports a deleted module."""
+        _make_library(root, "1.0.0")
+        (root / "scripts" / "decision_lint.py").unlink()
+        lint_py = root / "scripts" / "lint.py"
+        text = lint_py.read_text(encoding="utf-8")
+        self.assertIn(self.IMPORT_LINE, text)
+        self.assertIn(self.CALL_LINES, text)
+        lint_py.write_text(text.replace(self.IMPORT_LINE, "").replace(self.CALL_LINES, ""),
+                           encoding="utf-8")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-q", "-m", "library v1.0.0 without decision pages")
+        _git(root, "tag", "-f", "v1.0.0")
+        return root
+
+    def test_upgrade_brings_decision_pages_to_a_wiki_without_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            v100 = self._release_without_decision_pages(tmp / "lib-v1.0.0")
+            target = tmp / "target"
+            init_result = _run_init(v100, target)
+            self.assertEqual(init_result.returncode, 0,
+                             init_result.stdout + init_result.stderr)
+            self.assertFalse((target / "scripts" / "decision_lint.py").exists())
+            v110 = _make_library(tmp / "lib-v1.1.0", "1.1.0")
+
+            result = _run_upgrade(target, "--to", "v1.1.0", "--apply",
+                                  "--library-path", str(v110))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            self.assertEqual((target / "scripts" / "decision_lint.py").read_bytes(),
+                             (ROOT / "scripts" / "decision_lint.py").read_bytes())
+            manifest = json.loads((target / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["files"]["scripts/decision_lint.py"]["role"], "managed")
+            wiki_rules = (target / "wiki" / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn("kind: decision", wiki_rules)
+            self.assertIn("## Decisions", (target / "AGENTS.md").read_text(encoding="utf-8"))
+            lint_result = subprocess.run(
+                [sys.executable, str(target / "scripts" / "lint.py"), "--root", str(target)],
+                capture_output=True, text=True, timeout=120)
+            self.assertEqual(lint_result.returncode, 0,
+                             lint_result.stdout + lint_result.stderr)
+
+
 class TestDowngradeGuard(unittest.TestCase):
     """T17: `--to` older than the manifest's current harness_version is
     refused (exit 2) unless --allow-downgrade is passed -- one guard on top

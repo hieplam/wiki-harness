@@ -21,9 +21,9 @@ write into that folder — never infer a convention from existing files.
 | `sources/cards/` | One markdown card per source (envelope + claims) | Mutable — claims/topics may improve | [sources/cards/AGENTS.md](./sources/cards/AGENTS.md) |
 | `sources/cards/card-schema.json` | The ONLY definition of card frontmatter keys | Mutable, but only under a `schema:` commit | [sources/cards/AGENTS.md](./sources/cards/AGENTS.md) |
 | `VISION.md` | Deferred work, each item with a status | Updated whenever something is postponed | this file |
-| `wiki/` | Knowledge pages, FLAT (no subfolders yet) | Mutable, fully agent-maintained | [wiki/AGENTS.md](./wiki/AGENTS.md) |
+| `wiki/` | Knowledge pages and decision pages, FLAT (no subfolders yet) | Mutable, fully agent-maintained | [wiki/AGENTS.md](./wiki/AGENTS.md) |
 | `gaps/` | Ledger of questions this wiki could not answer | Ledger is **append-only**; view is generated | [gaps/AGENTS.md](./gaps/AGENTS.md) |
-| `index.md` | Catalog: every wiki page, grouped by topic | Updated on every ingest | this file |
+| `index.md` | Catalog: every wiki page, grouped by topic; every decision under `## Decisions` | Updated on every ingest | this file |
 | `scripts/lint.py` | Mechanical lint | Run after every operation | this file |
 | `.githooks/` | Commit-format hook | One-time setup: `git config core.hooksPath .githooks` | this file |
 
@@ -83,8 +83,10 @@ Never use `--no-verify`. History queries: `git log --oneline --grep='^ingest'`.
 2. **Card** — one card per source → [sources/cards/AGENTS.md](./sources/cards/AGENTS.md),
    which also holds the per-origin recipe for what to extract as claims.
 3. **File claims** — update or create the `wiki/` page(s) each claim belongs to, and cite the
-   card → [wiki/AGENTS.md](./wiki/AGENTS.md).
-4. **Index** — add/update the page's line in `index.md`, grouped under a `##` topic.
+   card → [wiki/AGENTS.md](./wiki/AGENTS.md). A decision, a lesson learnt, or the fix an
+   incident produced goes to a **decision page** (`kind: decision`), one page per decision.
+4. **Index** — add/update the page's line in `index.md`, grouped under a `##` topic. A decision
+   page also gets a line under `## Decisions`, with its status.
 5. **Lint** — `python3 scripts/lint.py` → must exit 0.
 6. **Semantic check (incremental)** — re-read ONLY the pages you touched. Does any new claim
    contradict what the page already said? If yes: resolve by trust+date if clear, else add to
@@ -93,7 +95,8 @@ Never use `--no-verify`. History queries: `git log --oneline --grep='^ingest'`.
 
 ## Workflow: Query
 
-1. Read `index.md` → open the relevant `wiki/` pages.
+1. Read `index.md` → open the relevant `wiki/` pages. For "why is it like this?", start at
+   `## Decisions`: it lists every decision and whether it still holds.
 2. Answer citing cards by relative link to `sources/cards/`; follow a card's `raw:` pointer
    only when the card lacks the detail you need.
 3. If the answer produced durable NEW synthesis, offer to file it back — that is just an
@@ -126,7 +129,7 @@ Filling a gap is an ordinary `ingest`. Afterwards, close the loop:
 ## Workflow: Lint
 
 - Mechanical: `python3 scripts/lint.py` (broken links, orphans, citations, card and page
-  frontmatter, index sync, raw immutability). Exit 0 required before any commit, and
+  frontmatter, decision pages, index sync, raw immutability). Exit 0 required before any commit, and
   `.githooks/pre-commit` enforces that rather than trusting anyone to run it.
 - Cards only, for a fast single-file check: `python3 scripts/card_frontmatter_lint.py <file>`.
 - Tests for the linter itself live only in `wiki-harness`'s own checkout — not here.

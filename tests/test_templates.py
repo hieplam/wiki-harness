@@ -100,11 +100,12 @@ class SourceCardsAgentsRecipesSplit(unittest.TestCase):
     PER_ORIGIN_TABLE = (
         "| origin | extract |\n"
         "|---|---|\n"
-        "| `session` | Verified findings, decisions made, gotchas discovered |\n"
+        "| `session` | Verified findings, decisions made, lessons learnt, gotchas discovered |\n"
         "| `transcript` | Speakers/personas, decisions + owners, commitments |\n"
         "| `jira` | Problem → root cause → fix → affected services |\n"
         "| `slack` | The question + the tribal answer |\n"
-        "| `confluence` / `research` | Concepts, definitions, procedures |"
+        "| `confluence` / `research` | Concepts, definitions, procedures |\n"
+        "| `adr` | Context, decision, rejected options, consequences, status, supersedes |"
     )
 
     def test_split_files_produce_zero_link_findings(self):
@@ -247,6 +248,85 @@ class RootTemplateDocumentsGaps(unittest.TestCase):
 
     def test_names_the_gap_commit_op(self):
         self.assertIn("`gap`", self.text)
+
+
+def _section(text, heading):
+    """The text from the `## <heading>` line to the next `## ` line."""
+    start = text.index(f"## {heading}")
+    end = text.find("\n## ", start + 1)
+    return text[start:] if end == -1 else text[start:end]
+
+
+class WikiTemplateDocumentsDecisionPages(unittest.TestCase):
+    def setUp(self):
+        self.text = (TEMPLATE_ROOT / "wiki.AGENTS.md").read_text(encoding="utf-8")
+
+    def test_names_the_opt_in_key_and_every_status(self):
+        for needle in ("kind: decision", "`proposed`", "`decided`", "`superseded`",
+                       "`supersedes`", "`superseded_by`"):
+            self.assertIn(needle, self.text)
+
+    def test_names_the_four_required_sections(self):
+        for section in ("## Context", "## Decision", "## Rejected options",
+                        "## Consequences"):
+            self.assertIn(section, self.text)
+
+    def test_names_the_index_section_and_the_finding_code(self):
+        self.assertIn("## Decisions", self.text)
+        self.assertIn("`DECISION`", self.text)
+
+    def test_says_when_to_write_one(self):
+        lowered = self.text.lower()
+        for trigger in ("incident", "lesson learnt", "never written down"):
+            self.assertIn(trigger, lowered)
+
+    def test_import_section_names_the_adr_origin_and_schema_commit(self):
+        section = _section(self.text, "Importing an ADR")
+        self.assertIn("origin: adr", section)
+        self.assertIn("`schema:`", section)
+        self.assertIn("sources/raw/", section)
+
+    def test_no_longer_says_no_optional_keys_exist(self):
+        self.assertNotIn("No optional keys are defined for wiki pages yet.", self.text)
+
+    def test_worked_example_passes_the_decision_check(self):
+        import decision_lint
+        import lint
+        blocks = re.findall(r"```markdown\n(.*?)```", self.text, re.DOTALL)
+        examples = [b for b in blocks if "kind: decision" in b]
+        self.assertEqual(len(examples), 1, "expected one decision page example")
+        meta, errors = parse_frontmatter(examples[0])
+        self.assertEqual(errors, [])
+        name = "worked-example"
+        files = {f"wiki/{name}.md": examples[0],
+                 "index.md": (f"## Decisions\n\n- [x](./wiki/{name}.md) — "
+                              f"{meta['status']}\n")}
+        self.assertEqual(decision_lint.check_decisions(
+            files, lint._wiki_pages(files), lint._strip_code, extract_links), [])
+
+
+class RootTemplateDocumentsDecisionPages(unittest.TestCase):
+    def setUp(self):
+        self.text = (TEMPLATE_ROOT / "AGENTS.root.md.tmpl").read_text(encoding="utf-8")
+
+    def test_ingest_files_decisions_into_decision_pages(self):
+        ingest = _section(self.text, "Workflow: Ingest")
+        self.assertIn("decision page", ingest)
+        self.assertIn("## Decisions", ingest)
+
+    def test_query_starts_at_the_decisions_section(self):
+        self.assertIn("## Decisions", _section(self.text, "Workflow: Query"))
+
+
+class SeededTemplatesNameDecisionPages(unittest.TestCase):
+    def test_recipes_file_decisions_into_decision_pages(self):
+        text = RECIPES_TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn("decision page", text)
+        self.assertNotIn("never invent its own wiki-page shape", text)
+
+    def test_index_header_names_the_decisions_section(self):
+        text = (TEMPLATE_ROOT / "index.md.header.tmpl").read_text(encoding="utf-8")
+        self.assertIn("## Decisions", text)
 
 
 if __name__ == "__main__":
