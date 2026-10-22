@@ -352,5 +352,121 @@ class Replacement(unittest.TestCase):
             "a", "supersedes chain loops back to this page: a -> a")])
 
 
+def index(*decision_lines, extra=""):
+    return ("# Index\n\n## widgets\n\n- [d](./wiki/d.md) — a page\n\n"
+            "## Decisions\n\n" + "\n".join(decision_lines) + "\n" + extra)
+
+
+class IndexSection(unittest.TestCase):
+    def test_no_decision_pages_no_section_needed(self):
+        files = wiki({"plain": page()}, index="# Index\n\n- [p](./wiki/plain.md)\n")
+        self.assertEqual(run(files), [])
+
+    def test_missing_section(self):
+        files = wiki({"d": decision(status="decided")},
+                     index="# Index\n\n## widgets\n\n- [d](./wiki/d.md) — decided\n")
+        self.assertEqual(run(files), [err(
+            "index.md", "no '## Decisions' section, but decision pages exist")])
+
+    def test_page_not_listed(self):
+        files = wiki({"d": decision(status="decided"), "e": decision(status="decided")},
+                     index=index("- [d](./wiki/d.md) — decided"))
+        self.assertEqual(run(files), [err(
+            "index.md", "decision page not listed under '## Decisions': wiki/e.md")])
+
+    def test_line_without_the_status(self):
+        files = wiki({"d": decision(status="decided")},
+                     index=index("- [d](./wiki/d.md) — batch size and why"))
+        self.assertEqual(run(files), [err(
+            "index.md", "'## Decisions' lists wiki/d.md without its status 'decided'")])
+
+    def test_entry_that_is_not_a_decision_page(self):
+        files = wiki({"d": decision(status="decided"), "plain": page()},
+                     index=index("- [d](./wiki/d.md) — decided",
+                                 "- [p](./wiki/plain.md) — decided"))
+        self.assertEqual(run(files), [err(
+            "index.md", "'## Decisions' lists wiki/plain.md, which is not a decision page")])
+
+    def test_entry_for_a_missing_page_is_left_to_index_check(self):
+        files = wiki({"d": decision(status="decided")},
+                     index=index("- [d](./wiki/d.md) — decided",
+                                 "- [g](./wiki/ghost.md) — decided"))
+        self.assertEqual(run(files), [])
+
+    def test_status_word_is_case_insensitive(self):
+        files = wiki({"d": decision(status="decided")},
+                     index=index("- [d](./wiki/d.md) — Decided 2024-03-01"))
+        self.assertEqual(run(files), [])
+
+    def test_status_in_code_span_counts(self):
+        files = wiki({"d": decision(status="decided")},
+                     index=index("- [d](./wiki/d.md) — `decided`"))
+        self.assertEqual(run(files), [])
+
+    def test_status_inside_link_text_does_not_count(self):
+        files = wiki({"d": decision(status="proposed")},
+                     index=index("- [What we proposed](./wiki/d.md) — soon"))
+        self.assertEqual(run(files), [err(
+            "index.md", "'## Decisions' lists wiki/d.md without its status 'proposed'")])
+
+    def test_status_inside_link_target_does_not_count(self):
+        files = wiki({"decided-widgets": decision(status="decided")},
+                     index=index("- [Widgets](./wiki/decided-widgets.md) — size"))
+        self.assertEqual(run(files), [err(
+            "index.md", "'## Decisions' lists wiki/decided-widgets.md without "
+                        "its status 'decided'")])
+
+    def test_second_link_on_a_line_is_a_reference(self):
+        pages = {"new": decision(status="decided", supersedes="old"),
+                 "old": decision(status="superseded", superseded_by="new")}
+        line = "- [old](./wiki/old.md) — superseded by [new](./wiki/new.md)"
+        self.assertEqual(run(wiki(pages, index=index(line))), [err(
+            "index.md", "decision page not listed under '## Decisions': wiki/new.md")])
+        both = index(line, "- [new](./wiki/new.md) — decided")
+        self.assertEqual(run(wiki(pages, index=both)), [])
+
+    def test_section_ends_at_the_next_level_two_heading(self):
+        files = wiki({"d": decision(status="decided")},
+                     index=index(extra="\n## later\n\n- [d](./wiki/d.md) — decided\n"))
+        self.assertEqual(run(files), [err(
+            "index.md", "decision page not listed under '## Decisions': wiki/d.md")])
+
+    def test_entry_inside_a_fence_does_not_count(self):
+        files = wiki({"d": decision(status="decided")},
+                     index=index("```", "- [d](./wiki/d.md) — decided", "```"))
+        self.assertEqual(run(files), [err(
+            "index.md", "decision page not listed under '## Decisions': wiki/d.md")])
+
+    def test_heading_case_and_closing_hashes(self):
+        text = "# Index\n\n## decisions ##\n\n- [d](./wiki/d.md) — decided\n"
+        self.assertEqual(run(wiki({"d": decision(status="decided")}, index=text)), [])
+
+    def test_two_decisions_sections_are_one_list(self):
+        text = ("# Index\n\n## Decisions\n\n- [d](./wiki/d.md) — decided\n\n"
+                "## widgets\n\n## Decisions\n\n- [e](./wiki/e.md) — proposed\n")
+        files = wiki({"d": decision(status="decided"), "e": decision(status="proposed")},
+                     index=text)
+        self.assertEqual(run(files), [])
+
+    def test_indented_list_line(self):
+        files = wiki({"d": decision(status="decided")},
+                     index=index("  - [d](./wiki/d.md) — decided"))
+        self.assertEqual(run(files), [])
+
+    def test_crlf_index(self):
+        text = index("- [d](./wiki/d.md) — decided").replace("\n", "\r\n")
+        self.assertEqual(run(wiki({"d": decision(status="decided")}, index=text)), [])
+
+    def test_invalid_status_skips_the_status_word_check(self):
+        files = wiki({"d": decision(status="done")},
+                     index=index("- [d](./wiki/d.md) — finished"))
+        self.assertEqual(run(files), [err(
+            "d", "status 'done' is not one of: proposed, decided, superseded")])
+
+    def test_missing_index_is_left_to_index_check(self):
+        files = {"wiki/d.md": decision(status="decided")}
+        self.assertEqual(run(files), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,8 @@
 """Decision page lint: the checks for wiki pages that opt in with
 `kind: decision` -- their status and date, their four required sections,
 and the `supersedes` / `superseded_by` links between them, which must name
-each other and must not loop.
+each other and must not loop -- and the `## Decisions` section of index.md,
+which lists every decision page with its status.
 
 A page without `kind: decision` is never judged here, whatever other keys
 it carries: a wiki that uses `kind`, `status` or `supersedes` for its own
@@ -15,7 +16,8 @@ parser in the harness instead of two.
 
 Pure, every function: check_decisions(), decision_pages(), opts_in(),
 link_values(), shown(), section_names(), page_findings(),
-link_findings(), valid_status(), loop_path(), replacement_findings().
+link_findings(), valid_status(), loop_path(), replacement_findings(),
+decisions_entries(), states_status(), index_findings().
 There are no impure edges.
 
 Python 3 stdlib only.
@@ -26,7 +28,7 @@ import re
 from collections import namedtuple
 from pathlib import PurePosixPath
 
-from card_frontmatter_lint import Finding, parse_frontmatter
+from card_frontmatter_lint import Finding, parse_frontmatter, resolve
 
 CODE = "DECISION"
 DECISION_STATUSES = ("proposed", "decided", "superseded")
@@ -36,6 +38,11 @@ DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # A level-2 ATX heading: exactly two '#', then its text, then optional
 # closing '#'s. '### x' is level 3 and does not match.
 H2_RE = re.compile(r"^##(?!#)[ \t]+(.*?)[ \t]*#*[ \t]*$")
+# A level-1 or level-2 heading: where a `## Decisions` section ends.
+SECTION_END_RE = re.compile(r"^#{1,2}(?!#)(?:[ \t]|$)")
+# A whole inline link, text and target, removed before the status word is
+# searched -- a title or a file name that contains "decided" says nothing.
+INLINE_LINK_RE = re.compile(r"\[[^\]]*\]\([^)]*\)")
 
 DecisionPage = namedtuple("DecisionPage", "path name meta text")
 
@@ -226,6 +233,81 @@ def replacement_findings(decisions, links):
     return findings
 
 
+def decisions_entries(index, strip_code, extract_links):
+    """Pure. (has_section, entries) for index.md's `## Decisions` sections.
+
+    A section opens at a level-2 heading whose text is "Decisions" (any
+    case) and runs to the next level-1 or level-2 heading; two such
+    sections read as one list. Each line's FIRST link, resolved from
+    index.md, is that line's entry -- later links are references, such as
+    the page a superseded decision points to. `entries` pairs each entry
+    with its original line, because strip_code() also blanks inline code
+    spans and a status may be written as `decided`. Headings and links are
+    read from the stripped text, so nothing inside a fence counts."""
+    stripped = strip_code(index).split("\n")
+    original = index.split("\n")
+    has_section = False
+    in_section = False
+    entries = []
+    for plain, line in zip(stripped, original):
+        plain = plain.rstrip("\r")
+        heading = H2_RE.match(plain)
+        if heading and " ".join(heading.group(1).split()).casefold() == "decisions":
+            has_section = in_section = True
+            continue
+        if SECTION_END_RE.match(plain):
+            in_section = False
+            continue
+        if in_section:
+            targets = extract_links(plain)
+            if targets:
+                entries.append((resolve("index.md", targets[0]), line))
+    return has_section, entries
+
+
+def states_status(line, status):
+    """Pure. True when `status` appears on the index line as a whole word,
+    in any case, outside the text and target of every link."""
+    rest = INLINE_LINK_RE.sub(" ", line)
+    return re.search(rf"\b{status}\b", rest, re.IGNORECASE) is not None
+
+
+def index_findings(files, decisions, strip_code, extract_links):
+    """Pure. The index.md rows of the spec. A missing index.md, and an
+    entry that points at a file that does not exist, are lint.py's INDEX
+    findings already, so they are not repeated here."""
+    index = files.get("index.md")
+    if index is None or not decisions:
+        return []
+
+    def finding(message):
+        return Finding("ERROR", CODE, "index.md", message)
+
+    has_section, entries = decisions_entries(index, strip_code, extract_links)
+    if not has_section:
+        return [finding("no '## Decisions' section, but decision pages exist")]
+    by_path = {page.path: page for page in decisions.values()}
+    findings = []
+    listed = set()
+    for target, line in entries:
+        if target not in files:
+            continue
+        page = by_path.get(target)
+        if page is None:
+            findings.append(finding(
+                f"'## Decisions' lists {target}, which is not a decision page"))
+            continue
+        listed.add(target)
+        status = valid_status(page.meta)
+        if status is not None and not states_status(line, status):
+            findings.append(finding(
+                f"'## Decisions' lists {target} without its status '{status}'"))
+    for path in sorted(set(by_path) - listed):
+        findings.append(finding(
+            f"decision page not listed under '## Decisions': {path}"))
+    return findings
+
+
 def check_decisions(files, pages, strip_code, extract_links):
     """Pure. Every DECISION finding for the wiki in `files`.
 
@@ -244,4 +326,5 @@ def check_decisions(files, pages, strip_code, extract_links):
             findings += key_findings
             links[name][key] = valid
     findings += replacement_findings(decisions, links)
+    findings += index_findings(files, decisions, strip_code, extract_links)
     return findings
