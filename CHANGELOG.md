@@ -14,6 +14,13 @@ MAJOR), and anything a consumer must act on before running `upgrade` belongs in 
 Entries up to and including v1.2.0 were hand-written under the older §8, which required an
 explicit release type and a prose **Compatibility** field. They are kept exactly as published.
 
+## [1.5.0](https://github.com/hieplam/wiki-harness/compare/v1.4.1...v1.5.0) (2026-10-22)
+
+
+### Features
+
+* **wiki:** add decision pages with status and supersedes checks ([#52](https://github.com/hieplam/wiki-harness/issues/52)) ([f7f483c](https://github.com/hieplam/wiki-harness/commit/f7f483c1f6c438de9ba6926b6c244770aabe81f7))
+
 ## [1.4.1](https://github.com/hieplam/wiki-harness/compare/v1.4.0...v1.4.1) (2026-10-04)
 
 
