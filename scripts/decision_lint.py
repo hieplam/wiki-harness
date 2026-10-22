@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Decision page lint: the checks for wiki pages that opt in with
 `kind: decision` -- their status and date, their four required sections,
-and the `supersedes` / `superseded_by` links between them.
+and the `supersedes` / `superseded_by` links between them, which must name
+each other and must not loop.
 
 A page without `kind: decision` is never judged here, whatever other keys
 it carries: a wiki that uses `kind`, `status` or `supersedes` for its own
@@ -14,7 +15,8 @@ parser in the harness instead of two.
 
 Pure, every function: check_decisions(), decision_pages(), opts_in(),
 link_values(), shown(), section_names(), page_findings(),
-link_findings(). There are no impure edges.
+link_findings(), valid_status(), loop_path(), replacement_findings().
+There are no impure edges.
 
 Python 3 stdlib only.
 """
@@ -141,6 +143,89 @@ def link_findings(page, key, files, decisions):
     return findings, valid
 
 
+def valid_status(meta):
+    """Pure. The page's status when it is one of DECISION_STATUSES, else
+    None. A page with no valid status gets only its status finding; the
+    replacement checks skip it."""
+    status = meta.get("status", "")
+    return status if status in DECISION_STATUSES else None
+
+
+def loop_path(start, links):
+    """Pure. The first path that follows `superseded_by` from `start` back
+    to `start` (['a', 'b', 'a'], or ['a', 'a'] for a page that names
+    itself), or None. Neighbours are walked in sorted order, so the same
+    wiki always reports the same path. Iterative, so a long chain cannot
+    exhaust Python's recursion limit inside a commit hook."""
+    stack = [(start, [start])]
+    seen = {start}
+    while stack:
+        name, path = stack.pop()
+        for nxt in sorted(links.get(name, {}).get("superseded_by", []), reverse=True):
+            if nxt == start:
+                return path + [start]
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append((nxt, path + [nxt]))
+    return None
+
+
+def replacement_findings(decisions, links):
+    """Pure. Rows R1-R3, P1-P3 and C1 of the spec. `links[name][key]` holds
+    only the values that passed link_findings().
+
+    Only a `decided` or `superseded` page replaces another: a `proposed`
+    page's `supersedes` is an intent, and the old page stays as it is.
+    "superseded_by is empty" (R1, R2, P1) judges the key as written, so a
+    refused value is not reported a second time as a missing one."""
+    statuses = {name: valid_status(page.meta) for name, page in decisions.items()}
+    replacers = {}
+    for name in sorted(decisions):
+        if statuses[name] in ("decided", "superseded"):
+            for old in links[name]["supersedes"]:
+                replacers.setdefault(old, []).append(name)
+    findings = []
+    for name in sorted(decisions):
+        status = statuses[name]
+        if status is None:
+            continue
+        path = decisions[name].path
+        is_superseded = status == "superseded"
+        has_written_successor = bool(link_values(decisions[name].meta, "superseded_by"))
+        successors = links[name]["superseded_by"]
+
+        def report(on_path, message):
+            findings.append(Finding("ERROR", CODE, on_path, message))
+
+        if is_superseded and not has_written_successor:
+            report(path, "status is 'superseded', but superseded_by is missing")
+        if not is_superseded and has_written_successor:
+            report(path, f"superseded_by is set, but status is '{status}', "
+                         "not 'superseded'")
+        if is_superseded:
+            for successor in successors:
+                if statuses[successor] == "proposed":
+                    report(path, f"superseded_by names '{successor}', but "
+                                 f"wiki/{successor}.md is still 'proposed'")
+                elif (statuses[successor] is not None
+                      and name not in links[successor]["supersedes"]):
+                    report(decisions[successor].path,
+                           f"wiki/{name}.md is superseded_by '{successor}', "
+                           f"but supersedes here does not name '{name}'")
+        for replacer in replacers.get(name, []):
+            if not is_superseded and not has_written_successor:
+                report(path, f"wiki/{replacer}.md supersedes this page, but "
+                             f"status is '{status}' and superseded_by is missing")
+            elif is_superseded and successors and replacer not in successors:
+                report(path, f"wiki/{replacer}.md supersedes this page, but "
+                             f"superseded_by does not name '{replacer}'")
+        loop = loop_path(name, links)
+        if loop:
+            report(path, "supersedes chain loops back to this page: "
+                         + " -> ".join(loop))
+    return findings
+
+
 def check_decisions(files, pages, strip_code, extract_links):
     """Pure. Every DECISION finding for the wiki in `files`.
 
@@ -149,9 +234,14 @@ def check_decisions(files, pages, strip_code, extract_links):
     `extract_links` returns the link targets of a text."""
     decisions = decision_pages(files, pages)
     findings = []
+    links = {}
     for name in sorted(decisions):
         page = decisions[name]
         findings += page_findings(page, strip_code)
+        links[name] = {}
         for key in LINK_KEYS:
-            findings += link_findings(page, key, files, decisions)[0]
+            key_findings, valid = link_findings(page, key, files, decisions)
+            findings += key_findings
+            links[name][key] = valid
+    findings += replacement_findings(decisions, links)
     return findings

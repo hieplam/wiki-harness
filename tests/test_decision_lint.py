@@ -213,5 +213,144 @@ class LinkValues(unittest.TestCase):
             "old", "superseded_by names 'plain', but wiki/plain.md is not a decision page")])
 
 
+class Replacement(unittest.TestCase):
+    """`new` replaces `old`. Each test asserts the complete finding list,
+    so a second finding for the same mistake fails it."""
+
+    def test_consistent_pair_no_findings(self):
+        files = wiki({
+            "new": decision(status="decided", supersedes="old"),
+            "old": decision(status="superseded", superseded_by="new"),
+        })
+        self.assertEqual(run(files), [])
+
+    def test_superseded_page_still_counts_as_a_replacement(self):
+        files = wiki({
+            "newest": decision(status="decided", supersedes="mid"),
+            "mid": decision(status="superseded", superseded_by="newest",
+                            supersedes="old"),
+            "old": decision(status="superseded", superseded_by="mid"),
+        })
+        self.assertEqual(run(files), [])
+
+    def test_r1_superseded_without_superseded_by(self):
+        files = wiki({"old": decision(status="superseded")})
+        self.assertEqual(run(files), [err(
+            "old", "status is 'superseded', but superseded_by is missing")])
+
+    def test_r1_alone_when_a_replacement_exists(self):
+        files = wiki({
+            "new": decision(status="decided", supersedes="old"),
+            "old": decision(status="superseded"),
+        })
+        self.assertEqual(run(files), [err(
+            "old", "status is 'superseded', but superseded_by is missing")])
+
+    def test_r2_superseded_by_on_a_decided_page(self):
+        files = wiki({
+            "new": decision(status="decided", supersedes="old"),
+            "old": decision(status="decided", superseded_by="new"),
+        })
+        self.assertEqual(run(files), [err(
+            "old", "superseded_by is set, but status is 'decided', not 'superseded'")])
+
+    def test_r3_superseded_by_a_proposal(self):
+        files = wiki({
+            "new": decision(status="proposed", supersedes="old"),
+            "old": decision(status="superseded", superseded_by="new"),
+        })
+        self.assertEqual(run(files), [err(
+            "old", "superseded_by names 'new', but wiki/new.md is still 'proposed'")])
+
+    def test_p1_replaced_page_not_marked(self):
+        files = wiki({
+            "new": decision(status="decided", supersedes="old"),
+            "old": decision(status="decided"),
+        })
+        self.assertEqual(run(files), [err(
+            "old", "wiki/new.md supersedes this page, but status is 'decided' "
+                   "and superseded_by is missing")])
+
+    def test_p2_superseded_by_does_not_name_a_replacement(self):
+        files = wiki({
+            "new": decision(status="decided", supersedes="old"),
+            "other": decision(status="decided", supersedes="old"),
+            "old": decision(status="superseded", superseded_by="other"),
+        })
+        self.assertEqual(run(files), [err(
+            "old", "wiki/new.md supersedes this page, but superseded_by "
+                   "does not name 'new'")])
+
+    def test_p3_named_replacement_does_not_name_back(self):
+        files = wiki({
+            "new": decision(status="decided"),
+            "old": decision(status="superseded", superseded_by="new"),
+        })
+        self.assertEqual(run(files), [err(
+            "new", "wiki/old.md is superseded_by 'new', but supersedes here "
+                   "does not name 'old'")])
+
+    def test_wrong_name_reported_on_both_pages(self):
+        files = wiki({
+            "new": decision(status="decided", supersedes="old"),
+            "other": decision(status="decided"),
+            "old": decision(status="superseded", superseded_by="other"),
+        })
+        self.assertEqual(run(files), sorted([
+            err("old", "wiki/new.md supersedes this page, but superseded_by "
+                       "does not name 'new'"),
+            err("other", "wiki/old.md is superseded_by 'other', but supersedes "
+                         "here does not name 'old'"),
+        ]))
+
+    def test_proposed_supersedes_leaves_old_page_untouched(self):
+        files = wiki({
+            "new": decision(status="proposed", supersedes="old"),
+            "old": decision(status="decided"),
+        })
+        self.assertEqual(run(files), [])
+
+    def test_invalid_status_gives_only_its_status_finding(self):
+        files = wiki({
+            "new": decision(status="decided", supersedes="old"),
+            "old": decision(status="done"),
+        })
+        self.assertEqual(run(files), [err(
+            "old", "status 'done' is not one of: proposed, decided, superseded")])
+
+    def test_refused_value_takes_no_part(self):
+        files = wiki({
+            "new": decision(status="decided", supersedes="old"),
+            "old": decision(status="superseded", superseded_by="./new.md"),
+        })
+        self.assertEqual(run(files), [err(
+            "old", "superseded_by value './new.md' is not a page name; write 'new'")])
+
+    def test_duplicate_values_give_one_finding(self):
+        files = wiki({
+            "new": decision(status="decided", supersedes="[old, old]"),
+            "old": decision(status="decided"),
+        })
+        self.assertEqual(run(files), [err(
+            "old", "wiki/new.md supersedes this page, but status is 'decided' "
+                   "and superseded_by is missing")])
+
+    def test_c1_two_page_loop(self):
+        files = wiki({
+            "a": decision(status="superseded", superseded_by="b", supersedes="b"),
+            "b": decision(status="superseded", superseded_by="a", supersedes="a"),
+        })
+        self.assertEqual(run(files), [
+            err("a", "supersedes chain loops back to this page: a -> b -> a"),
+            err("b", "supersedes chain loops back to this page: b -> a -> b"),
+        ])
+
+    def test_c1_self_loop(self):
+        files = wiki({"a": decision(status="superseded", superseded_by="a",
+                                    supersedes="a")})
+        self.assertEqual(run(files), [err(
+            "a", "supersedes chain loops back to this page: a -> a")])
+
+
 if __name__ == "__main__":
     unittest.main()
